@@ -11,6 +11,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 from dotenv import load_dotenv
 from flask import Flask
+from supabase import create_client
 
 # ─────────────────────────────
 # LOAD TOKEN
@@ -69,8 +70,6 @@ if not SUPABASE_URL:
 
 if not SUPABASE_KEY:
     raise RuntimeError("SUPABASE_KEY is missing.")
-
-from supabase import create_client
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -222,33 +221,56 @@ DEFAULT_DATA = {
 }
 
 
+def fresh_default_data():
+    return {
+        "cats": {},
+        "moon": 4,
+        "last_moon_month": None,
+        "season": "Newleaf",
+        "last_weather_week": None,
+        "used_prophecies": []
+    }
+
+
 def load_data():
-    if not os.path.exists(DATA_FILE):
-        return DEFAULT_DATA.copy()
-
     try:
-        with open(DATA_FILE, "r", encoding="utf-8") as file:
-            loaded = json.load(file)
-    except json.JSONDecodeError:
-        backup_name = f"data_broken_{datetime.now(TZ).strftime('%Y%m%d_%H%M%S')}.json"
-        os.rename(DATA_FILE, backup_name)
-        print(f"data.json was broken. Backed up as {backup_name} and created a fresh file.")
-        return DEFAULT_DATA.copy()
-    except Exception as error:
-        print(f"Could not load data.json: {error}")
-        return DEFAULT_DATA.copy()
+        response = (
+            supabase.table("bot_data")
+            .select("data")
+            .eq("id", DATA_ROW_ID)
+            .limit(1)
+            .execute()
+        )
 
-    for key, value in DEFAULT_DATA.items():
-        loaded.setdefault(key, value.copy() if isinstance(value, dict) else value)
+        if response.data:
+            loaded = response.data[0]["data"]
+        else:
+            loaded = fresh_default_data()
+            save_data(loaded)
+
+    except Exception as error:
+        print(f"Could not load Supabase data: {error}")
+        loaded = fresh_default_data()
+
+    defaults = fresh_default_data()
+    for key, value in defaults.items():
+        loaded.setdefault(key, value)
 
     return loaded
 
 
 def save_data(data_to_save):
-    temp_file = DATA_FILE + ".tmp"
-    with open(temp_file, "w", encoding="utf-8") as file:
-        json.dump(data_to_save, file, indent=4, ensure_ascii=False)
-    os.replace(temp_file, DATA_FILE)
+    try:
+        supabase.table("bot_data").upsert({
+            "id": DATA_ROW_ID,
+            "data": data_to_save
+        }).execute()
+
+        print("Data saved to Supabase successfully.")
+
+    except Exception as error:
+        print(f"Could not save Supabase data: {error}")
+        raise
 
 
 data = load_data()
