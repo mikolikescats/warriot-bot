@@ -812,26 +812,13 @@ WEATHER_BY_SEASON = {
 }
 
 
-def generate_weekly_weather():
-    now = datetime.now(TZ)
-    averages = BANFF_MONTHLY_AVERAGES[now.month]
-    season = data.get("season", get_current_season())
-
-    weather, modifier, reason = random.choice(
-        WEATHER_BY_SEASON.get(season, WEATHER_BY_SEASON["Newleaf"])
-    )
-
-    avg_temp = random.randint(averages["low"], averages["high"])
-    modifier_text = f"+{modifier}" if modifier > 0 else str(modifier)
-
-    return (
-        "🌦️ Weekly Territory Weather Report 🌦️\n\n"
-        f"🍃 Season: {season}\n"
-        f"🌡️ Average Temp: {avg_temp}°C\n"
-        f"☁️ Weekly Weather: {weather}\n"
-        f"🎯 Hunting Modifier: {modifier_text}\n"
-        f"📖 Effect: {reason}"
-    )
+return (
+    f"🍃 Season: {season}\n"
+    f"🌡️ Average Temp: {avg_temp}°C\n"
+    f"☁️ Weekly Weather: {weather}\n"
+    f"🎯 Hunting Modifier: {modifier_text}\n"
+    f"📖 Effect: {reason}"
+)
 
 # ─────────────────────────────
 # READY + ERROR HANDLING
@@ -1160,17 +1147,34 @@ async def weekly_weather_report():
     channel = bot.get_channel(WEATHER_CHANNEL_ID)
     if channel:
         report = generate_weekly_weather()
-        await channel.send(f"<@&{WEATHER_REPORT_ROLE_ID}>\n\n{report}")
+        await channel.send(
+            content=f"<@&{WEATHER_REPORT_ROLE_ID}>",
+            embed=discord.Embed(
+                description=report,
+                color=discord.Color.blue()
+            )
+        )
 
 
 @bot.tree.command(name="weatherreport", description="Generate this week's territory weather report")
 async def weatherreport(interaction: discord.Interaction):
     report = generate_weekly_weather()
-    await interaction.response.send_message(report[:1900])
+
+    await interaction.response.send_message(
+        content=f"<@&{WEATHER_REPORT_ROLE_ID}>",
+        embed=discord.Embed(
+            description=report,
+            color=discord.Color.blue()
+        )
+    )
 
 
 @bot.tree.command(name="setweather", description="Manually set this week's weather report")
-@app_commands.describe(weather="Weather name, example: Heavy rain", modifier="Hunting modifier, example: -2, 0, 1, 2", reason="Why this weather affects hunting")
+@app_commands.describe(
+    weather="Weather name, example: Heavy rain",
+    modifier="Hunting modifier, example: -2, 0, 1, 2",
+    reason="Why this weather affects hunting"
+)
 async def setweather(interaction: discord.Interaction, weather: str, modifier: int, reason: str):
     if not await staff_command_check(interaction):
         return
@@ -1178,7 +1182,6 @@ async def setweather(interaction: discord.Interaction, weather: str, modifier: i
     modifier_text = f"+{modifier}" if modifier > 0 else str(modifier)
 
     report = (
-        "🌦️ Manual Territory Weather Update 🌦️\n\n"
         f"☁️ Weather: {weather}\n"
         f"🎯 Hunting Modifier: {modifier_text}\n"
         f"📖 Effect: {reason}"
@@ -1186,7 +1189,13 @@ async def setweather(interaction: discord.Interaction, weather: str, modifier: i
 
     channel = bot.get_channel(WEATHER_CHANNEL_ID)
     if channel:
-        await channel.send(f"<@&{WEATHER_REPORT_ROLE_ID}>\n\n{report}")
+        await channel.send(
+            content=f"<@&{WEATHER_REPORT_ROLE_ID}>",
+            embed=discord.Embed(
+                description=report,
+                color=discord.Color.blue()
+            )
+        )
 
     await interaction.response.send_message("🌦️ Weather report sent.", ephemeral=True)
 
