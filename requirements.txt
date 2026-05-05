@@ -3,3 +3,4 @@ python-dotenv
 tzdata
 flask
 psycopg2-binary
+supabase
