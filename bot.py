@@ -812,13 +812,25 @@ WEATHER_BY_SEASON = {
 }
 
 
-return (
-    f"🍃 Season: {season}\n"
-    f"🌡️ Average Temp: {avg_temp}°C\n"
-    f"☁️ Weekly Weather: {weather}\n"
-    f"🎯 Hunting Modifier: {modifier_text}\n"
-    f"📖 Effect: {reason}"
-)
+def generate_weekly_weather():
+    now = datetime.now(TZ)
+    averages = BANFF_MONTHLY_AVERAGES[now.month]
+    season = data.get("season", get_current_season())
+
+    weather, modifier, reason = random.choice(
+        WEATHER_BY_SEASON.get(season, WEATHER_BY_SEASON["Newleaf"])
+    )
+
+    avg_temp = random.randint(averages["low"], averages["high"])
+    modifier_text = f"+{modifier}" if modifier > 0 else str(modifier)
+
+    return (
+        f"🍃 Season: {season}\n"
+        f"🌡️ Average Temp: {avg_temp}°C\n"
+        f"☁️ Weekly Weather: {weather}\n"
+        f"🎯 Hunting Modifier: {modifier_text}\n"
+        f"📖 Effect: {reason}"
+    )
 
 # ─────────────────────────────
 # READY + ERROR HANDLING
