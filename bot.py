@@ -1193,29 +1193,46 @@ async def moon(interaction: discord.Interaction):
     )
 
 
-@bot.tree.command(name="clan", description="View one clan roster")
+@bot.tree.command(name="clan", description="View one clan or outsider roster")
 @app_commands.choices(clan=CLAN_CHOICES)
 async def clan(interaction: discord.Interaction, clan: app_commands.Choice[str]):
-    lines = [f"⛺ {clan.value} Roster"]
+
+    selected_clan = clan.value.strip()
+
+    if selected_clan == "Outsider":
+        lines = ["🌫 Outsider Roster"]
+        rank_order = OUTSIDER_RANK_ORDER
+    else:
+        lines = [f"⛺ {selected_clan} Roster"]
+        rank_order = RANK_ORDER
 
     clan_cats = [
         (name, cat) for name, cat in data.get("cats", {}).items()
-        if cat.get("clan") == clan.value and cat.get("status") != "dead"
+        if str(cat.get("clan", "")).strip() == selected_clan
+        and str(cat.get("status", "alive")).lower() != "dead"
     ]
 
     if not clan_cats:
-        await interaction.response.send_message("No cats in this clan.")
+        await interaction.response.send_message(
+            f"No cats found for **{selected_clan}**."
+        )
         return
 
-    for rank in RANK_ORDER:
-        ranked = [(name, cat) for name, cat in clan_cats if cat.get("rank") == rank]
+    for rank in rank_order:
+        ranked = [
+            (name, cat) for name, cat in clan_cats
+            if str(cat.get("rank", "")).strip() == rank
+        ]
+
         if not ranked:
             continue
 
         ranked.sort(key=lambda item: item[1].get("age", 0), reverse=True)
         lines.append(f"\n{rank}:")
+
         for name, cat in ranked:
-            lines.append(f"• {name} — {cat.get('age', 0)} moons")
+            faction = f" | {cat.get('faction')}" if cat.get("faction") else ""
+            lines.append(f"• {name} — {cat.get('age', 0)} moons{faction}")
 
     await interaction.response.send_message("\n".join(lines)[:1900])
 
