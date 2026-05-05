@@ -56,19 +56,25 @@ def keep_alive():
     thread.start()
 
 # ─────────────────────────────
-# FILES + IDS
+# DATABASE + IDS
 # ─────────────────────────────
 
-DATA_FILE = "data.json"
 TZ = ZoneInfo("America/Toronto")
 
-REPORT_CHANNEL_ID = 1500707305631780984
-COMMAND_CHANNEL_ID = 1500705057207746610
-WEATHER_CHANNEL_ID = 1441502516591202394
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-HELPER_ROLE_ID = 1484027097784516668
-MODERATOR_ROLE_ID = 1441506626371715103
-WEATHER_REPORT_ROLE_ID = 1500967820194877490
+if not SUPABASE_URL:
+    raise RuntimeError("SUPABASE_URL is missing.")
+
+if not SUPABASE_KEY:
+    raise RuntimeError("SUPABASE_KEY is missing.")
+
+from supabase import create_client
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+DATA_ROW_ID = "main"
 
 # ─────────────────────────────
 # CLANS, RANKS, AND CHOICES
