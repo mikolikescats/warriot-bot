@@ -7,17 +7,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Shimmersky": {
-            "clan": "FossilClan",
-            "age": 18,
-            "rank": "Warrior",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
         "Iceclaw": {
@@ -41,7 +33,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Leader"
+            ],
             "born_moon": 0
         },
         "Sharktide": {
@@ -51,7 +45,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Deputy"
+            ],
             "born_moon": 0
         },
         "Quiethusk": {
@@ -61,7 +57,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Medicine Cat"
+            ],
             "born_moon": 0
         },
         "Jaegarpaw": {
@@ -71,17 +69,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Dovefern": {
-            "clan": "BlizzardClan",
-            "age": 29,
-            "rank": "Pathfinder",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Medicine Cat Apprentice"
+            ],
             "born_moon": 0
         },
         "Gale": {
@@ -91,77 +81,21 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Pathfinder"
+            ],
             "born_moon": 0
         },
-        "Auroraember": {
+        "Dovefern": {
             "clan": "BlizzardClan",
-            "age": 33,
-            "rank": "Warrior",
+            "age": 29,
+            "rank": "Pathfinder",
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Stiltfur": {
-            "clan": "BlizzardClan",
-            "age": 15,
-            "rank": "Warrior",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Bearhowl": {
-            "clan": "BlizzardClan",
-            "age": 53,
-            "rank": "Warrior",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Snowlurch": {
-            "clan": "BlizzardClan",
-            "age": 54,
-            "rank": "Warrior",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Lilywisp": {
-            "clan": "BlizzardClan",
-            "age": 15,
-            "rank": "Warrior",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Blazeburn": {
-            "clan": "BlizzardClan",
-            "age": 53,
-            "rank": "Warrior",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Coldwing": {
-            "clan": "BlizzardClan",
-            "age": 23,
-            "rank": "Warrior",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Pathfinder"
+            ],
             "born_moon": 0
         },
         "Petrelfeather": {
@@ -171,17 +105,45 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Pathfinder"
+            ],
             "born_moon": 0
         },
-        "Cloudbreeze": {
+        "Snowlurch": {
             "clan": "BlizzardClan",
-            "age": 28,
+            "age": 54,
             "rank": "Warrior",
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Bearhowl": {
+            "clan": "BlizzardClan",
+            "age": 53,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Blazeburn": {
+            "clan": "BlizzardClan",
+            "age": 53,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
         "Kiteweaver": {
@@ -191,17 +153,33 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
-        "Fallingbird": {
+        "Lumberthroat": {
             "clan": "BlizzardClan",
-            "age": 20,
+            "age": 38,
             "rank": "Warrior",
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Auroraember": {
+            "clan": "BlizzardClan",
+            "age": 33,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
         "Silentstalker": {
@@ -211,67 +189,69 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
-        "Coalpaw": {
+        "Cloudbreeze": {
             "clan": "BlizzardClan",
-            "age": 10,
-            "rank": "Apprentice",
+            "age": 28,
+            "rank": "Warrior",
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
-        "Badgerpaw": {
+        "Coldwing": {
             "clan": "BlizzardClan",
-            "age": 10,
-            "rank": "Apprentice",
+            "age": 23,
+            "rank": "Warrior",
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
-        "Mountainpaw": {
+        "Fallingbird": {
             "clan": "BlizzardClan",
-            "age": 10,
-            "rank": "Apprentice",
+            "age": 20,
+            "rank": "Warrior",
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
-        "Buzzardpaw": {
+        "Stiltfur": {
             "clan": "BlizzardClan",
-            "age": 10,
-            "rank": "Apprentice",
+            "age": 15,
+            "rank": "Warrior",
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
-        "Rabbitpaw": {
+        "Lilywisp": {
             "clan": "BlizzardClan",
-            "age": 8,
-            "rank": "Apprentice",
+            "age": 15,
+            "rank": "Warrior",
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Koisong": {
-            "clan": "BlizzardClan",
-            "age": 34,
-            "rank": "Den Dad",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
         "Shiverfrost": {
@@ -281,7 +261,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Queen"
+            ],
             "born_moon": 0
         },
         "Swanthroat": {
@@ -291,27 +273,93 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Queen"
+            ],
             "born_moon": 0
         },
-        "Poppykit": {
+        "Koisong": {
             "clan": "BlizzardClan",
-            "age": 5,
-            "rank": "Kit",
+            "age": 34,
+            "rank": "Den Dad",
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Den Dad"
+            ],
             "born_moon": 0
         },
-        "Stumpykit": {
+        "Coalpaw": {
             "clan": "BlizzardClan",
-            "age": 5,
-            "rank": "Kit",
+            "age": 10,
+            "rank": "Apprentice",
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
+            "born_moon": 0
+        },
+        "Badgerpaw": {
+            "clan": "BlizzardClan",
+            "age": 10,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
+            "born_moon": 0
+        },
+        "Mountainpaw": {
+            "clan": "BlizzardClan",
+            "age": 10,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
+            "born_moon": 0
+        },
+        "Buzzardpaw": {
+            "clan": "BlizzardClan",
+            "age": 10,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
+            "born_moon": 0
+        },
+        "Rabbitpaw": {
+            "clan": "BlizzardClan",
+            "age": 8,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
+            "born_moon": 0
+        },
+        "Flintpaw": {
+            "clan": "BlizzardClan",
+            "age": 7,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
             "born_moon": 0
         },
         "Violetpaw": {
@@ -321,7 +369,381 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
+            "born_moon": 0
+        },
+        "Poppykit": {
+            "clan": "BlizzardClan",
+            "age": 5,
+            "rank": "Kit",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Kit"
+            ],
+            "born_moon": 0
+        },
+        "Stumpykit": {
+            "clan": "BlizzardClan",
+            "age": 5,
+            "rank": "Kit",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Kit"
+            ],
+            "born_moon": 0
+        },
+        "Stormstar": {
+            "clan": "FossilClan",
+            "age": 37,
+            "rank": "Leader",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Leader"
+            ],
+            "born_moon": 0
+        },
+        "Citruszest": {
+            "clan": "FossilClan",
+            "age": 32,
+            "rank": "Deputy",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Deputy"
+            ],
+            "born_moon": 0
+        },
+        "Wrenmoth": {
+            "clan": "FossilClan",
+            "age": 32,
+            "rank": "Medicine Cat",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Medicine Cat"
+            ],
+            "born_moon": 0
+        },
+        "Splattersun": {
+            "clan": "FossilClan",
+            "age": 18,
+            "rank": "Digger",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Digger"
+            ],
+            "born_moon": 0
+        },
+        "Aldermouth": {
+            "clan": "FossilClan",
+            "age": 32,
+            "rank": "Healer",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Healer"
+            ],
+            "born_moon": 0
+        },
+        "Beetleshade": {
+            "clan": "FossilClan",
+            "age": 34,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Goldenmirage": {
+            "clan": "FossilClan",
+            "age": 32,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Ambersight": {
+            "clan": "FossilClan",
+            "age": 45,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Peatbite": {
+            "clan": "FossilClan",
+            "age": 39,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Shimmersky": {
+            "clan": "FossilClan",
+            "age": 17,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Slatedapple": {
+            "clan": "FossilClan",
+            "age": 47,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Cricketspark": {
+            "clan": "FossilClan",
+            "age": 34,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Aspenleap": {
+            "clan": "FossilClan",
+            "age": 19,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Dimpaw": {
+            "clan": "FossilClan",
+            "age": 10,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
+            "born_moon": 0
+        },
+        "Cottonpaw": {
+            "clan": "FossilClan",
+            "age": 10,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
+            "born_moon": 0
+        },
+        "Bramblepaw": {
+            "clan": "FossilClan",
+            "age": 11,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
+            "born_moon": 0
+        },
+        "Flicknose": {
+            "clan": "FossilClan",
+            "age": 12,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Ginsengtail": {
+            "clan": "FossilClan",
+            "age": 27,
+            "rank": "Den Dad",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Den Dad"
+            ],
+            "born_moon": 0
+        },
+        "Sandviper": {
+            "clan": "FossilClan",
+            "age": 49,
+            "rank": "Queen",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Queen"
+            ],
+            "born_moon": 0
+        },
+        "Havenbird": {
+            "clan": "FossilClan",
+            "age": 43,
+            "rank": "Queen",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Queen"
+            ],
+            "born_moon": 0
+        },
+        "Fleckkit": {
+            "clan": "FossilClan",
+            "age": 4,
+            "rank": "Kit",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Kit"
+            ],
+            "born_moon": 0
+        },
+        "Coyotekit": {
+            "clan": "FossilClan",
+            "age": 2,
+            "rank": "Kit",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Kit"
+            ],
+            "born_moon": 0
+        },
+        "Brindlekit": {
+            "clan": "FossilClan",
+            "age": 5,
+            "rank": "Kit",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Kit"
+            ],
+            "born_moon": 0
+        },
+        "Ashenkit": {
+            "clan": "FossilClan",
+            "age": 5,
+            "rank": "Kit",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Kit"
+            ],
+            "born_moon": 0
+        },
+        "Starlingsilver": {
+            "clan": "FossilClan",
+            "age": 20,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Falconcry": {
+            "clan": "FossilClan",
+            "age": 18,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Brightcrest": {
+            "clan": "FossilClan",
+            "age": 34,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Howlpaw": {
+            "clan": "FossilClan",
+            "age": 8,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
+            "born_moon": 0
+        },
+        "Marbletail": {
+            "clan": "FossilClan",
+            "age": 40,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
         "Windstar": {
@@ -331,7 +753,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Leader"
+            ],
             "born_moon": 0
         },
         "Nightingsun": {
@@ -341,7 +765,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Deputy"
+            ],
             "born_moon": 0
         },
         "Squidsong": {
@@ -351,7 +777,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Medicine Cat"
+            ],
             "born_moon": 0
         },
         "Crayfishpaw": {
@@ -361,7 +789,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Medicine Cat Apprentice"
+            ],
             "born_moon": 0
         },
         "Moosejaw": {
@@ -371,87 +801,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Brindleblue": {
-            "clan": "TorrentClan",
-            "age": 27,
-            "rank": "Warrior",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Shrikefang": {
-            "clan": "TorrentClan",
-            "age": 40,
-            "rank": "Warrior",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Edgemoon": {
-            "clan": "TorrentClan",
-            "age": 39,
-            "rank": "Warrior",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Wolfcurrent": {
-            "clan": "TorrentClan",
-            "age": 31,
-            "rank": "Warrior",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Hollyflame": {
-            "clan": "TorrentClan",
-            "age": 39,
-            "rank": "Warrior",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Shellfrost": {
-            "clan": "TorrentClan",
-            "age": 35,
-            "rank": "Warrior",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Baycloud": {
-            "clan": "TorrentClan",
-            "age": 55,
-            "rank": "Warrior",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Minnowswirl": {
-            "clan": "TorrentClan",
-            "age": 37,
-            "rank": "Warrior",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as River Guardian"
+            ],
             "born_moon": 0
         },
         "Lotuscreek": {
@@ -461,127 +813,21 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
-        "Marigoldpaw": {
+        "Baycloud": {
             "clan": "TorrentClan",
-            "age": 11,
-            "rank": "Apprentice",
+            "age": 55,
+            "rank": "Warrior",
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Polarispaw": {
-            "clan": "TorrentClan",
-            "age": 9,
-            "rank": "Apprentice",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Littletooth": {
-            "clan": "TorrentClan",
-            "age": 40,
-            "rank": "Elder",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Tallfern": {
-            "clan": "TorrentClan",
-            "age": 120,
-            "rank": "Elder",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Salamanderstiger": {
-            "clan": "TorrentClan",
-            "age": 75,
-            "rank": "Elder",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Sunnybird": {
-            "clan": "TorrentClan",
-            "age": 98,
-            "rank": "Elder",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Clearpearl": {
-            "clan": "TorrentClan",
-            "age": 41,
-            "rank": "Queen",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Frogmoss": {
-            "clan": "TorrentClan",
-            "age": 60,
-            "rank": "Queen",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Wallowkit": {
-            "clan": "TorrentClan",
-            "age": 2,
-            "rank": "Kit",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Bubblekit": {
-            "clan": "TorrentClan",
-            "age": 2,
-            "rank": "Kit",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Deerkit": {
-            "clan": "TorrentClan",
-            "age": 3,
-            "rank": "Kit",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Chanterellepaw": {
-            "clan": "TorrentClan",
-            "age": 9,
-            "rank": "Apprentice",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
         "Smoketrail": {
@@ -591,17 +837,177 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
-        "Skatepaw": {
+        "Shrikefang": {
             "clan": "TorrentClan",
-            "age": 6,
+            "age": 40,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Edgemoon": {
+            "clan": "TorrentClan",
+            "age": 39,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Hollyflame": {
+            "clan": "TorrentClan",
+            "age": 39,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Minnowswirl": {
+            "clan": "TorrentClan",
+            "age": 37,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Shellfrost": {
+            "clan": "TorrentClan",
+            "age": 35,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Wolfcurrent": {
+            "clan": "TorrentClan",
+            "age": 31,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Brindleblue": {
+            "clan": "TorrentClan",
+            "age": 27,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
+            "born_moon": 0
+        },
+        "Tallfern": {
+            "clan": "TorrentClan",
+            "age": 120,
+            "rank": "Elder",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Elder"
+            ],
+            "born_moon": 0
+        },
+        "Sunnybird": {
+            "clan": "TorrentClan",
+            "age": 98,
+            "rank": "Elder",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Elder"
+            ],
+            "born_moon": 0
+        },
+        "Salamanderstiger": {
+            "clan": "TorrentClan",
+            "age": 75,
+            "rank": "Elder",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Elder"
+            ],
+            "born_moon": 0
+        },
+        "Littletooth": {
+            "clan": "TorrentClan",
+            "age": 40,
+            "rank": "Elder",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Elder"
+            ],
+            "born_moon": 0
+        },
+        "Frogmoss": {
+            "clan": "TorrentClan",
+            "age": 60,
+            "rank": "Queen",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Queen"
+            ],
+            "born_moon": 0
+        },
+        "Clearpearl": {
+            "clan": "TorrentClan",
+            "age": 41,
+            "rank": "Queen",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Queen"
+            ],
+            "born_moon": 0
+        },
+        "Marigoldpaw": {
+            "clan": "TorrentClan",
+            "age": 11,
             "rank": "Apprentice",
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
             "born_moon": 0
         },
         "Cedarpaw": {
@@ -611,7 +1017,45 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
+            "born_moon": 0
+        },
+        "Polarispaw": {
+            "clan": "TorrentClan",
+            "age": 9,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
+            "born_moon": 0
+        },
+        "Chanterellepaw": {
+            "clan": "TorrentClan",
+            "age": 9,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
+            "born_moon": 0
+        },
+        "Skatepaw": {
+            "clan": "TorrentClan",
+            "age": 6,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
             "born_moon": 0
         },
         "Spiderkit": {
@@ -621,27 +1065,45 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Kit"
+            ],
             "born_moon": 0
         },
-        "Bogwhisper": {
+        "Deerkit": {
             "clan": "TorrentClan",
-            "age": 26,
-            "rank": "Sporekeeper",
+            "age": 3,
+            "rank": "Kit",
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Kit"
+            ],
             "born_moon": 0
         },
-        "Hazelheart": {
-            "clan": "SpruceClan",
-            "age": 23,
-            "rank": "Deputy",
+        "Wallowkit": {
+            "clan": "TorrentClan",
+            "age": 2,
+            "rank": "Kit",
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Kit"
+            ],
+            "born_moon": 0
+        },
+        "Bubblekit": {
+            "clan": "TorrentClan",
+            "age": 2,
+            "rank": "Kit",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Kit"
+            ],
             "born_moon": 0
         },
         "Pinestar": {
@@ -651,7 +1113,21 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Leader"
+            ],
+            "born_moon": 0
+        },
+        "Hazelheart": {
+            "clan": "SpruceClan",
+            "age": 23,
+            "rank": "Deputy",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Deputy"
+            ],
             "born_moon": 0
         },
         "Garlicbread": {
@@ -661,7 +1137,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Medicine Cat"
+            ],
             "born_moon": 0
         },
         "Sorrelpaw": {
@@ -671,7 +1149,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Medicine Cat Apprentice"
+            ],
             "born_moon": 0
         },
         "Addervoice": {
@@ -681,7 +1161,21 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Sporekeeper"
+            ],
+            "born_moon": 0
+        },
+        "Bogwhisper": {
+            "clan": "SpruceClan",
+            "age": 26,
+            "rank": "Sporekeeper",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Sporekeeper"
+            ],
             "born_moon": 0
         },
         "Shiitakeglide": {
@@ -691,7 +1185,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Sporekeeper"
+            ],
             "born_moon": 0
         },
         "Frostbelly": {
@@ -701,7 +1197,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Healer"
+            ],
             "born_moon": 0
         },
         "Canyonsong": {
@@ -711,7 +1209,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Preymaster"
+            ],
             "born_moon": 0
         },
         "Flintwalker": {
@@ -721,7 +1221,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
         "Bearecho": {
@@ -731,7 +1233,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
         "Silverthistle": {
@@ -741,7 +1245,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
         "Sequoialake": {
@@ -751,7 +1257,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
         "Jackdawsight": {
@@ -761,7 +1269,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
         "Echoflame": {
@@ -771,7 +1281,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
         "Gracklefoot": {
@@ -781,7 +1293,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
         "Mustangsrampage": {
@@ -791,7 +1305,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
         "Hazespirit": {
@@ -801,7 +1317,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
         "Kalmiasong": {
@@ -811,7 +1329,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Warrior"
+            ],
             "born_moon": 0
         },
         "Leafpaw": {
@@ -821,7 +1341,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
             "born_moon": 0
         },
         "Quickpaw": {
@@ -831,7 +1353,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
             "born_moon": 0
         },
         "Lionpaw": {
@@ -841,7 +1365,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
             "born_moon": 0
         },
         "Lizardpaw": {
@@ -851,7 +1377,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
             "born_moon": 0
         },
         "Cypresspaw": {
@@ -861,57 +1389,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Burntleaf": {
-            "clan": "SpruceClan",
-            "age": 24,
-            "rank": "Queen",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Dahlianose": {
-            "clan": "SpruceClan",
-            "age": 43,
-            "rank": "Queen",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Leopardkit": {
-            "clan": "SpruceClan",
-            "age": 1,
-            "rank": "Kit",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Briarkit": {
-            "clan": "SpruceClan",
-            "age": 1,
-            "rank": "Kit",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
-            "born_moon": 0
-        },
-        "Fennelkit": {
-            "clan": "SpruceClan",
-            "age": 1,
-            "rank": "Kit",
-            "faction": null,
-            "status": "alive",
-            "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
             "born_moon": 0
         },
         "Gustpaw": {
@@ -921,7 +1401,69 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Apprentice"
+            ],
+            "born_moon": 0
+        },
+        "Burntleaf": {
+            "clan": "SpruceClan",
+            "age": 24,
+            "rank": "Queen",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Queen"
+            ],
+            "born_moon": 0
+        },
+        "Dahlianose": {
+            "clan": "SpruceClan",
+            "age": 43,
+            "rank": "Queen",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Queen"
+            ],
+            "born_moon": 0
+        },
+        "Leopardkit": {
+            "clan": "SpruceClan",
+            "age": 1,
+            "rank": "Kit",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Kit"
+            ],
+            "born_moon": 0
+        },
+        "Briarkit": {
+            "clan": "SpruceClan",
+            "age": 1,
+            "rank": "Kit",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Kit"
+            ],
+            "born_moon": 0
+        },
+        "Fennelkit": {
+            "clan": "SpruceClan",
+            "age": 1,
+            "rank": "Kit",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [
+                "Moon 4: Added to records as Kit"
+            ],
             "born_moon": 0
         },
         "Adrenaline": {
@@ -931,7 +1473,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Rogue"
+            ],
             "born_moon": 0
         },
         "Positive": {
@@ -941,7 +1485,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Rogue"
+            ],
             "born_moon": 0
         },
         "Danger": {
@@ -951,7 +1497,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Rogue"
+            ],
             "born_moon": 0
         },
         "Nefera": {
@@ -961,7 +1509,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Rogue"
+            ],
             "born_moon": 0
         },
         "Flea": {
@@ -971,7 +1521,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Rogue"
+            ],
             "born_moon": 0
         },
         "Token": {
@@ -981,7 +1533,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Rogue"
+            ],
             "born_moon": 0
         },
         "Zinnia": {
@@ -991,7 +1545,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Rogue"
+            ],
             "born_moon": 0
         },
         "East": {
@@ -1001,7 +1557,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Rogue"
+            ],
             "born_moon": 0
         },
         "Caesar": {
@@ -1011,7 +1569,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Rogue"
+            ],
             "born_moon": 0
         },
         "Rust": {
@@ -1021,7 +1581,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Rogue"
+            ],
             "born_moon": 0
         },
         "Enoki": {
@@ -1031,7 +1593,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Rogue"
+            ],
             "born_moon": 0
         },
         "Viper": {
@@ -1041,7 +1605,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Rogue"
+            ],
             "born_moon": 0
         },
         "Falcon": {
@@ -1051,7 +1617,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Rogue"
+            ],
             "born_moon": 0
         },
         "Chouchou": {
@@ -1061,7 +1629,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Kittypet"
+            ],
             "born_moon": 0
         },
         "Archie": {
@@ -1071,17 +1641,21 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Kittypet"
+            ],
             "born_moon": 0
         },
         "Mochi": {
             "clan": "Outsider",
             "age": 63,
             "rank": "Loner",
-            "faction": null,
+            "faction": "Barn Cats",
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Loner"
+            ],
             "born_moon": 0
         },
         "Osprey": {
@@ -1091,7 +1665,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Loner"
+            ],
             "born_moon": 0
         },
         "Sage": {
@@ -1101,7 +1677,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Loner"
+            ],
             "born_moon": 0
         },
         "Shimmy": {
@@ -1111,7 +1689,9 @@
             "faction": null,
             "status": "alive",
             "afterlife": null,
-            "history": [],
+            "history": [
+                "Moon 4: Added to records as Loner"
+            ],
             "born_moon": 0
         }
     },
