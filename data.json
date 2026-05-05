@@ -43,6 +43,296 @@
                 "Moon 3: Died and went to StarClan"
             ],
             "death_moon": 3
+        },
+        "Morningstar": {
+            "clan": "BlizzardClan",
+            "age": 38,
+            "rank": "Leader",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Sharktide": {
+            "clan": "BlizzardClan",
+            "age": 38,
+            "rank": "Deputy",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Quiethusk": {
+            "clan": "BlizzardClan",
+            "age": 60,
+            "rank": "Medicine Cat",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Jaegarpaw": {
+            "clan": "BlizzardClan",
+            "age": 7,
+            "rank": "Medicine Cat Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Dovefern": {
+            "clan": "BlizzardClan",
+            "age": 29,
+            "rank": "Pathfinder",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Gale": {
+            "clan": "BlizzardClan",
+            "age": 54,
+            "rank": "Pathfinder",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Auroraember": {
+            "clan": "BlizzardClan",
+            "age": 33,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Stiltfur": {
+            "clan": "BlizzardClan",
+            "age": 15,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Bearhowl": {
+            "clan": "BlizzardClan",
+            "age": 53,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Snowlurch": {
+            "clan": "BlizzardClan",
+            "age": 54,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Lilywisp": {
+            "clan": "BlizzardClan",
+            "age": 15,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Blazeburn": {
+            "clan": "BlizzardClan",
+            "age": 53,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Coldwing": {
+            "clan": "BlizzardClan",
+            "age": 23,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Petrelfeather": {
+            "clan": "BlizzardClan",
+            "age": 23,
+            "rank": "Pathfinder",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Cloudbreeze": {
+            "clan": "BlizzardClan",
+            "age": 28,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Kiteweaver": {
+            "clan": "BlizzardClan",
+            "age": 41,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Fallingbird": {
+            "clan": "BlizzardClan",
+            "age": 20,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Silentstalker": {
+            "clan": "BlizzardClan",
+            "age": 32,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Coalpaw": {
+            "clan": "BlizzardClan",
+            "age": 10,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Badgerpaw": {
+            "clan": "BlizzardClan",
+            "age": 10,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Mountainpaw": {
+            "clan": "BlizzardClan",
+            "age": 10,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Buzzardpaw": {
+            "clan": "BlizzardClan",
+            "age": 10,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Rabbitpaw": {
+            "clan": "BlizzardClan",
+            "age": 8,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Koisong": {
+            "clan": "BlizzardClan",
+            "age": 34,
+            "rank": "Den Dad",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Shiverfrost": {
+            "clan": "BlizzardClan",
+            "age": 48,
+            "rank": "Queen",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Swanthroat": {
+            "clan": "BlizzardClan",
+            "age": 36,
+            "rank": "Queen",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Poppykit": {
+            "clan": "BlizzardClan",
+            "age": 5,
+            "rank": "Kit",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Stumpykit": {
+            "clan": "BlizzardClan",
+            "age": 5,
+            "rank": "Kit",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Violetpaw": {
+            "clan": "BlizzardClan",
+            "age": 6,
+            "rank": "Apprentice",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
         }
     },
     "moon": 4,
