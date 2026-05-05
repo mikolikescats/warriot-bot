@@ -1,0 +1,53 @@
+{
+    "cats": {
+        "Frostbreeze": {
+            "clan": "BlizzardClan",
+            "age": 80,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Mochi": {
+            "clan": "Outsider",
+            "age": 65,
+            "rank": "Loner",
+            "faction": "Barn Cats",
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Shimmersky": {
+            "clan": "FossilClan",
+            "age": 18,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "alive",
+            "afterlife": null,
+            "history": [],
+            "born_moon": 0
+        },
+        "Iceclaw": {
+            "clan": "BlizzardClan",
+            "age": 55,
+            "rank": "Warrior",
+            "faction": null,
+            "status": "dead",
+            "afterlife": "StarClan",
+            "born_moon": 0,
+            "history": [
+                "Moon 3: Added to records as Warrior",
+                "Moon 3: Died and went to StarClan"
+            ],
+            "death_moon": 3
+        }
+    },
+    "moon": 4,
+    "last_moon_month": "2026-05",
+    "season": "Newleaf",
+    "last_weather_week": null,
+    "used_prophecies": []
+}
