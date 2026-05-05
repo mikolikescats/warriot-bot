@@ -782,20 +782,17 @@ def generate_weekly_weather():
     averages = BANFF_MONTHLY_AVERAGES[now.month]
     season = data.get("season", get_current_season())
 
-    weather, modifier, reason = random.choice(WEATHER_BY_SEASON.get(season, WEATHER_BY_SEASON["Newleaf"]))
+    weather, modifier, reason = random.choice(
+        WEATHER_BY_SEASON.get(season, WEATHER_BY_SEASON["Newleaf"])
+    )
+
+    avg_temp = random.randint(averages["low"], averages["high"])
     modifier_text = f"+{modifier}" if modifier > 0 else str(modifier)
-    intro = random.choice(SEASONAL_OPENERS[season])
-    prey = random.choice(PREY_REPORTS[season])
 
     return (
         "🌦️ Weekly Territory Weather Report 🌦️\n\n"
-        f"{intro}\n\n"
-        f"{prey}\n\n"
         f"🍃 Season: {season}\n"
-        "🏔️ Based on Banff-style mountain weather averages\n"
-        f"🌡️ Average High: {averages['high']}°C\n"
-        f"🌡️ Average Temp: {averages['temp']}°C\n"
-        f"🌡️ Average Low: {averages['low']}°C\n\n"
+        f"🌡️ Average Temp: {avg_temp}°C\n"
         f"☁️ Weekly Weather: {weather}\n"
         f"🎯 Hunting Modifier: {modifier_text}\n"
         f"📖 Effect: {reason}"
