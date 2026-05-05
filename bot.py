@@ -2,6 +2,8 @@ import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 from dotenv import load_dotenv
+from flask import Flask
+from threading import Thread
 
 import os
 import json
@@ -26,6 +28,26 @@ bot = commands.Bot(
     command_prefix="!",
     intents=intents
 )
+
+# ─────────────────────────────
+# KEEP ALIVE WEB SERVER
+# ─────────────────────────────
+
+app = Flask('')
+
+
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+
+def run_web():
+    app.run(host="0.0.0.0", port=10000)
+
+
+def keep_alive():
+    t = Thread(target=run_web)
+    t.start()
 
 # ─────────────────────────────
 # FILES + CHANNELS
@@ -1228,6 +1250,82 @@ async def advance_moon(interaction: discord.Interaction):
     await interaction.followup.send("🌙 Moon advanced manually.")
 
 # ─────────────────────────────
+# /ADDDEAD
+# ─────────────────────────────
+
+@bot.tree.command(name="adddead", description="Add a cat who is already dead")
+@app_commands.describe(
+    name="Cat name",
+    age="Age they died at in moons",
+    clan="Clan they belonged to",
+    rank="Rank they died as",
+    afterlife="Where they went after death"
+)
+@app_commands.choices(clan=[
+    app_commands.Choice(name="BlizzardClan", value="BlizzardClan"),
+    app_commands.Choice(name="FossilClan", value="FossilClan"),
+    app_commands.Choice(name="TorrentClan", value="TorrentClan"),
+    app_commands.Choice(name="SpruceClan", value="SpruceClan"),
+    app_commands.Choice(name="Outsider", value="Outsider")
+])
+@app_commands.choices(rank=[
+    app_commands.Choice(name="Kit", value="Kit"),
+    app_commands.Choice(name="Apprentice", value="Apprentice"),
+    app_commands.Choice(name="Warrior", value="Warrior"),
+    app_commands.Choice(name="Elder", value="Elder"),
+    app_commands.Choice(name="Leader", value="Leader"),
+    app_commands.Choice(name="Deputy", value="Deputy"),
+    app_commands.Choice(name="Medicine Cat", value="Medicine Cat"),
+    app_commands.Choice(name="Medicine Cat Apprentice", value="Medicine Cat Apprentice"),
+    app_commands.Choice(name="Queen", value="Queen"),
+    app_commands.Choice(name="Den Dad", value="Den Dad"),
+    app_commands.Choice(name="Rogue", value="Rogue"),
+    app_commands.Choice(name="Loner", value="Loner"),
+    app_commands.Choice(name="Wanderer", value="Wanderer"),
+    app_commands.Choice(name="Kittypet", value="Kittypet")
+])
+@app_commands.choices(afterlife=[
+    app_commands.Choice(name="StarClan", value="StarClan"),
+    app_commands.Choice(name="Dark Forest", value="Dark Forest"),
+    app_commands.Choice(name="Unknown Residence", value="Unknown Residence")
+])
+async def adddead(
+    interaction: discord.Interaction,
+    name: str,
+    age: int,
+    clan: app_commands.Choice[str],
+    rank: app_commands.Choice[str],
+    afterlife: app_commands.Choice[str]
+):
+    if not await staff_command_check(interaction):
+        return
+
+    if name in data["cats"]:
+        await interaction.response.send_message("That cat already exists.", ephemeral=True)
+        return
+
+    data["cats"][name] = {
+        "clan": clan.value,
+        "age": age,
+        "rank": rank.value,
+        "faction": None,
+        "status": "dead",
+        "afterlife": afterlife.value,
+        "death_moon": "Before records",
+        "history": [f"Added to records as deceased. Died as {rank.value} and went to {afterlife.value}."]
+    }
+
+    save_data(data)
+
+    await interaction.response.send_message(
+        f"💀 Added deceased cat **{name}**\n"
+        f"⛺ Clan: {clan.value}\n"
+        f"⚔ Rank at death: {rank.value}\n"
+        f"🌙 Age at death: {age} moons\n"
+        f"🌌 Afterlife: {afterlife.value}"
+    )
+
+# ─────────────────────────────
 # PUBLIC INFO COMMANDS
 # ─────────────────────────────
 
@@ -1289,8 +1387,67 @@ async def catinfo(interaction: discord.Interaction, name: str):
     await interaction.response.send_message(message[:1900])
 
 # ─────────────────────────────
+# /DEAD
+# ─────────────────────────────
+
+@bot.tree.command(name="dead", description="View dead cats by clan and afterlife")
+@app_commands.describe(
+    clan="Filter by clan",
+    afterlife="Filter by afterlife"
+)
+@app_commands.choices(clan=[
+    app_commands.Choice(name="All", value="All"),
+    app_commands.Choice(name="BlizzardClan", value="BlizzardClan"),
+    app_commands.Choice(name="FossilClan", value="FossilClan"),
+    app_commands.Choice(name="TorrentClan", value="TorrentClan"),
+    app_commands.Choice(name="SpruceClan", value="SpruceClan"),
+    app_commands.Choice(name="Outsider", value="Outsider")
+])
+@app_commands.choices(afterlife=[
+    app_commands.Choice(name="All", value="All"),
+    app_commands.Choice(name="StarClan", value="StarClan"),
+    app_commands.Choice(name="Dark Forest", value="Dark Forest"),
+    app_commands.Choice(name="Unknown Residence", value="Unknown Residence")
+])
+async def dead(
+    interaction: discord.Interaction,
+    clan: app_commands.Choice[str],
+    afterlife: app_commands.Choice[str]
+):
+    lines = ["💀 Deceased Cats"]
+
+    dead_cats = []
+
+    for name, cat in data.get("cats", {}).items():
+        if cat.get("status") != "dead":
+            continue
+
+        if clan.value != "All" and cat.get("clan") != clan.value:
+            continue
+
+        if afterlife.value != "All" and cat.get("afterlife") != afterlife.value:
+            continue
+
+        dead_cats.append((name, cat))
+
+    if not dead_cats:
+        await interaction.response.send_message("No dead cats found.")
+        return
+
+    dead_cats.sort(key=lambda item: item[0].lower())
+
+    for name, cat in dead_cats:
+        lines.append(
+            f"• {name} — {cat.get('clan')} — died as {cat.get('rank')} "
+            f"at {cat.get('age', 0)} moons → {cat.get('afterlife')}"
+        )
+
+    await interaction.response.send_message("\n".join(lines[:80]))
+
+# ─────────────────────────────
 # RUN BOT
 # ─────────────────────────────
 
 print("TOKEN LOADED:", TOKEN)
+keep_alive()
 bot.run(TOKEN)
