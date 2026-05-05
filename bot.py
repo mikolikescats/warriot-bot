@@ -121,6 +121,7 @@ FACTIONS = [
     "Bloodseekers",
     "Birds of Prey",
     "The Hollowborn",
+    "The Scorched",
     "Barn Cats"
 ]
 
