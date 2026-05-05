@@ -1172,13 +1172,25 @@ async def weekly_weather_report():
 async def weatherreport(interaction: discord.Interaction):
     report = generate_weekly_weather()
 
-    await interaction.response.send_message(
-        content=f"<@&{WEATHER_REPORT_ROLE_ID}>",
-        embed=discord.Embed(
-            description=report,
-            color=discord.Color.blue()
+    channel = bot.get_channel(WEATHER_CHANNEL_ID)
+    if channel:
+        await channel.send(
+            content=f"<@&{WEATHER_REPORT_ROLE_ID}>",
+            embed=discord.Embed(
+                description=report,
+                color=discord.Color.blue()
+            )
         )
-    )
+
+        await interaction.response.send_message(
+            "🌦️ Weather report sent to the weather channel.",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            "I could not find the weather channel. Check WEATHER_CHANNEL_ID.",
+            ephemeral=True
+        )
 
 
 @bot.tree.command(name="setweather", description="Manually set this week's weather report")
