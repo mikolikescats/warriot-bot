@@ -160,13 +160,47 @@ RANK_ORDER = [
     "Kit"
 ]
 
-CLAN_CHOICES = [app_commands.Choice(name=clan, value=clan) for clan in CLANS]
-CLAN_FILTER_CHOICES = [app_commands.Choice(name="All", value="All")] + CLAN_CHOICES
-CLAN_ONLY_CHOICES = [app_commands.Choice(name=clan, value=clan) for clan in CLAN_NAMES_ONLY]
-RANK_CHOICES = [app_commands.Choice(name=rank, value=rank) for rank in ALL_RANKS]
-FACTION_CHOICES = [app_commands.Choice(name=faction, value=faction) for faction in FACTIONS]
-AFTERLIFE_CHOICES = [app_commands.Choice(name=afterlife, value=afterlife) for afterlife in AFTERLIVES]
-AFTERLIFE_FILTER_CHOICES = [app_commands.Choice(name="All", value="All")] + AFTERLIFE_CHOICES
+OUTSIDER_RANK_ORDER = [
+    "Rogue",
+    "Loner",
+    "Wanderer",
+    "Kittypet"
+]
+
+CLAN_CHOICES = [
+    app_commands.Choice(name=clan, value=clan)
+    for clan in CLANS
+]
+
+CLAN_FILTER_CHOICES = [
+    app_commands.Choice(name="All", value="All")
+] + CLAN_CHOICES
+
+CLAN_ONLY_CHOICES = [
+    app_commands.Choice(name=clan, value=clan)
+    for clan in CLAN_NAMES_ONLY
+]
+
+RANK_CHOICES = [
+    app_commands.Choice(name=rank, value=rank)
+    for rank in ALL_RANKS
+]
+
+FACTION_CHOICES = [
+    app_commands.Choice(name=faction, value=faction)
+    for faction in FACTIONS
+]
+
+AFTERLIFE_CHOICES = [
+    app_commands.Choice(name=afterlife, value=afterlife)
+    for afterlife in AFTERLIVES
+]
+
+AFTERLIFE_FILTER_CHOICES = [
+    app_commands.Choice(name="All", value="All")
+] + AFTERLIFE_CHOICES
+
+
 
 # ─────────────────────────────
 # DATA FUNCTIONS
@@ -1160,7 +1194,7 @@ async def moon(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="clan", description="View one clan roster")
-@app_commands.choices(clan=CLAN_ONLY_CHOICES)
+@app_commands.choices(clan=CLAN_CHOICES)
 async def clan(interaction: discord.Interaction, clan: app_commands.Choice[str]):
     lines = [f"⛺ {clan.value} Roster"]
 
