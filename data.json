@@ -1694,6 +1694,260 @@
             ],
             "born_moon": 0
         }
+        {
+  "Rust": {
+    "clan": "Outsider",
+    "age": 69,
+    "rank": "Rogue",
+    "faction": "The Hollowborn",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Judge": {
+    "clan": "Outsider",
+    "age": 51,
+    "rank": "Rogue",
+    "faction": null,
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Flea": {
+    "clan": "Outsider",
+    "age": 49,
+    "rank": "Rogue",
+    "faction": "Bloodseekers",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "East": {
+    "clan": "Outsider",
+    "age": 49,
+    "rank": "Rogue",
+    "faction": "Bloodseekers",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Adrenaline": {
+    "clan": "Outsider",
+    "age": 47,
+    "rank": "Rogue",
+    "faction": "Bloodseekers",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Caesar": {
+    "clan": "Outsider",
+    "age": 45,
+    "rank": "Rogue",
+    "faction": "The Hollowborn",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Enoki": {
+    "clan": "Outsider",
+    "age": 45,
+    "rank": "Rogue",
+    "faction": "The Hollowborn",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Falcon": {
+    "clan": "Outsider",
+    "age": 36,
+    "rank": "Rogue",
+    "faction": "Birds of Prey",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Token": {
+    "clan": "Outsider",
+    "age": 35,
+    "rank": "Rogue",
+    "faction": "Bloodseekers",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Viper": {
+    "clan": "Outsider",
+    "age": 34,
+    "rank": "Rogue",
+    "faction": null,
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Nefera": {
+    "clan": "Outsider",
+    "age": 29,
+    "rank": "Rogue",
+    "faction": "Bloodseekers",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Danger": {
+    "clan": "Outsider",
+    "age": 29,
+    "rank": "Rogue",
+    "faction": "Bloodseekers",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Positive": {
+    "clan": "Outsider",
+    "age": 21,
+    "rank": "Rogue",
+    "faction": "Bloodseekers",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Mochi": {
+    "clan": "Outsider",
+    "age": 62,
+    "rank": "Loner",
+    "faction": "Barn Cats",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Cinnamon": {
+    "clan": "Outsider",
+    "age": 45,
+    "rank": "Loner",
+    "faction": null,
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Shimmy": {
+    "clan": "Outsider",
+    "age": 44,
+    "rank": "Loner",
+    "faction": "Barn Cats",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Osprey": {
+    "clan": "Outsider",
+    "age": 21,
+    "rank": "Loner",
+    "faction": "Barn Cats",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Sage": {
+    "clan": "Outsider",
+    "age": 10,
+    "rank": "Loner",
+    "faction": "Barn Cats",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Cathal": {
+    "clan": "Outsider",
+    "age": 60,
+    "rank": "Wanderer",
+    "faction": "The Scorched",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Zinnia": {
+    "clan": "Outsider",
+    "age": 47,
+    "rank": "Wanderer",
+    "faction": "Bloodseekers",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Midnight": {
+    "clan": "Outsider",
+    "age": 43,
+    "rank": "Wanderer",
+    "faction": "The Scorched",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Valeska": {
+    "clan": "Outsider",
+    "age": 42,
+    "rank": "Wanderer",
+    "faction": "The Scorched",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Breeze": {
+    "clan": "Outsider",
+    "age": 29,
+    "rank": "Wanderer",
+    "faction": "The Scorched",
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Columbine": {
+    "clan": "Outsider",
+    "age": 19,
+    "rank": "Wanderer",
+    "faction": null,
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Spiderlily": {
+    "clan": "Outsider",
+    "age": 16,
+    "rank": "Wanderer",
+    "faction": null,
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Chouchou": {
+    "clan": "Outsider",
+    "age": 55,
+    "rank": "Kittypet",
+    "faction": null,
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Sher": {
+    "clan": "Outsider",
+    "age": 50,
+    "rank": "Kittypet",
+    "faction": null,
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  },
+  "Archie": {
+    "clan": "Outsider",
+    "age": 7,
+    "rank": "Kittypet",
+    "faction": null,
+    "status": "alive",
+    "afterlife": null,
+    "death_moon": null
+  }
+}
     },
     "moon": 4,
     "last_moon_month": "2026-05",
