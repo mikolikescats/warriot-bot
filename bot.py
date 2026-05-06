@@ -546,18 +546,36 @@ async def run_moon_update():
 
             cat["age"] = cat.get("age", 0) + 1
 
+            delay = cat.get("ceremony_delay", 0)
+            is_due_for_ceremony = (
+                (cat.get("rank") == "Kit" and cat["age"] >= 6)
+                or (cat.get("rank") == "Apprentice" and cat["age"] >= 12)
+                or (cat.get("rank") in AGING_TO_ELDER_RANKS and cat["age"] >= 95)
+            )
+
+            if delay > 0 and is_due_for_ceremony:
+                cat["ceremony_delay"] = delay - 1
+                add_history(cat, f"Ceremony delayed. {cat['ceremony_delay']} moon(s) remaining")
+                report["promotions"].append(
+                    f"⏳ {name}'s ceremony was delayed. {cat['ceremony_delay']} moon(s) remaining."
+                )
+                continue
+
             if cat.get("rank") == "Kit" and cat["age"] >= 6:
                 cat["rank"] = "Apprentice"
+                cat.pop("ceremony_delay", None)
                 add_history(cat, "Became an Apprentice")
                 report["promotions"].append(f"🐾 {name} became an Apprentice.")
 
             elif cat.get("rank") == "Apprentice" and cat["age"] >= 12:
                 cat["rank"] = "Warrior"
+                cat.pop("ceremony_delay", None)
                 add_history(cat, "Became a Warrior")
                 report["promotions"].append(f"⚔ {name} became a Warrior.")
 
             elif cat.get("rank") in AGING_TO_ELDER_RANKS and cat["age"] >= 95:
                 cat["rank"] = "Elder"
+                cat.pop("ceremony_delay", None)
                 add_history(cat, "Retired as an Elder")
                 report["promotions"].append(f"🍂 {name} retired as an Elder.")
 
@@ -1136,6 +1154,117 @@ async def adddead(interaction: discord.Interaction, name: str, age: int, clan: a
         f"🌌 Afterlife: {afterlife.value}"
     )
 
+@bot.tree.command(name="assignmentor", description="Assign a mentor to an apprentice")
+async def assignmentor(interaction: discord.Interaction, apprentice: str, warrior: str):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if apprentice not in cats:
+            await interaction.response.send_message("Apprentice not found.", ephemeral=True)
+            return
+
+        if warrior not in cats:
+            await interaction.response.send_message("Mentor not found.", ephemeral=True)
+            return
+
+        app_cat = cats[apprentice]
+        mentor_cat = cats[warrior]
+
+        if app_cat.get("status") == "dead" or mentor_cat.get("status") == "dead":
+            await interaction.response.send_message("Dead cats cannot be assigned as mentors/apprentices.", ephemeral=True)
+            return
+
+        if app_cat.get("rank") not in ["Apprentice", "Medicine Cat Apprentice"]:
+            await interaction.response.send_message(f"{apprentice} is not an apprentice.", ephemeral=True)
+            return
+
+        valid_mentor_ranks = ["Warrior", "Leader", "Deputy", "Medicine Cat", "Preymaster", "Healer", "Digger", "Pathfinder", "Sporekeeper", "River Guardian"]
+
+        if mentor_cat.get("rank") not in valid_mentor_ranks:
+            await interaction.response.send_message(f"{warrior} cannot mentor apprentices.", ephemeral=True)
+            return
+
+        old_mentor = app_cat.get("mentor")
+        if old_mentor and old_mentor in cats:
+            cats[old_mentor].setdefault("apprentices", [])
+            if apprentice in cats[old_mentor]["apprentices"]:
+                cats[old_mentor]["apprentices"].remove(apprentice)
+
+        app_cat["mentor"] = warrior
+        mentor_cat.setdefault("apprentices", [])
+
+        if apprentice not in mentor_cat["apprentices"]:
+            mentor_cat["apprentices"].append(apprentice)
+
+        add_history(app_cat, f"Assigned {warrior} as mentor")
+        add_history(mentor_cat, f"Became mentor to {apprentice}")
+
+        save_data(data)
+
+    await interaction.response.send_message(f"🐾 **{warrior}** is now mentoring **{apprentice}**.")
+
+@bot.tree.command(name="injurecat", description="Give a cat an injury or illness")
+async def injurecat(interaction: discord.Interaction, name: str, injury: str, severity: str = "mild"):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        if name not in data.get("cats", {}):
+            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            return
+
+        cat = data["cats"][name]
+
+        if cat.get("status") == "dead":
+            await interaction.response.send_message("Dead cats cannot be injured.", ephemeral=True)
+            return
+
+        cat["injury"] = {
+            "type": injury,
+            "severity": severity,
+            "moon": data.get("moon", 0)
+        }
+
+        add_history(cat, f"Injured/ill: {injury} ({severity})")
+        save_data(data)
+
+    await interaction.response.send_message(f"🩹 **{name}** now has **{injury}** severity: **{severity}**.")
+
+@bot.tree.command(name="delayceremony", description="Delay a cat's automatic promotion")
+@app_commands.describe(
+    name="Cat name",
+    moons="How many moons to delay their ceremony"
+)
+async def delayceremony(interaction: discord.Interaction, name: str, moons: int):
+    if not await staff_command_check(interaction):
+        return
+
+    if moons < 1:
+        await interaction.response.send_message("Delay must be at least 1 moon.", ephemeral=True)
+        return
+
+    async with data_lock:
+        if name not in data.get("cats", {}):
+            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            return
+
+        cat = data["cats"][name]
+
+        if cat.get("status") == "dead":
+            await interaction.response.send_message("Dead cats cannot have ceremonies delayed.", ephemeral=True)
+            return
+
+        cat["ceremony_delay"] = moons
+        add_history(cat, f"Ceremony delayed by {moons} moon(s)")
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"⏳ **{name}**'s ceremony has been delayed by **{moons} moon(s)**."
+    )
+
 # ─────────────────────────────
 # WEATHER LOOP + WEATHER COMMANDS
 # ─────────────────────────────
@@ -1331,10 +1460,25 @@ async def catinfo(interaction: discord.Interaction, name: str):
         return
 
     cat = data["cats"][name]
+
     history = cat.get("history", [])
     history_text = "\n".join(history[-10:]) if history else "No history yet."
+
     faction = cat.get("faction") or "None"
     afterlife = cat.get("afterlife") or "None"
+
+    mentor = cat.get("mentor") or "None"
+    apprentices = ", ".join(cat.get("apprentices", [])) if cat.get("apprentices") else "None"
+
+    if cat.get("injury"):
+        injury_data = cat["injury"]
+        injury_text = (
+            f"{injury_data.get('type', 'Unknown')} "
+            f"({injury_data.get('severity', 'unknown')} severity, "
+            f"Moon {injury_data.get('moon', '?')})"
+        )
+    else:
+        injury_text = "Healthy"
 
     message = (
         f"🐾 **{name}**\n"
@@ -1343,6 +1487,9 @@ async def catinfo(interaction: discord.Interaction, name: str):
         f"Faction: {faction}\n"
         f"Age: {cat.get('age', 0)} moons\n"
         f"Status: {cat.get('status')}\n"
+        f"Current Health: {injury_text}\n"
+        f"Mentor: {mentor}\n"
+        f"Apprentices: {apprentices}\n"
         f"Afterlife: {afterlife}\n\n"
         f"📜 Recent History:\n{history_text}"
     )
@@ -1398,6 +1545,146 @@ async def upcomingceremonies(interaction: discord.Interaction, clan: app_command
             lines.append("No ceremonies expected.")
 
     await interaction.response.send_message("\n".join(lines)[:1900])
+
+@bot.tree.command(name="mentorlist", description="View apprentices, mentors, and eligible mentors")
+@app_commands.choices(clan=CLAN_ONLY_CHOICES)
+async def mentorlist(interaction: discord.Interaction, clan: app_commands.Choice[str]):
+    selected_clan = clan.value
+
+    apprentices = []
+    kits_soon = []
+    eligible_mentors = []
+
+    valid_mentor_ranks = ["Warrior", "Leader", "Deputy", "Medicine Cat", "Preymaster", "Healer", "Digger", "Pathfinder", "Sporekeeper", "River Guardian"]
+
+    for name, cat in data.get("cats", {}).items():
+        if cat.get("clan") != selected_clan or cat.get("status") == "dead":
+            continue
+
+        rank = cat.get("rank")
+        age = cat.get("age", 0)
+
+        if rank in ["Apprentice", "Medicine Cat Apprentice"]:
+            mentor = cat.get("mentor", "No mentor assigned")
+            apprentices.append(f"• **{name}** — {age} moons | Mentor: {mentor}")
+
+        elif rank == "Kit":
+            moons_left = max(0, 6 - age)
+            kits_soon.append(f"• **{name}** — {age} moons | {moons_left} moon(s) until Apprentice")
+
+        elif rank in valid_mentor_ranks:
+            current_apps = cat.get("apprentices", [])
+            app_text = f" | Apprentice(s): {', '.join(current_apps)}" if current_apps else ""
+            eligible_mentors.append(f"• **{name}** — {rank}{app_text}")
+
+    lines = [f"🐾 Mentor List for **{selected_clan}**"]
+
+    lines.append("\n**Current Apprentices**")
+    lines.extend(apprentices if apprentices else ["No apprentices."])
+
+    lines.append("\n**Kits Becoming Apprentices Soon**")
+    lines.extend(kits_soon if kits_soon else ["No kits currently listed."])
+
+    lines.append("\n**Eligible Mentors**")
+    lines.extend(eligible_mentors if eligible_mentors else ["No eligible mentors found."])
+
+    await interaction.response.send_message("\n".join(lines)[:1900])
+
+@bot.tree.command(name="gatheringreport", description="Generate a quick Gathering summary")
+async def gatheringreport(interaction: discord.Interaction):
+    lines = [
+        f"🌙 **Gathering Report: Moon {data.get('moon', 0)}**",
+        f"🍃 Season: **{data.get('season', get_current_season())} ({get_season_moon()}/3)**",
+        ""
+    ]
+
+    for clan_name in CLAN_NAMES_ONLY:
+        lines.append(f"⛺ **{clan_name}**")
+
+        leader = "None"
+        deputy = "None"
+        medicine = []
+        injuries = []
+
+        for name, cat in data.get("cats", {}).items():
+            if cat.get("clan") != clan_name or cat.get("status") == "dead":
+                continue
+
+            if cat.get("rank") == "Leader":
+                leader = name
+            elif cat.get("rank") == "Deputy":
+                deputy = name
+            elif cat.get("rank") in ["Medicine Cat", "Medicine Cat Apprentice"]:
+                medicine.append(f"{name} ({cat.get('rank')})")
+
+            if cat.get("injury"):
+                injury = cat["injury"]
+                injuries.append(f"{name}: {injury.get('type')} ({injury.get('severity')})")
+
+        lines.append(f"Leader: {leader}")
+        lines.append(f"Deputy: {deputy}")
+        lines.append(f"Medicine: {', '.join(medicine) if medicine else 'None'}")
+
+        if injuries:
+            lines.append("Injured/Ill: " + "; ".join(injuries))
+
+        lines.append("")
+
+    await interaction.response.send_message("\n".join(lines)[:1900])
+
+@bot.tree.command(name="cattinder", description="Find age-appropriate romance options for a cat")
+@app_commands.describe(age="Your cat's age in moons")
+async def cattinder(interaction: discord.Interaction, age: int):
+    matches = []
+
+    if age < 12:
+        for name, cat in data.get("cats", {}).items():
+            if cat.get("status") == "dead":
+                continue
+
+            if cat.get("rank") == "Apprentice" and cat.get("age", 0) < 12:
+                matches.append(f"• **{name}** — {cat.get('age')} moons | Apprentice crush only")
+
+        title = "💘 CatTinder: Apprentice Crush Matches"
+        note = "Cats under 12 moons may only have minor, age-appropriate crushes."
+
+    else:
+        max_gap = 12 if age < 24 else 18
+
+        for name, cat in data.get("cats", {}).items():
+            if cat.get("status") == "dead":
+                continue
+
+            cat_age = cat.get("age", 0)
+            cat_rank = cat.get("rank")
+
+            if cat.get("clan") == "Outsider":
+                continue
+
+            if cat_rank in ["Kit", "Apprentice", "Medicine Cat Apprentice"]:
+                continue
+
+            if cat_age < 12:
+                continue
+
+            if abs(age - cat_age) <= max_gap:
+                matches.append(f"• **{name}** — {cat_age} moons | {cat.get('clan')} | {cat_rank}")
+
+        title = "💘 CatTinder: Mate-Compatible Matches"
+        note = f"Age gap limit: {max_gap} moons."
+
+    lines = [
+        title,
+        f"Input age: **{age} moons**",
+        note,
+        ""
+    ]
+
+    lines.extend(matches if matches else ["No compatible cats found."])
+
+    await interaction.response.send_message("\n".join(lines)[:1900])
+
+
 
 
 @bot.tree.command(name="dead", description="View dead cats by clan and afterlife")
