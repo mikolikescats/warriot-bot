@@ -1636,49 +1636,90 @@ async def gatheringreport(interaction: discord.Interaction):
     await interaction.response.send_message("\n".join(lines)[:1900])
 
 @bot.tree.command(name="cattinder", description="Find age-appropriate romance options for a cat")
-@app_commands.describe(age="Your cat's age in moons")
-async def cattinder(interaction: discord.Interaction, age: int):
+@app_commands.describe(
+    name="Your cat's name",
+    clan="Choose a Clan to search, or Any"
+)
+@app_commands.choices(clan=CLAN_FILTER_CHOICES)
+async def cattinder(interaction: discord.Interaction, name: str, clan: app_commands.Choice[str]):
+    cats = data.get("cats", {})
+
+    if name not in cats:
+        await interaction.response.send_message("Cat not found.", ephemeral=True)
+        return
+
+    seeker = cats[name]
+
+    if seeker.get("status") == "dead":
+        await interaction.response.send_message("Dead cats cannot use CatTinder.", ephemeral=True)
+        return
+
+    seeker_age = seeker.get("age", 0)
+    seeker_rank = seeker.get("rank")
+    selected_clan = clan.value
+
     matches = []
 
-    if age < 12:
-        for name, cat in data.get("cats", {}).items():
-            if cat.get("status") == "dead":
+    if seeker_age < 12:
+        for other_name, other_cat in cats.items():
+            if other_name == name:
                 continue
 
-            if cat.get("rank") == "Apprentice" and cat.get("age", 0) < 12:
-                matches.append(f"• **{name}** — {cat.get('age')} moons | Apprentice crush only")
+            if other_cat.get("status") == "dead":
+                continue
 
-        title = "💘 CatTinder: Apprentice Crush Matches"
-        note = "Cats under 12 moons may only have minor, age-appropriate crushes."
+            if selected_clan != "All" and other_cat.get("clan") != selected_clan:
+                continue
+
+            other_age = other_cat.get("age", 0)
+            other_rank = other_cat.get("rank")
+
+            if other_rank == "Apprentice" and other_age < 12:
+                if abs(seeker_age - other_age) <= 3:
+                    matches.append(
+                        f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Apprentice crush only"
+                    )
+
+        title = f"💕 CatTinder for **{name}**"
+        note = "Cats under 12 moons may only have minor, age-appropriate apprentice crushes."
 
     else:
-        max_gap = 12 if age < 24 else 18
+        max_gap = 12 if seeker_age < 24 else 18
 
-        for name, cat in data.get("cats", {}).items():
-            if cat.get("status") == "dead":
+        for other_name, other_cat in cats.items():
+            if other_name == name:
                 continue
 
-            cat_age = cat.get("age", 0)
-            cat_rank = cat.get("rank")
-
-            if cat.get("clan") == "Outsider":
+            if other_cat.get("status") == "dead":
                 continue
 
-            if cat_rank in ["Kit", "Apprentice", "Medicine Cat Apprentice"]:
+            if selected_clan != "All" and other_cat.get("clan") != selected_clan:
                 continue
 
-            if cat_age < 12:
+            other_age = other_cat.get("age", 0)
+            other_rank = other_cat.get("rank")
+
+            if other_age < 12:
                 continue
 
-            if abs(age - cat_age) <= max_gap:
-                matches.append(f"• **{name}** — {cat_age} moons | {cat.get('clan')} | {cat_rank}")
+            if other_rank in ["Kit", "Apprentice", "Medicine Cat Apprentice"]:
+                continue
 
-        title = "💘 CatTinder: Mate-Compatible Matches"
+            if seeker_rank in ["Kit", "Apprentice", "Medicine Cat Apprentice"]:
+                continue
+
+            if abs(seeker_age - other_age) <= max_gap:
+                matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | {other_rank}"
+                )
+
+        title = f"💕 CatTinder for **{name}**"
         note = f"Age gap limit: {max_gap} moons."
 
     lines = [
         title,
-        f"Input age: **{age} moons**",
+        f"Age: **{seeker_age} moons**",
+        f"Searching: **{selected_clan}**",
         note,
         ""
     ]
