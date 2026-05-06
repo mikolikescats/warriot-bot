@@ -387,6 +387,21 @@ def format_injury(cat):
     )
 
 
+def is_story_history(entry):
+    important_keywords = [
+        "Became an Apprentice",
+        "Became a Warrior",
+        "Retired as an Elder",
+        "Rank changed to",
+        "Died and went to",
+        "Became mentor",
+        "Had a litter",
+        "Became mates with",
+        "Broke up with"
+    ]
+
+    return any(keyword in entry for keyword in important_keywords)
+
 def process_injury_recovery(cat):
     injury = cat.get("injury")
     if not injury:
@@ -466,13 +481,14 @@ def is_story_history(entry):
         "Retired as an Elder",
         "Rank changed to",
         "Died and went to",
-        "Injured/ill",
         "Recovered from injury",
         "Became mentor",
         "Had a litter",
         "Became mates with",
         "Broke up with"
     ]
+
+    return any(keyword in entry for keyword in important_keywords)
 
     return any(keyword in entry for keyword in important_keywords)
 
@@ -1478,10 +1494,9 @@ async def removeinjury(interaction: discord.Interaction, name: str):
         old_injury = cat["injury"].get("type", "Unknown injury")
         cat.pop("injury", None)
 
-        add_history(cat, f"Injury/illness removed: {old_injury}")
         save_data(data)
 
-    await interaction.response.send_message(f"🩹 Removed injury/illness from **{name}**.")
+    await interaction.response.send_message(f"🩹 Removed **{old_injury}** from **{name}**.")
 
 @bot.tree.command(name="setinjuryseverity", description="Override a cat's injury severity")
 async def setinjuryseverity(interaction: discord.Interaction, name: str, severity: int):
@@ -1854,7 +1869,9 @@ async def catinfo(interaction: discord.Interaction, name: str):
             save_data(data)
 
         history = [entry for entry in cat.get("history", []) if is_story_history(entry)]
-        history_text = "\n".join(format_history_entry(entry) for entry in history[-10:]) if history else "No major history yet."
+        history_text = "\n".join(
+            format_history_entry(entry) for entry in history[-10:]
+        ) if history else "No major history yet."
 
         afterlife = cat.get("afterlife") or "None"
 
@@ -1891,9 +1908,19 @@ async def catinfo(interaction: discord.Interaction, name: str):
         if family:
             for relation, relatives in family.items():
                 if relatives:
-                    relationship_lines.append(f"**{relation}**: {', '.join(relatives)}")
+                    relationship_lines.append(
+                        f"**{relation}**: {', '.join(relatives)}"
+                    )
 
         relationships_text = "\n".join(relationship_lines)
+
+        # Force clean status formatting
+        raw_status = str(cat.get("status", "Alive")).lower()
+
+        if raw_status == "dead":
+            status = "Dead"
+        else:
+            status = "Alive"
 
         message = (
             f"🐾 **{name}**\n"
@@ -1907,7 +1934,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
 
         message += (
             f"**Age**: {cat.get('age', 0)} moons\n"
-            f"**Status**: {cat.get('status')}\n"
+            f"**Status**: {status}\n"
             f"**Current Health**: {injury_text}\n"
             f"**Mentor**: {mentor}\n"
             f"**Apprentices**: {apprentices}\n"
