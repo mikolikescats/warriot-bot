@@ -2165,9 +2165,7 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
         return
 
     excluded_relatives = set()
-    family = seeker.get("family", {})
-
-    for relatives in family.values():
+    for relatives in seeker.get("family", {}).values():
         excluded_relatives.update(relatives)
 
     crush_matches = []
@@ -2187,33 +2185,23 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
         if other_name in excluded_relatives:
             continue
 
-        # Mentors and apprentices can never be romance options
-        seeker_mentor = seeker.get("mentor")
-        seeker_previous_mentors = seeker.get("previous_mentors", [])
-        seeker_apprentices = seeker.get("apprentices", [])
-        seeker_past_apprentices = seeker.get("past_apprentices", [])
-
-        other_mentor = other_cat.get("mentor")
-        other_previous_mentors = other_cat.get("previous_mentors", [])
-        other_apprentices = other_cat.get("apprentices", [])
-        other_past_apprentices = other_cat.get("past_apprentices", [])
-
-        if (
-            other_name == seeker_mentor
-            or other_name in seeker_previous_mentors
-            or other_name in seeker_apprentices
-            or other_name in seeker_past_apprentices
-            or name == other_mentor
-            or name in other_previous_mentors
-            or name in other_apprentices
-            or name in other_past_apprentices
-        ):
-            continue
-
         if selected_clan != "All" and other_cat.get("clan") != selected_clan:
             continue
 
         if other_cat.get("rank") == "Medicine Cat Apprentice":
+            continue
+
+        # Mentor/apprentice exclusion
+        if (
+            other_name == seeker.get("mentor")
+            or other_name in seeker.get("previous_mentors", [])
+            or other_name in seeker.get("apprentices", [])
+            or other_name in seeker.get("past_apprentices", [])
+            or name == other_cat.get("mentor")
+            or name in other_cat.get("previous_mentors", [])
+            or name in other_cat.get("apprentices", [])
+            or name in other_cat.get("past_apprentices", [])
+        ):
             continue
 
         other_age = other_cat.get("age", 0)
@@ -2221,60 +2209,95 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
         if other_age < 6:
             continue
 
-        # 6–11 moons: childhood crushes only, within 4 moons
+        # 6–11 moons: innocent childhood crushes only, within 4 moons
         if 6 <= seeker_age <= 11:
             if abs(seeker_age - other_age) <= 4:
                 crush_matches.append(
                     f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Childhood crush"
                 )
 
-        # 12–14 moons: crushes within 4 moons, love interests up to 18 moons
-        elif 12 <= seeker_age <= 14:
+        # 12–16 moons: crushes within 4 moons, love interests no more than 5 moons younger and up to 18
+        elif 12 <= seeker_age <= 16:
             if abs(seeker_age - other_age) <= 4:
                 crush_matches.append(
                     f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Crush"
                 )
 
+            if seeker_age - 5 <= other_age <= 18:
+                love_matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Love interest"
+                )
+
+        # 17 moons: can love interest 12–18
+        elif seeker_age == 17:
             if 12 <= other_age <= 18:
                 love_matches.append(
                     f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Love interest"
                 )
 
-        # 15–17 moons: love interests up to 6 moons older
-        elif 15 <= seeker_age <= 17:
-            if seeker_age <= other_age <= seeker_age + 6:
+        # 18–23 moons:
+        # 18 can love interest 13–30, mate 18–30
+        # 19 can love interest 14–31, mate 18–31, etc.
+        elif 18 <= seeker_age <= 23:
+            min_love_age = seeker_age - 5
+            max_love_age = seeker_age + 12
+
+            if min_love_age <= other_age <= max_love_age:
                 love_matches.append(
                     f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Love interest"
                 )
 
-        # 18–24 moons: love interests up to 6 moons younger, mates 6 younger to 12 older
-        elif 18 <= seeker_age <= 24:
-            if seeker_age - 6 <= other_age:
-                love_matches.append(
-                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Love interest"
-                )
-
-            if seeker_age - 6 <= other_age <= seeker_age + 12:
+            if 18 <= other_age <= max_love_age:
                 mate_matches.append(
                     f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Mate eligible"
                 )
 
-        # 25+ moons: adult rule
-        # Love interests: any 18+ cat
-        # Mates:
-        # - If both cats are 25+, allow up to 24 moons apart either way
-        # - If the other cat is 18–24, use the younger adult limit
-        elif seeker_age >= 25:
-            if other_age >= 18:
+        # 24–53 moons:
+        # 24 can love interest/mate 18–42
+        # 25 can love interest/mate 19–43
+        # 26 can love interest/mate 20–44, etc.
+        elif 24 <= seeker_age <= 53:
+            min_age = seeker_age - 6
+            max_age = seeker_age + 18
+
+            if min_age <= other_age <= max_age:
                 love_matches.append(
                     f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Love interest"
                 )
 
-            if (
-                other_age >= 25 and abs(seeker_age - other_age) <= 24
-            ) or (
-                18 <= other_age <= 24 and other_age >= seeker_age - 6
-            ):
+            if min_age <= other_age <= max_age:
+                mate_matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Mate eligible"
+                )
+
+        # 54–77 moons:
+        # Can love interest/mate 18 moons younger and 24 moons older
+        elif 54 <= seeker_age <= 77:
+            min_age = seeker_age - 18
+            max_age = seeker_age + 24
+
+            if min_age <= other_age <= max_age:
+                love_matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Love interest"
+                )
+
+            if min_age <= other_age <= max_age:
+                mate_matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Mate eligible"
+                )
+
+        # 78+ moons:
+        # Can love interest/mate 24 moons younger or older
+        elif seeker_age >= 78:
+            min_age = seeker_age - 24
+            max_age = seeker_age + 24
+
+            if min_age <= other_age <= max_age:
+                love_matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Love interest"
+                )
+
+            if min_age <= other_age <= max_age:
                 mate_matches.append(
                     f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Mate eligible"
                 )
