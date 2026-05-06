@@ -212,7 +212,21 @@ AFTERLIFE_FILTER_CHOICES = [
     app_commands.Choice(name="All", value="All")
 ] + AFTERLIFE_CHOICES
 
+FAMILY_RELATIONS = [
+    "Mother",
+    "Father",
+    "Non-Bio Parental Figure",
+    "Sibling",
+    "Cousin",
+    "Kit",
+    "Non-Bio Kit",
+    "Other"
+]
 
+FAMILY_RELATION_CHOICES = [
+    app_commands.Choice(name=relation, value=relation)
+    for relation in FAMILY_RELATIONS
+]
 
 # ─────────────────────────────
 # DATA FUNCTIONS
@@ -333,6 +347,82 @@ def prepare_cat_record(name, cat):
     cat.setdefault("death_moon", None)
 
 
+# ADD PART 1 RIGHT HERE
+def format_history_entry(entry):
+    if entry.startswith("Moon "):
+        parts = entry.split(": ", 1)
+        if len(parts) == 2:
+            moon_part, text = parts
+            return f"**{moon_part}**: {text}"
+    return entry
+
+
+def severity_label(severity):
+    labels = {
+        1: "Very Minor",
+        2: "Minor",
+        3: "Mild",
+        4: "Moderate",
+        5: "Concerning",
+        6: "Serious",
+        7: "Severe",
+        8: "Critical",
+        9: "Life-Threatening",
+        10: "Gravely Critical"
+    }
+    return labels.get(severity, "Unknown")
+
+
+def format_injury(cat):
+    injury = cat.get("injury")
+
+    if not injury:
+        return "Healthy"
+
+    severity = int(injury.get("severity", 1))
+    label = severity_label(severity)
+
+    return (
+        f"{injury.get('type', 'Unknown')} "
+        f"| Severity {severity}/10, {label} "
+        f"| Moon {injury.get('moon', '?')}"
+    )
+
+
+def process_injury_recovery(cat):
+    injury = cat.get("injury")
+    if not injury:
+        return False
+
+    severity = int(injury.get("severity", 1))
+    last_update = injury.get("last_recovery_update")
+
+    now = datetime.now(TZ)
+
+    if not last_update:
+        injury["last_recovery_update"] = now.isoformat()
+        return False
+
+    last_time = datetime.fromisoformat(last_update)
+    days_passed = (now - last_time).days
+
+    if days_passed < 2:
+        return False
+
+    points_down = days_passed // 2
+    new_severity = max(0, severity - points_down)
+
+    if new_severity <= 0:
+        cat.pop("injury", None)
+        add_history(cat, "Recovered from injury/illness")
+    else:
+        injury["severity"] = new_severity
+        injury["last_recovery_update"] = now.isoformat()
+        add_history(cat, f"Injury recovery progressed to severity {new_severity}/10")
+
+    return True
+
+
 def validate_cat_rank(clan, rank, faction=None):
     if clan != "Outsider" and rank in OUTSIDER_RANKS:
         return "Clan cats cannot use outsider ranks."
@@ -348,31 +438,26 @@ def validate_cat_rank(clan, rank, faction=None):
 
     return None
 
+def add_family_relation(cat, relation, relative_name):
+    cat.setdefault("family", {})
+    cat["family"].setdefault(relation, [])
 
-async def safe_respond(interaction, message, ephemeral=False):
-    if interaction.response.is_done():
-        await interaction.followup.send(message, ephemeral=ephemeral)
-    else:
-        await interaction.response.send_message(message, ephemeral=ephemeral)
+    if relative_name not in cat["family"][relation]:
+        cat["family"][relation].append(relative_name)
 
 
-async def send_long_message(channel, text):
-    max_length = 1900
-    chunks = []
+def reciprocal_family_relation(relation):
+    opposites = {
+        "Mother": "Kit",
+        "Father": "Kit",
+        "Non-Bio Parental Figure": "Non-Bio Kit",
+        "Sibling": "Sibling",
+        "Cousin": "Cousin",
+        "Kit": "Parent",
+        "Non-Bio Kit": "Non-Bio Parental Figure"
+    }
 
-    while len(text) > max_length:
-        split_at = text.rfind("\n", 0, max_length)
-        if split_at == -1:
-            split_at = max_length
-
-        chunks.append(text[:split_at])
-        text = text[split_at:].lstrip()
-
-    chunks.append(text)
-
-    for chunk in chunks:
-        if chunk.strip():
-            await channel.send(chunk)
+    return opposites.get(relation, "Other")
 
 # ─────────────────────────────
 # SEASON SYSTEM
@@ -518,11 +603,6 @@ def generate_prophecy(report):
     data["used_prophecies"].append(prophecy)
     report["prophecies"].append(prophecy)
 
-# ─────────────────────────────
-# MOON UPDATE SYSTEM
-# ─────────────────────────────
-
-
 async def run_moon_update():
     async with data_lock:
         report = {
@@ -540,6 +620,10 @@ async def run_moon_update():
 
         for name, cat in data.get("cats", {}).items():
             prepare_cat_record(name, cat)
+
+            recovered = process_injury_recovery(cat)
+            if recovered:
+                report["promotions"].append(f"🩹 {name}'s injury recovery progressed.")
 
             if cat.get("status") == "dead":
                 continue
@@ -568,6 +652,24 @@ async def run_moon_update():
                 report["promotions"].append(f"🐾 {name} became an Apprentice.")
 
             elif cat.get("rank") == "Apprentice" and cat["age"] >= 12:
+                old_mentor = cat.get("mentor")
+
+                if old_mentor:
+                    cat["mentor"] = f"{old_mentor} (PAST)"
+
+                    if old_mentor in data["cats"]:
+                        mentor_cat = data["cats"][old_mentor]
+                        apprentices = mentor_cat.get("apprentices", [])
+
+                        if name in apprentices:
+                            apprentices.remove(name)
+
+                        past_apprentices = mentor_cat.setdefault("past_apprentices", [])
+                        if name not in past_apprentices:
+                            past_apprentices.append(name)
+
+                        add_history(mentor_cat, f"Former apprentice {name} became a Warrior")
+
                 cat["rank"] = "Warrior"
                 cat.pop("ceremony_delay", None)
                 add_history(cat, "Became a Warrior")
@@ -927,48 +1029,61 @@ async def add_cat(interaction: discord.Interaction, name: str, age: int, clan: a
     )
 
 
-@bot.tree.command(name="addlitter", description="Manually add a litter with custom kit names")
-@app_commands.describe(mother="Mother cat name", clan="Clan for the kits", kit1="First kit name", kit2="Second kit name", kit3="Third kit name optional", kit4="Fourth kit name optional", kit5="Fifth kit name optional", kit6="Sixth kit name optional")
-@app_commands.choices(clan=CLAN_CHOICES)
-async def add_litter(interaction: discord.Interaction, mother: str, clan: app_commands.Choice[str], kit1: str, kit2: str, kit3: str = None, kit4: str = None, kit5: str = None, kit6: str = None):
+@bot.tree.command(name="addlitter", description="Record that a cat had a litter this moon")
+@app_commands.describe(
+    mother="Mother cat name",
+    kit1="First kit name",
+    kit2="Second kit name optional",
+    kit3="Third kit name optional",
+    kit4="Fourth kit name optional",
+    kit5="Fifth kit name optional",
+    kit6="Sixth kit name optional"
+)
+async def add_litter(
+    interaction: discord.Interaction,
+    mother: str,
+    kit1: str,
+    kit2: str,
+    kit3: str = None,
+    kit4: str = None,
+    kit5: str = None,
+    kit6: str = None
+):
     if not await staff_command_check(interaction):
         return
 
     async with data_lock:
-        if mother not in data["cats"]:
+        cats = data.get("cats", {})
+
+        if mother not in cats:
             await interaction.response.send_message("Mother cat not found.", ephemeral=True)
             return
 
         kit_names = [name for name in [kit1, kit2, kit3, kit4, kit5, kit6] if name]
-        duplicates = [kit_name for kit_name in kit_names if kit_name in data["cats"]]
 
-        if duplicates:
-            await interaction.response.send_message(f"These names already exist: {', '.join(duplicates)}", ephemeral=True)
+        missing_kits = [kit_name for kit_name in kit_names if kit_name not in cats]
+
+        if missing_kits:
+            await interaction.response.send_message(
+                f"These kits are not in the records yet: {', '.join(missing_kits)}\n"
+                f"Add them first with `/add`, then use `/addlitter`.",
+                ephemeral=True
+            )
             return
 
-        born_names = []
-        mother_faction = data["cats"][mother].get("faction")
-
         for kit_name in kit_names:
-            data["cats"][kit_name] = {
-                "clan": clan.value,
-                "age": 0,
-                "rank": "Kit" if clan.value != "Outsider" else "Loner",
-                "faction": mother_faction if clan.value == "Outsider" else None,
-                "status": "alive",
-                "afterlife": None,
-                "death_moon": None,
-                "born_moon": data["moon"],
-                "history": [f"Moon {data['moon']}: Born to {mother}"]
-            }
-            born_names.append(kit_name)
+            add_family_relation(cats[mother], "Kit", kit_name)
+            add_family_relation(cats[kit_name], "Mother", mother)
+            add_history(cats[kit_name], f"Born to {mother}")
+        
+        litter_text = ", ".join(kit_names)
+        add_history(cats[mother], f"Had a litter: {litter_text}")
 
-        add_history(data["cats"][mother], f"Had a litter of {len(born_names)} kit(s): {', '.join(born_names)}")
         save_data(data)
 
     await interaction.response.send_message(
-        f"🍼 {mother} had a litter of {len(born_names)} kit(s):\n" +
-        "\n".join([f"• {kit_name}" for kit_name in born_names])
+        f"🍼 Litter recorded for **{mother}**:\n"
+        + "\n".join([f"• {kit_name}" for kit_name in kit_names])
     )
 
 
@@ -1071,10 +1186,49 @@ async def delete_cat(interaction: discord.Interaction, name: str):
             await interaction.response.send_message("Cat not found.", ephemeral=True)
             return
 
+        # Remove this cat from all other cats' records
+        for other_name, other_cat in data["cats"].items():
+            if other_name == name:
+                continue
+
+            # Remove from mentor
+            if other_cat.get("mentor") == name:
+                other_cat["mentor"] = None
+
+            # Remove from previous mentors
+            if "previous_mentors" in other_cat:
+                other_cat["previous_mentors"] = [
+                    mentor for mentor in other_cat["previous_mentors"]
+                    if mentor != name
+                ]
+
+            # Remove from apprentices
+            if "apprentices" in other_cat:
+                other_cat["apprentices"] = [
+                    app for app in other_cat["apprentices"]
+                    if app != name
+                ]
+
+            # Remove from past apprentices
+            if "past_apprentices" in other_cat:
+                other_cat["past_apprentices"] = [
+                    app for app in other_cat["past_apprentices"]
+                    if app != name
+                ]
+
+            # Remove from family
+            family = other_cat.get("family", {})
+            for relation in family:
+                family[relation] = [
+                    relative for relative in family[relation]
+                    if relative != name
+                ]
+
+        # Delete the cat
         del data["cats"][name]
         save_data(data)
 
-    await interaction.response.send_message(f"🗑 Deleted {name} permanently.")
+    await interaction.response.send_message(f"🗑 Deleted {name} permanently and removed all related records.")
 
 
 @bot.tree.command(name="resetmoon", description="Set moon number and correct ages")
@@ -1206,8 +1360,18 @@ async def assignmentor(interaction: discord.Interaction, apprentice: str, warrio
     await interaction.response.send_message(f"🐾 **{warrior}** is now mentoring **{apprentice}**.")
 
 @bot.tree.command(name="injurecat", description="Give a cat an injury or illness")
-async def injurecat(interaction: discord.Interaction, name: str, injury: str, severity: str = "mild"):
+@app_commands.describe(
+    name="Cat name",
+    injury="Injury or illness",
+    severity="Severity from 1 to 10",
+    moon="Moon the injury happened. Leave blank for current moon."
+)
+async def injurecat(interaction: discord.Interaction, name: str, injury: str, severity: int, moon: int = None):
     if not await staff_command_check(interaction):
+        return
+
+    if severity < 1 or severity > 10:
+        await interaction.response.send_message("Severity must be between 1 and 10.", ephemeral=True)
         return
 
     async with data_lock:
@@ -1221,16 +1385,99 @@ async def injurecat(interaction: discord.Interaction, name: str, injury: str, se
             await interaction.response.send_message("Dead cats cannot be injured.", ephemeral=True)
             return
 
+        injury_moon = moon if moon is not None else data.get("moon", 0)
+
         cat["injury"] = {
             "type": injury,
             "severity": severity,
-            "moon": data.get("moon", 0)
+            "moon": injury_moon,
+            "last_recovery_update": datetime.now(TZ).isoformat()
         }
 
-        add_history(cat, f"Injured/ill: {injury} ({severity})")
+        add_history(cat, f"Injured/ill: {injury} | Severity {severity}/10 | Moon {injury_moon}")
         save_data(data)
 
-    await interaction.response.send_message(f"🩹 **{name}** now has **{injury}** severity: **{severity}**.")
+    await interaction.response.send_message(
+        f"🩹 **{name}** now has **{injury}**.\n"
+        f"Severity: **{severity}/10, {severity_label(severity)}**\n"
+        f"Injury Moon: **Moon {injury_moon}**"
+    )
+
+@bot.tree.command(name="removeinjury", description="Remove a cat's injury or illness")
+async def removeinjury(interaction: discord.Interaction, name: str):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        if name not in data.get("cats", {}):
+            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            return
+
+        cat = data["cats"][name]
+
+        if not cat.get("injury"):
+            await interaction.response.send_message(f"{name} has no injury to remove.", ephemeral=True)
+            return
+
+        old_injury = cat["injury"].get("type", "Unknown injury")
+        cat.pop("injury", None)
+
+        add_history(cat, f"Injury/illness removed: {old_injury}")
+        save_data(data)
+
+    await interaction.response.send_message(f"🩹 Removed injury/illness from **{name}**.")
+
+@bot.tree.command(name="setinjuryseverity", description="Override a cat's injury severity")
+async def setinjuryseverity(interaction: discord.Interaction, name: str, severity: int):
+    if not await staff_command_check(interaction):
+        return
+
+    if severity < 1 or severity > 10:
+        await interaction.response.send_message("Severity must be between 1 and 10.", ephemeral=True)
+        return
+
+    async with data_lock:
+        if name not in data.get("cats", {}):
+            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            return
+
+        cat = data["cats"][name]
+
+        if not cat.get("injury"):
+            await interaction.response.send_message(f"{name} has no injury to update.", ephemeral=True)
+            return
+
+        cat["injury"]["severity"] = severity
+        cat["injury"]["last_recovery_update"] = datetime.now(TZ).isoformat()
+
+        add_history(cat, f"Injury severity changed to {severity}/10, {severity_label(severity)}")
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🩹 **{name}**'s injury severity is now **{severity}/10, {severity_label(severity)}**."
+    )
+
+@bot.tree.command(name="setinjurymoon", description="Change the moon when a cat's injury happened")
+async def setinjurymoon(interaction: discord.Interaction, name: str, moon: int):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        if name not in data.get("cats", {}):
+            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            return
+
+        cat = data["cats"][name]
+
+        if not cat.get("injury"):
+            await interaction.response.send_message(f"{name} has no injury to update.", ephemeral=True)
+            return
+
+        cat["injury"]["moon"] = moon
+        add_history(cat, f"Injury moon changed to Moon {moon}")
+        save_data(data)
+
+    await interaction.response.send_message(f"🌙 **{name}**'s injury moon is now **Moon {moon}**.")
 
 @bot.tree.command(name="delayceremony", description="Delay a cat's automatic promotion")
 @app_commands.describe(
@@ -1262,6 +1509,92 @@ async def delayceremony(interaction: discord.Interaction, name: str, moons: int)
 
     await interaction.response.send_message(
         f"⏳ **{name}**'s ceremony has been delayed by **{moons} moon(s)**."
+    )
+
+@bot.tree.command(name="setpreviousmentor", description="Add a previous mentor to a cat")
+async def setpreviousmentor(interaction: discord.Interaction, name: str, mentor: str):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if name not in cats:
+            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            return
+
+        if mentor not in cats:
+            await interaction.response.send_message("Mentor not found.", ephemeral=True)
+            return
+
+        cat = cats[name]
+        mentor_cat = cats[mentor]
+
+        cat.setdefault("previous_mentors", [])
+        if mentor not in cat["previous_mentors"]:
+            cat["previous_mentors"].append(mentor)
+
+        mentor_cat.setdefault("past_apprentices", [])
+        if name not in mentor_cat["past_apprentices"]:
+            mentor_cat["past_apprentices"].append(name)
+
+        add_history(cat, f"{mentor} added as a previous mentor")
+        add_history(mentor_cat, f"{name} added as a previous apprentice")
+
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🐾 **{mentor}** is now listed as **{name}**'s previous mentor."
+    )
+
+@bot.tree.command(name="familyadd", description="Add a family relation between two cats")
+@app_commands.describe(
+    name="First cat",
+    relation="How the second cat is related to the first cat",
+    relative="Second cat",
+    other_relation="Only use this if relation is Other"
+)
+@app_commands.choices(relation=FAMILY_RELATION_CHOICES)
+async def familyadd(
+    interaction: discord.Interaction,
+    name: str,
+    relation: app_commands.Choice[str],
+    relative: str,
+    other_relation: str = None
+):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if name not in cats:
+            await interaction.response.send_message("First cat not found.", ephemeral=True)
+            return
+
+        if relative not in cats:
+            await interaction.response.send_message("Second cat not found.", ephemeral=True)
+            return
+
+        relation_value = relation.value
+
+        if relation_value == "Other":
+            relation_value = other_relation if other_relation else "Other"
+
+        reverse_relation = reciprocal_family_relation(relation.value)
+
+        add_family_relation(cats[name], relation_value, relative)
+        add_family_relation(cats[relative], reverse_relation, name)
+
+        add_history(cats[name], f"Family relation added: {relative} as {relation_value}")
+        add_history(cats[relative], f"Family relation added: {name} as {reverse_relation}")
+
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"👪 Family relation added:\n"
+        f"**{name}** → {relation_value}: **{relative}**\n"
+        f"**{relative}** → {reverse_relation}: **{name}**"
     )
 
 # ─────────────────────────────
@@ -1458,44 +1791,68 @@ async def catinfo(interaction: discord.Interaction, name: str):
         await interaction.response.send_message("Cat not found.", ephemeral=True)
         return
 
-    cat = data["cats"][name]
+    async with data_lock:
+        cat = data["cats"][name]
 
-    history = cat.get("history", [])
-    history_text = "\n".join(history[-10:]) if history else "No history yet."
+        if process_injury_recovery(cat):
+            save_data(data)
 
-    afterlife = cat.get("afterlife") or "None"
-    mentor = cat.get("mentor") or "None"
-    apprentices = ", ".join(cat.get("apprentices", [])) if cat.get("apprentices") else "None"
+        history = cat.get("history", [])
+        history_text = "\n".join(format_history_entry(entry) for entry in history[-10:]) if history else "No history yet."
 
-    if cat.get("injury"):
-        injury_data = cat["injury"]
-        injury_text = (
-            f"{injury_data.get('type', 'Unknown')} "
-            f"({injury_data.get('severity', 'unknown')} severity, "
-            f"Moon {injury_data.get('moon', '?')})"
+        afterlife = cat.get("afterlife") or "None"
+
+        current_mentor = cat.get("mentor")
+        previous_mentors = cat.get("previous_mentors", [])
+
+        mentor_parts = []
+
+        if current_mentor:
+            mentor_parts.append(current_mentor)
+
+        for mentor_name in previous_mentors:
+            mentor_parts.append(f"{mentor_name} (PAST)")
+
+        mentor = ", ".join(mentor_parts) if mentor_parts else "None"
+
+        current_apps = cat.get("apprentices", [])
+        past_apps = [f"{app} (PAST)" for app in cat.get("past_apprentices", [])]
+
+        all_apps = current_apps + past_apps
+        apprentices = ", ".join(all_apps) if all_apps else "None"
+
+        injury_text = format_injury(cat)
+
+        family = cat.get("family", {})
+        family_lines = []
+
+        if family:
+            for relation, relatives in family.items():
+                if relatives:
+                    family_lines.append(f"**{relation}**: {', '.join(relatives)}")
+
+        family_text = "\n".join(family_lines) if family_lines else "None"
+
+        message = (
+            f"🐾 **{name}**\n"
+            f"**Clan**: {cat.get('clan')}\n"
+            f"**Rank**: {cat.get('rank')}\n"
         )
-    else:
-        injury_text = "Healthy"
 
-    message = (
-        f"🐾 **{name}**\n"
-        f"Clan: {cat.get('clan')}\n"
-        f"Rank: {cat.get('rank')}\n"
-    )
+        if cat.get("clan") == "Outsider":
+            faction = cat.get("faction") or "None"
+            message += f"**Faction**: {faction}\n"
 
-    if cat.get("clan") == "Outsider":
-        faction = cat.get("faction") or "None"
-        message += f"Faction: {faction}\n"
-
-    message += (
-        f"Age: {cat.get('age', 0)} moons\n"
-        f"Status: {cat.get('status')}\n"
-        f"Current Health: {injury_text}\n"
-        f"Mentor: {mentor}\n"
-        f"Apprentices: {apprentices}\n"
-        f"Afterlife: {afterlife}\n\n"
-        f"📜 Recent History:\n{history_text}"
-    )
+        message += (
+            f"**Age**: {cat.get('age', 0)} moons\n"
+            f"**Status**: {cat.get('status')}\n"
+            f"**Current Health**: {injury_text}\n"
+            f"**Mentor**: {mentor}\n"
+            f"**Apprentices**: {apprentices}\n"
+            f"**Afterlife**: {afterlife}\n\n"
+            f"👪 Family:\n{family_text}\n\n"
+            f"📜 Recent History:\n{history_text}"
+        )
 
     await interaction.response.send_message(message[:1900])
 
