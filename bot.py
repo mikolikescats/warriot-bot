@@ -2175,7 +2175,6 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
     mate_matches = []
 
     for other_name, other_cat in cats.items():
-
         if other_name == name:
             continue
 
@@ -2186,6 +2185,29 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
             continue
 
         if other_name in excluded_relatives:
+            continue
+
+        # Mentors and apprentices can never be romance options
+        seeker_mentor = seeker.get("mentor")
+        seeker_previous_mentors = seeker.get("previous_mentors", [])
+        seeker_apprentices = seeker.get("apprentices", [])
+        seeker_past_apprentices = seeker.get("past_apprentices", [])
+
+        other_mentor = other_cat.get("mentor")
+        other_previous_mentors = other_cat.get("previous_mentors", [])
+        other_apprentices = other_cat.get("apprentices", [])
+        other_past_apprentices = other_cat.get("past_apprentices", [])
+
+        if (
+            other_name == seeker_mentor
+            or other_name in seeker_previous_mentors
+            or other_name in seeker_apprentices
+            or other_name in seeker_past_apprentices
+            or name == other_mentor
+            or name in other_previous_mentors
+            or name in other_apprentices
+            or name in other_past_apprentices
+        ):
             continue
 
         if selected_clan != "All" and other_cat.get("clan") != selected_clan:
@@ -2241,7 +2263,7 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
         # Love interests: any 18+ cat
         # Mates:
         # - If both cats are 25+, allow up to 24 moons apart either way
-        # - If the other cat is 18–24, use the younger adult limits
+        # - If the other cat is 18–24, use the younger adult limit
         elif seeker_age >= 25:
             if other_age >= 18:
                 love_matches.append(
@@ -2267,7 +2289,7 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
         f"Rank: **{seeker_rank}**",
         f"Searching: **{selected_clan}**",
         "",
-        "Family, current mates, cats with mates, dead cats, and Medicine Cat Apprentices are excluded.",
+        "Family, mentors, apprentices, current mates, cats with mates, dead cats, and Medicine Cat Apprentices are excluded.",
         ""
     ]
 
