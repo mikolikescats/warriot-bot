@@ -983,7 +983,6 @@ async def setage(interaction: discord.Interaction, name: str, age: int):
             return
 
         data["cats"][name]["age"] = age
-        add_history(data["cats"][name], f"Age manually set to {age} moons")
         save_data(data)
 
     await interaction.response.send_message(f"🌙 {name} is now {age} moons old.")
@@ -1464,9 +1463,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
     history = cat.get("history", [])
     history_text = "\n".join(history[-10:]) if history else "No history yet."
 
-    faction = cat.get("faction") or "None"
     afterlife = cat.get("afterlife") or "None"
-
     mentor = cat.get("mentor") or "None"
     apprentices = ", ".join(cat.get("apprentices", [])) if cat.get("apprentices") else "None"
 
@@ -1484,7 +1481,13 @@ async def catinfo(interaction: discord.Interaction, name: str):
         f"🐾 **{name}**\n"
         f"Clan: {cat.get('clan')}\n"
         f"Rank: {cat.get('rank')}\n"
-        f"Faction: {faction}\n"
+    )
+
+    if cat.get("clan") == "Outsider":
+        faction = cat.get("faction") or "None"
+        message += f"Faction: {faction}\n"
+
+    message += (
         f"Age: {cat.get('age', 0)} moons\n"
         f"Status: {cat.get('status')}\n"
         f"Current Health: {injury_text}\n"
