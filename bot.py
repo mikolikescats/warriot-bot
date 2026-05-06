@@ -1349,6 +1349,56 @@ async def catinfo(interaction: discord.Interaction, name: str):
 
     await interaction.response.send_message(message[:1900])
 
+@bot.tree.command(name="upcomingceremonies", description="See upcoming ceremonies for the next 3 moons")
+@app_commands.describe(clan="Select clan")
+@app_commands.choices(clan=CLAN_ONLY_CHOICES)
+async def upcomingceremonies(interaction: discord.Interaction, clan: app_commands.Choice[str]):
+    selected_clan = clan.value
+
+    upcoming = {
+        1: [],
+        2: [],
+        3: []
+    }
+
+    for name, cat in data.get("cats", {}).items():
+        if cat.get("clan") != selected_clan:
+            continue
+
+        if cat.get("status") == "dead":
+            continue
+
+        age = cat.get("age", 0)
+        rank = cat.get("rank")
+
+        for moons_ahead in range(1, 4):
+            future_age = age + moons_ahead
+
+            if rank == "Kit" and future_age >= 6:
+                upcoming[moons_ahead].append(f"🐾 **{name}** will become an Apprentice")
+                break
+
+            if rank == "Apprentice" and future_age >= 12:
+                upcoming[moons_ahead].append(f"⚔️ **{name}** will become a Warrior")
+                break
+
+            if rank in AGING_TO_ELDER_RANKS and future_age >= 95:
+                upcoming[moons_ahead].append(f"🍂 **{name}** will become an Elder")
+                break
+
+    lines = [f"🌙 Upcoming Ceremonies for **{selected_clan}**"]
+
+    for moons_ahead in range(1, 4):
+        moon_number = data.get("moon", 0) + moons_ahead
+        lines.append(f"\n**Moon {moon_number}**")
+
+        if upcoming[moons_ahead]:
+            lines.extend(upcoming[moons_ahead])
+        else:
+            lines.append("No ceremonies expected.")
+
+    await interaction.response.send_message("\n".join(lines)[:1900])
+
 
 @bot.tree.command(name="dead", description="View dead cats by clan and afterlife")
 @app_commands.describe(clan="Filter by clan", afterlife="Filter by afterlife")
