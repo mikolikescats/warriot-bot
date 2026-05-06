@@ -349,9 +349,19 @@ def prepare_cat_record(name, cat):
 def format_history_entry(entry):
     if entry.startswith("Moon "):
         parts = entry.split(": ", 1)
+
         if len(parts) == 2:
             moon_part, text = parts
+
+            if "Injured/ill:" in text:
+                injury_name = text.split("Injured/ill:", 1)[1].split("|", 1)[0].strip()
+                return f"**{moon_part}**: Injured/ill: {injury_name} | Recovering"
+
+            if "Recovered from injury" in text or "Injury/illness removed" in text:
+                return f"**{moon_part}**: Recovered from injury/illness"
+
             return f"**{moon_part}**: {text}"
+
     return entry
 
 
@@ -394,11 +404,16 @@ def is_story_history(entry):
         "Retired as an Elder",
         "Rank changed to",
         "Died and went to",
+        "Injured/ill",
+        "Recovered from injury",
+        "Injury/illness removed",
         "Became mentor",
         "Had a litter",
         "Became mates with",
         "Broke up with"
     ]
+
+    return any(keyword in entry for keyword in important_keywords)
 
     return any(keyword in entry for keyword in important_keywords)
 
@@ -1475,8 +1490,20 @@ async def injurecat(interaction: discord.Interaction, name: str, injury: str, se
         f"Injury Moon: **Moon {injury_moon}**"
     )
 
-@bot.tree.command(name="removeinjury", description="Remove a cat's injury or illness")
-async def removeinjury(interaction: discord.Interaction, name: str):
+@bot.tree.command(name="removeinjury", description="Remove or resolve a cat's injury or illness")
+@app_commands.describe(
+    name="Cat name",
+    mode="Recover keeps history. Delete removes the injury like it never happened."
+)
+@app_commands.choices(mode=[
+    app_commands.Choice(name="Recovered", value="Recovered"),
+    app_commands.Choice(name="Delete", value="Delete")
+])
+async def removeinjury(
+    interaction: discord.Interaction,
+    name: str,
+    mode: app_commands.Choice[str]
+):
     if not await staff_command_check(interaction):
         return
 
@@ -1494,9 +1521,20 @@ async def removeinjury(interaction: discord.Interaction, name: str):
         old_injury = cat["injury"].get("type", "Unknown injury")
         cat.pop("injury", None)
 
+        if mode.value == "Recovered":
+            add_history(cat, f"Recovered from injury/illness: {old_injury}")
+            response = f"🩹 **{name}** has recovered from **{old_injury}**."
+
+        else:
+            cat["history"] = [
+                entry for entry in cat.get("history", [])
+                if old_injury not in entry
+            ]
+            response = f"🧹 Deleted **{old_injury}** from **{name}**'s records."
+
         save_data(data)
 
-    await interaction.response.send_message(f"🩹 Removed **{old_injury}** from **{name}**.")
+    await interaction.response.send_message(response)
 
 @bot.tree.command(name="setinjuryseverity", description="Override a cat's injury severity")
 async def setinjuryseverity(interaction: discord.Interaction, name: str, severity: int):
@@ -2107,8 +2145,15 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
 
     seeker = cats[name]
 
-    if seeker.get("status") == "dead":
+    if str(seeker.get("status", "Alive")).lower() == "dead":
         await interaction.response.send_message("Dead cats cannot use CatTinder.", ephemeral=True)
+        return
+
+    if seeker.get("mates"):
+        await interaction.response.send_message(
+            f"**{name}** already has a mate and cannot use CatTinder unless that relationship is removed.",
+            ephemeral=True
+        )
         return
 
     seeker_age = seeker.get("age", 0)
@@ -2116,10 +2161,32 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
     selected_clan = clan.value
 
     crush_matches = []
+    love_matches = []
     mate_matches = []
+
+    def get_all_relatives(cat):
+        relatives = set()
+        family = cat.get("family", {})
+
+        for relation, relation_list in family.items():
+            for relative_name in relation_list:
+                relatives.add(relative_name)
+
+        return relatives
+
+    seeker_relatives = get_all_relatives(seeker)
 
     for other_name, other_cat in cats.items():
         if other_name == name:
+            continue
+
+        if str(other_cat.get("status", "Alive")).lower() == "dead":
+            continue
+
+        if selected_clan != "All" and other_cat.get("clan") != selected_clan:
+            continue
+
+        if other_cat.get("mates"):
             continue
 
         if other_name in seeker.get("mates", []):
@@ -2128,10 +2195,9 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
         if name in other_cat.get("mates", []):
             continue
 
-        if other_cat.get("status") == "dead":
-            continue
+        other_relatives = get_all_relatives(other_cat)
 
-        if selected_clan != "All" and other_cat.get("clan") != selected_clan:
+        if other_name in seeker_relatives or name in other_relatives:
             continue
 
         other_age = other_cat.get("age", 0)
@@ -2140,64 +2206,133 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
         if other_rank in ["Kit", "Medicine Cat Apprentice"]:
             continue
 
-        # 6-11 moons: apprentice crushes only, within 4 moons
-        if seeker_age < 12:
-            if other_rank == "Apprentice" and 6 <= other_age < 12 and abs(seeker_age - other_age) <= 4:
+        if seeker_age < 10:
+            continue
+
+        # 10-11 moons: minor crushes only, up to 4 moons younger
+        if 10 <= seeker_age <= 11:
+            if seeker_age - 4 <= other_age <= seeker_age:
                 crush_matches.append(
-                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Apprentice crush only"
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Crush only"
                 )
 
-        # 12-17 moons: love interests only, up to 6 moons older
-        elif 12 <= seeker_age <= 17:
+        # 12-14 moons: crushes up to 4 moons younger, love interests up to 18 moons
+        elif 12 <= seeker_age <= 14:
+            if seeker_age - 4 <= other_age < seeker_age:
+                crush_matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Crush only"
+                )
+
+            elif seeker_age <= other_age <= 18:
+                love_matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Love interest only"
+                )
+
+        # 15-17 moons: love interests up to 6 moons older, no mates yet
+        elif 15 <= seeker_age <= 17:
             if 12 <= other_age <= seeker_age + 6:
-                if other_rank not in ["Kit", "Apprentice", "Medicine Cat Apprentice"]:
-                    crush_matches.append(
-                        f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Love interest only"
-                    )
+                love_matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Love interest only"
+                )
 
-        # 18+ moons: love interests can be 6 moons younger, mates can be up to 12 moons older
-        else:
+        # 18-24 moons: love interests can be 6 moons younger, mates only if both are 18+
+        elif 18 <= seeker_age <= 24:
             if seeker_age - 6 <= other_age < 18:
-                if other_rank not in ["Kit", "Medicine Cat Apprentice"]:
-                    crush_matches.append(
-                        f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Love interest only"
-                    )
+                love_matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Love interest only"
+                )
 
-            if other_age >= 18 and seeker_age - 6 <= other_age <= seeker_age + 12:
-                if other_rank not in ["Kit", "Apprentice", "Medicine Cat Apprentice"]:
-                    mate_matches.append(
-                        f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Mate eligible"
-                    )
+            elif other_age >= 18 and seeker_age - 6 <= other_age <= seeker_age + 12:
+                mate_matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Mate eligible"
+                )
+
+        # 25-36 moons: regular adult rule
+        elif 25 <= seeker_age <= 36:
+            if seeker_age - 6 <= other_age < 18:
+                love_matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Love interest only"
+                )
+
+            elif other_age >= 18 and seeker_age - 6 <= other_age <= seeker_age + 12:
+                mate_matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Mate eligible"
+                )
+
+        # 37-53 moons: mate can be 18 moons older, only 12 moons younger
+        elif 37 <= seeker_age <= 53:
+            if seeker_age - 12 <= other_age < 18:
+                love_matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Love interest only"
+                )
+
+            elif other_age >= 18 and seeker_age - 12 <= other_age <= seeker_age + 18:
+                mate_matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Mate eligible"
+                )
+
+        # 54+ moons: mate can be 18 moons younger or older
+        else:
+            if seeker_age - 18 <= other_age < 18:
+                love_matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Love interest only"
+                )
+
+            elif other_age >= 18 and seeker_age - 18 <= other_age <= seeker_age + 18:
+                mate_matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Mate eligible"
+                )
 
     lines = [
         f"💕 CatTinder for **{name}**",
         f"Age: **{seeker_age} moons**",
         f"Rank: **{seeker_rank}**",
         f"Searching: **{selected_clan}**",
+        "",
+        "Family members, grandparents, grandkits, current mates, cats who already have mates, kits, medicine cat apprentices, and dead cats are excluded.",
         ""
     ]
 
-    if seeker_age < 12:
-        lines.append("**Apprentice Crush Matches**")
-        lines.append("Cats under 12 moons may only have minor, age-appropriate apprentice crushes.")
-        lines.extend(crush_matches if crush_matches else ["No compatible apprentice crushes found."])
+    if seeker_age < 10:
+        lines.append("Cats under 10 moons are too young for CatTinder.")
 
-    elif 12 <= seeker_age <= 17:
-        lines.append("**Love Interest Matches**")
-        lines.append("Cats 12–17 moons may have love interests up to 6 moons older, but cannot become official mates until 18 moons.")
-        lines.extend(crush_matches if crush_matches else ["No compatible love interests found."])
-
-    else:
-        lines.append("**Love Interest Matches**")
-        lines.append("18+ moon cats may have love interests up to 6 moons younger.")
-        lines.extend(crush_matches if crush_matches else ["No younger love interests found."])
-
+    if crush_matches:
+        lines.append("**Crush Matches**")
+        lines.extend(crush_matches)
         lines.append("")
-        lines.append("**Mate Eligible Matches**")
-        lines.append("18+ moon cats may become mates with cats from 18 moons old up to 12 moons older.")
-        lines.extend(mate_matches if mate_matches else ["No mate-eligible cats found."])
 
-    await interaction.response.send_message("\n".join(lines)[:1900])
+    if love_matches:
+        lines.append("**Love Interest Matches**")
+        lines.extend(love_matches)
+        lines.append("")
+
+    if mate_matches:
+        lines.append("**Mate Eligible Matches**")
+        lines.extend(mate_matches)
+        lines.append("")
+
+    if not crush_matches and not love_matches and not mate_matches and seeker_age >= 10:
+        lines.append("No compatible matches found.")
+
+    full_message = "\n".join(lines)
+
+    chunks = []
+    max_length = 1900
+
+    while len(full_message) > max_length:
+        split_at = full_message.rfind("\n", 0, max_length)
+        if split_at == -1:
+            split_at = max_length
+
+        chunks.append(full_message[:split_at])
+        full_message = full_message[split_at:].lstrip()
+
+    chunks.append(full_message)
+
+    await interaction.response.send_message(chunks[0])
+
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk)
 
 @bot.tree.command(name="addmate", description="Set two cats as mates")
 async def addmate(interaction: discord.Interaction, cat1: str, cat2: str):
