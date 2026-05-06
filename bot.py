@@ -1593,52 +1593,60 @@ async def mentorlist(interaction: discord.Interaction, clan: app_commands.Choice
 
     await interaction.response.send_message("\n".join(lines)[:1900])
 
-@bot.tree.command(name="gatheringreport", description="Generate a quick Gathering summary")
-async def gatheringreport(interaction: discord.Interaction):
+@bot.tree.command(name="gatheringreport", description="Generate a Clan-specific Gathering report")
+@app_commands.describe(clan="Select clan")
+@app_commands.choices(clan=CLAN_ONLY_CHOICES)
+async def gatheringreport(interaction: discord.Interaction, clan: app_commands.Choice[str]):
+    selected_clan = clan.value
+    current_moon = data.get("moon", 0)
+
+    important_keywords = [
+        "Became an Apprentice",
+        "Became a Warrior",
+        "Retired as an Elder",
+        "Rank changed to",
+        "Died and went to",
+        "Injured/ill",
+        "Ceremony delayed",
+        "Assigned",
+        "Became mentor"
+    ]
+
+    events = []
+
+    for name, cat in data.get("cats", {}).items():
+        if cat.get("clan") != selected_clan:
+            continue
+
+        history = cat.get("history", [])
+
+        for entry in history:
+            if not entry.startswith(f"Moon {current_moon}:"):
+                continue
+
+            if any(keyword in entry for keyword in important_keywords):
+                clean_entry = entry.replace(f"Moon {current_moon}: ", "")
+                events.append(f"• **{name}** — {clean_entry}")
+
     lines = [
-        f"🌙 **Gathering Report: Moon {data.get('moon', 0)}**",
-        f"🍃 Season: **{data.get('season', get_current_season())} ({get_season_moon()}/3)**",
+        f"📜 Gathering Report for **{selected_clan}**",
+        f"🌙 Moon {current_moon}",
+        f"🍃 Season: {data.get('season', get_current_season())} ({get_season_moon()}/3)",
         ""
     ]
 
-    for clan_name in CLAN_NAMES_ONLY:
-        lines.append(f"⛺ **{clan_name}**")
-
-        leader = "None"
-        deputy = "None"
-        medicine = []
-        injuries = []
-
-        for name, cat in data.get("cats", {}).items():
-            if cat.get("clan") != clan_name or cat.get("status") == "dead":
-                continue
-
-            if cat.get("rank") == "Leader":
-                leader = name
-            elif cat.get("rank") == "Deputy":
-                deputy = name
-            elif cat.get("rank") in ["Medicine Cat", "Medicine Cat Apprentice"]:
-                medicine.append(f"{name} ({cat.get('rank')})")
-
-            if cat.get("injury"):
-                injury = cat["injury"]
-                injuries.append(f"{name}: {injury.get('type')} ({injury.get('severity')})")
-
-        lines.append(f"Leader: {leader}")
-        lines.append(f"Deputy: {deputy}")
-        lines.append(f"Medicine: {', '.join(medicine) if medicine else 'None'}")
-
-        if injuries:
-            lines.append("Injured/Ill: " + "; ".join(injuries))
-
-        lines.append("")
+    if events:
+        lines.append("**Clan Updates**")
+        lines.extend(events)
+    else:
+        lines.append("No major updates recorded for this Clan this moon.")
 
     await interaction.response.send_message("\n".join(lines)[:1900])
 
 @bot.tree.command(name="cattinder", description="Find age-appropriate romance options for a cat")
 @app_commands.describe(
     name="Your cat's name",
-    clan="Choose a Clan to search, or Any"
+    clan="Choose a Clan to search, or All"
 )
 @app_commands.choices(clan=CLAN_FILTER_CHOICES)
 async def cattinder(interaction: discord.Interaction, name: str, clan: app_commands.Choice[str]):
@@ -1658,73 +1666,81 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
     seeker_rank = seeker.get("rank")
     selected_clan = clan.value
 
-    matches = []
+    crush_matches = []
+    mate_matches = []
 
-    if seeker_age < 12:
-        for other_name, other_cat in cats.items():
-            if other_name == name:
-                continue
+    for other_name, other_cat in cats.items():
+        if other_name == name:
+            continue
 
-            if other_cat.get("status") == "dead":
-                continue
+        if other_cat.get("status") == "dead":
+            continue
 
-            if selected_clan != "All" and other_cat.get("clan") != selected_clan:
-                continue
+        if selected_clan != "All" and other_cat.get("clan") != selected_clan:
+            continue
 
-            other_age = other_cat.get("age", 0)
-            other_rank = other_cat.get("rank")
+        other_age = other_cat.get("age", 0)
+        other_rank = other_cat.get("rank")
 
-            if other_rank == "Apprentice" and other_age < 12:
-                if abs(seeker_age - other_age) <= 3:
-                    matches.append(
-                        f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Apprentice crush only"
-                    )
+        if other_rank in ["Kit", "Medicine Cat Apprentice"]:
+            continue
 
-        title = f"💕 CatTinder for **{name}**"
-        note = "Cats under 12 moons may only have minor, age-appropriate apprentice crushes."
-
-    else:
-        max_gap = 12 if seeker_age < 24 else 18
-
-        for other_name, other_cat in cats.items():
-            if other_name == name:
-                continue
-
-            if other_cat.get("status") == "dead":
-                continue
-
-            if selected_clan != "All" and other_cat.get("clan") != selected_clan:
-                continue
-
-            other_age = other_cat.get("age", 0)
-            other_rank = other_cat.get("rank")
-
-            if other_age < 12:
-                continue
-
-            if other_rank in ["Kit", "Apprentice", "Medicine Cat Apprentice"]:
-                continue
-
-            if seeker_rank in ["Kit", "Apprentice", "Medicine Cat Apprentice"]:
-                continue
-
-            if abs(seeker_age - other_age) <= max_gap:
-                matches.append(
-                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | {other_rank}"
+        # 6-11 moons: apprentice crushes only, within 4 moons
+        if seeker_age < 12:
+            if other_rank == "Apprentice" and 6 <= other_age < 12 and abs(seeker_age - other_age) <= 4:
+                crush_matches.append(
+                    f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Apprentice crush only"
                 )
 
-        title = f"💕 CatTinder for **{name}**"
-        note = f"Age gap limit: {max_gap} moons."
+        # 12-17 moons: love interests only, up to 6 moons older
+        elif 12 <= seeker_age <= 17:
+            if 12 <= other_age <= seeker_age + 6:
+                if other_rank not in ["Kit", "Apprentice", "Medicine Cat Apprentice"]:
+                    crush_matches.append(
+                        f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Love interest only"
+                    )
+
+        # 18+ moons: love interests can be 6 moons younger, mates can be up to 12 moons older
+        else:
+            if seeker_age - 6 <= other_age < 18:
+                if other_rank not in ["Kit", "Medicine Cat Apprentice"]:
+                    crush_matches.append(
+                        f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Love interest only"
+                    )
+
+            if other_age >= 18 and seeker_age - 6 <= other_age <= seeker_age + 12:
+                if other_rank not in ["Kit", "Apprentice", "Medicine Cat Apprentice"]:
+                    mate_matches.append(
+                        f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | Mate eligible"
+                    )
 
     lines = [
-        title,
+        f"💕 CatTinder for **{name}**",
         f"Age: **{seeker_age} moons**",
+        f"Rank: **{seeker_rank}**",
         f"Searching: **{selected_clan}**",
-        note,
         ""
     ]
 
-    lines.extend(matches if matches else ["No compatible cats found."])
+    if seeker_age < 12:
+        lines.append("**Apprentice Crush Matches**")
+        lines.append("Cats under 12 moons may only have minor, age-appropriate apprentice crushes.")
+        lines.extend(crush_matches if crush_matches else ["No compatible apprentice crushes found."])
+
+    elif 12 <= seeker_age <= 17:
+        lines.append("**Love Interest Matches**")
+        lines.append("Cats 12–17 moons may have love interests up to 6 moons older, but cannot become official mates until 18 moons.")
+        lines.extend(crush_matches if crush_matches else ["No compatible love interests found."])
+
+    else:
+        lines.append("**Love Interest Matches**")
+        lines.append("18+ moon cats may have love interests up to 6 moons younger.")
+        lines.extend(crush_matches if crush_matches else ["No younger love interests found."])
+
+        lines.append("")
+        lines.append("**Mate Eligible Matches**")
+        lines.append("18+ moon cats may become mates with cats from 18 moons old up to 12 moons older.")
+        lines.extend(mate_matches if mate_matches else ["No mate-eligible cats found."])
 
     await interaction.response.send_message("\n".join(lines)[:1900])
 
