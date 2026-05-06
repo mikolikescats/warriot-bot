@@ -2276,10 +2276,21 @@ async def breakup(interaction: discord.Interaction, cat1: str, cat2: str):
 @bot.tree.command(name="removerelationship", description="Remove a relationship between two cats")
 @app_commands.describe(
     cat1="First cat",
-    relation="Relationship type to remove from the first cat",
+    relation="Relationship type to remove",
     cat2="Second cat"
 )
-@app_commands.choices(relation=FAMILY_RELATION_CHOICES)
+@app_commands.choices(relation=[
+    app_commands.Choice(name="Mother", value="Mother"),
+    app_commands.Choice(name="Father", value="Father"),
+    app_commands.Choice(name="Non-Bio Parental Figure", value="Non-Bio Parental Figure"),
+    app_commands.Choice(name="Sibling", value="Sibling"),
+    app_commands.Choice(name="Cousin", value="Cousin"),
+    app_commands.Choice(name="Kit", value="Kit"),
+    app_commands.Choice(name="Non-Bio Kit", value="Non-Bio Kit"),
+    app_commands.Choice(name="Mate", value="Mate"),
+    app_commands.Choice(name="Ex-Mate", value="Ex-Mate"),
+    app_commands.Choice(name="Other", value="Other")
+])
 async def removerelationship(
     interaction: discord.Interaction,
     cat1: str,
@@ -2301,22 +2312,28 @@ async def removerelationship(
             return
 
         relation_value = relation.value
-        reverse_relation = reciprocal_family_relation(relation_value)
 
-        if relation_value in cats[cat1].get("family", {}):
-            remove_from_list(cats[cat1]["family"], relation_value, cat2)
+        if relation_value == "Mate":
+            remove_from_list(cats[cat1], "mates", cat2)
+            remove_from_list(cats[cat2], "mates", cat1)
 
-        if reverse_relation in cats[cat2].get("family", {}):
-            remove_from_list(cats[cat2]["family"], reverse_relation, cat1)
+        elif relation_value == "Ex-Mate":
+            remove_from_list(cats[cat1], "ex_mates", cat2)
+            remove_from_list(cats[cat2], "ex_mates", cat1)
 
-        add_history(cats[cat1], f"Removed relationship: {cat2} as {relation_value}")
-        add_history(cats[cat2], f"Removed relationship: {cat1} as {reverse_relation}")
+        else:
+            reverse_relation = reciprocal_family_relation(relation_value)
+
+            if relation_value in cats[cat1].get("family", {}):
+                remove_from_list(cats[cat1]["family"], relation_value, cat2)
+
+            if reverse_relation in cats[cat2].get("family", {}):
+                remove_from_list(cats[cat2]["family"], reverse_relation, cat1)
 
         save_data(data)
 
     await interaction.response.send_message(
-        f"🧹 Removed relationship:\n"
-        f"**{cat1}** no longer has **{cat2}** listed as **{relation_value}**."
+        f"🧹 Removed **{relation_value}** relationship between **{cat1}** and **{cat2}**."
     )
 
 
