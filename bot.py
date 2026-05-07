@@ -744,7 +744,8 @@ async def run_moon_update():
                 old_mentor = cat.get("mentor")
 
                 if old_mentor:
-                    cat["mentor"] = f"{old_mentor} (PAST)"
+                    if "(PAST)" not in str(old_mentor):
+                        cat["mentor"] = f"{old_mentor} (PAST)"
 
                     if old_mentor in data["cats"]:
                         mentor_cat = data["cats"][old_mentor]
