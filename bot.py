@@ -1977,8 +1977,8 @@ async def catinfo(interaction: discord.Interaction, name: str):
             f"**Mentor**: {mentor}\n"
             f"**Apprentices**: {apprentices}\n"
             f"**Afterlife**: {afterlife}\n\n"
-            f"👪 Relationships:\n{relationships_text}\n\n"
-            f"📜 Recent History:\n{history_text}"
+            f"👪 **Relationships:**\n{relationships_text}\n\n"
+            f"📜 **Recent History:**\n{history_text}"
         )
 
     await interaction.response.send_message(message[:1900])
@@ -2442,6 +2442,8 @@ async def breakup(interaction: discord.Interaction, cat1: str, cat2: str):
     app_commands.Choice(name="Cousin", value="Cousin"),
     app_commands.Choice(name="Kit", value="Kit"),
     app_commands.Choice(name="Non-Bio Kit", value="Non-Bio Kit"),
+    app_commands.Choice(name="Grandparent", value="Grandparent"),
+    app_commands.Choice(name="Grandkit", value="Grandkit"),
     app_commands.Choice(name="Mate", value="Mate"),
     app_commands.Choice(name="Ex-Mate", value="Ex-Mate"),
     app_commands.Choice(name="Other", value="Other")
@@ -2472,9 +2474,33 @@ async def removerelationship(
             remove_from_list(cats[cat1], "mates", cat2)
             remove_from_list(cats[cat2], "mates", cat1)
 
+            cats[cat1]["history"] = [
+                entry for entry in cats[cat1].get("history", [])
+                if f"Became mates with {cat2}" not in entry
+                and f"Broke up with {cat2}" not in entry
+            ]
+
+            cats[cat2]["history"] = [
+                entry for entry in cats[cat2].get("history", [])
+                if f"Became mates with {cat1}" not in entry
+                and f"Broke up with {cat1}" not in entry
+            ]
+
         elif relation_value == "Ex-Mate":
             remove_from_list(cats[cat1], "ex_mates", cat2)
             remove_from_list(cats[cat2], "ex_mates", cat1)
+
+            cats[cat1]["history"] = [
+                entry for entry in cats[cat1].get("history", [])
+                if f"Became mates with {cat2}" not in entry
+                and f"Broke up with {cat2}" not in entry
+            ]
+
+            cats[cat2]["history"] = [
+                entry for entry in cats[cat2].get("history", [])
+                if f"Became mates with {cat1}" not in entry
+                and f"Broke up with {cat1}" not in entry
+            ]
 
         else:
             reverse_relation = reciprocal_family_relation(relation_value)
