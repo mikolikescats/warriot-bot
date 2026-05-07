@@ -2143,7 +2143,60 @@ async def relationship_clearhistory(interaction: discord.Interaction, cat1: str,
     await interaction.response.send_message(
         f"🧹 Cleared relationship history between **{cat1}** and **{cat2}**."
     )
+@relationship_group.command(name="removeall", description="Remove all relationship records from one cat")
+async def relationship_removeall(interaction: discord.Interaction, name: str):
+    if not await staff_command_check(interaction):
+        return
 
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if name not in cats:
+            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            return
+
+        target_cat = cats[name]
+
+        # Remove this cat from everyone else's relationship records
+        for other_name, other_cat in cats.items():
+            if other_name == name:
+                continue
+
+            remove_from_list(other_cat, "mates", name)
+            remove_from_list(other_cat, "ex_mates", name)
+            remove_from_list(other_cat, "apprentices", name)
+            remove_from_list(other_cat, "past_apprentices", name)
+            remove_from_list(other_cat, "previous_mentors", name)
+
+            if other_cat.get("mentor") == name:
+                other_cat["mentor"] = None
+
+            family = other_cat.get("family", {})
+            for relation in list(family.keys()):
+                family[relation] = [
+                    relative for relative in family[relation]
+                    if relative != name
+                ]
+
+                if not family[relation]:
+                    del family[relation]
+
+        # Clear this cat's own relationship records
+        target_cat.pop("mates", None)
+        target_cat.pop("ex_mates", None)
+        target_cat.pop("mentor", None)
+        target_cat.pop("apprentices", None)
+        target_cat.pop("past_apprentices", None)
+        target_cat.pop("previous_mentors", None)
+        target_cat.pop("family", None)
+
+        add_history(target_cat, "All relationship records removed")
+
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🧹 Removed all relationship records for **{name}**."
+    )
 
 # ─────────────────────────────
 # CLEANED CAT TINDER
