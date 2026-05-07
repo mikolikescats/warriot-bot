@@ -1135,10 +1135,10 @@ async def add_litter(
 
         save_data(data)
 
-        await interaction.response.send_message(
+    await interaction.response.send_message(
         f"🍼 Litter recorded for **{mother}**:\n"
         + "\n".join([f"• {kit_name}" for kit_name in kit_names])
-)
+    )
 
 @bot.tree.command(name="resetmoon", description="Set moon number and correct ages")
 async def resetmoon(interaction: discord.Interaction, moon: int = 4):
@@ -2205,15 +2205,6 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
     for chunk in chunks[1:]:
         await interaction.followup.send(chunk)
 
-
-# ─────────────────────────────
-# REGISTER CLEAN COMMAND GROUPS
-# ─────────────────────────────
-
-bot.tree.add_command(cat_group)
-bot.tree.add_command(injury_group)
-bot.tree.add_command(mentor_group)
-bot.tree.add_command(relationship_group)
 
 # ─────────────────────────────
 # WEATHER LOOP + WEATHER COMMANDS
