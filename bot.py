@@ -1178,6 +1178,69 @@ async def advance_moon(interaction: discord.Interaction):
     await interaction.followup.send("🌙 Moon advanced manually.")
 
 # ─────────────────────────────
+# /BOTINFO
+# ─────────────────────────────
+
+@bot.tree.command(name="botinfo", description="View a full guide to all major bot commands")
+async def botinfo(interaction: discord.Interaction):
+    message = (
+        "📘 **ECHOSTONE MOUNTAIN BOT GUIDE** 📘\n\n"
+
+        "🌙 **Moon / System Commands**\n"
+        "`/moon` — View the current moon, season, and clan status\n"
+        "`/advancemoon` — Staff only. Manually advances one moon and posts the report\n"
+        "`/resetmoon` — Staff only. Resets moon count and adjusts living cat ages\n"
+        "`/weatherreport` — View the weekly weather report\n\n"
+
+        "🐾 **General Member Commands**\n"
+        "`/catinfo [name]` — View full details about a cat\n"
+        "`/cats [clan]` — View all cats by clan or all clans\n"
+        "`/clan [ClanName]` — View one clan roster\n"
+        "`/cattinder [name] [clan]` — Find age-appropriate romance options\n\n"
+
+        "🛠️ **Staff Cat Management**\n"
+        "`/cat add` — Add a new living cat\n"
+        "`/cat adddead` — Add a dead cat to records\n"
+        "`/cat delete` — Permanently delete a cat\n"
+        "`/cat rename` — Rename a cat and update references\n"
+        "`/cat rank` — Change rank\n"
+        "`/cat age` — Set exact age\n"
+        "`/cat markdead` — Mark living cat as dead\n"
+        "`/cat delayceremony` — Delay rank-up ceremonies\n"
+        "`/cat tinderhide` — Hide/unhide from Cat Tinder\n\n"
+
+        "🩹 **Staff Injury Commands**\n"
+        "`/injury add` — Add injury or illness\n"
+        "`/injury remove` — Recover or delete injury\n"
+        "`/injury severity` — Adjust severity manually\n"
+        "`/injury moon` — Change injury moon\n\n"
+
+        "🎓 **Staff Mentor Commands**\n"
+        "`/mentor assign` — Assign a current mentor\n"
+        "`/mentor previous` — Add a previous mentor\n\n"
+
+        "💕 **Staff Relationship Commands**\n"
+        "`/relationship mate` — Make two cats mates\n"
+        "`/relationship breakup` — Break mates into ex-mates\n"
+        "`/relationship family` — Add family relation\n"
+        "`/relationship remove` — Remove a specific relation\n"
+        "`/clearrelationhistory` — Fully wipe all relationship history between two cats\n\n"
+
+        "🍼 **Litter Command**\n"
+        "`/addlitter` — Record kits born to a mother\n\n"
+
+        "📌 **Important Notes**\n"
+        "• Most staff commands only work in the bot command channel\n"
+        "• Dead cats cannot be mentored, injured, or aged\n"
+        "• Cat Tinder automatically excludes family, mentors, exes, dead cats, hidden cats, and mates\n"
+        "• If something looks wrong, use `/catinfo` first to inspect records\n\n"
+
+        "🌟 Tip: If records are wrong (age, clan, rank, spelling), fix them ASAP so moon reports stay accurate."
+    )
+
+    await interaction.response.send_message(message[:1900], ephemeral=True)
+
+# ─────────────────────────────
 # CLEANED STAFF COMMAND GROUPS
 # ─────────────────────────────
 
@@ -2103,8 +2166,8 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
         )
         return
 
-    crush_matches.sort(key=lambda item: int(item.split("— ")[1].split(" moons")[0]))
-    adult_matches.sort(key=lambda item: int(item.split("— ")[1].split(" moons")[0]))
+    crush_matches = []
+    adult_matches = []
 
     for other_name, other_cat in cats.items():
         if other_name == name:
@@ -2143,24 +2206,30 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
             if 6 <= other_age <= 11 and abs(seeker_age - other_age) <= 4:
                 crush_matches.append(line)
 
-        # 12–17 moons: age-appropriate young love/crushes only
+        # 12–17 moons: young love/crushes only
         elif 12 <= seeker_age <= 17:
             min_age = seeker_age - 4
             max_age = seeker_age + 6
 
-            if 12 <= other_age <= 17 and min_age <= other_age <= max_age:
+            if 12 <= other_age <= 23 and min_age <= other_age <= max_age:
                 crush_matches.append(line)
 
-        # Adult cats: love interests/crushes/mates use the same age range
+        # 18+ moons: can have crushes 6 moons younger, but official mates must be 18+
         elif seeker_age >= 18:
             min_age = seeker_age - 6
             max_age = seeker_age + 144
 
-            if other_age >= 18 and min_age <= other_age <= max_age:
+            if 12 <= other_age < 18 and min_age <= other_age:
+                crush_matches.append(line)
+
+            elif other_age >= 18 and min_age <= other_age <= max_age:
                 adult_matches.append(line)
 
     crush_matches = list(dict.fromkeys(crush_matches))
     adult_matches = list(dict.fromkeys(adult_matches))
+
+    crush_matches.sort(key=lambda item: int(item.split("— ")[1].split(" moons")[0]))
+    adult_matches.sort(key=lambda item: int(item.split("— ")[1].split(" moons")[0]))
 
     lines = [
         f"💕 Cat Tinder for **{name}**",
@@ -2173,7 +2242,7 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
     ]
 
     if crush_matches:
-        lines.append("**Age-Appropriate Love Interests/Crushes**")
+        lines.append("**Age-Appropriate Love Interests/Crushes Only**")
         lines.extend(crush_matches)
         lines.append("")
 
@@ -2707,6 +2776,21 @@ async def dead(interaction: discord.Interaction, clan: app_commands.Choice[str],
         )
 
     await interaction.response.send_message("\n".join(lines)[:1900])
+
+@bot.tree.command(name="bothelp", description="View member bot commands")
+async def bothelp(interaction: discord.Interaction):
+    message = (
+        "📘 **Member Bot Help**\n\n"
+        "🌙 `/moon` — Check the current moon and season.\n"
+        "⛺ `/clan [ClanName]` — View a Clan or Outsider roster.\n"
+        "🐾 `/catinfo [name]` — View a cat’s profile, health, relationships, mentor, apprentices, and recent history.\n"
+        "💕 `/cattinder [name] [clan]` — Find age-appropriate romance options for a cat.\n"
+        "💀 `/dead [clan] [afterlife]` — View deceased cats by Clan and afterlife.\n"
+        "🌦️ `/weatherreport` — Send/view the weekly territory weather report.\n\n"
+        "📌 **Tip:** If a cat’s age, rank, Clan, name, or relationship looks wrong, tell staff so they can fix the records."
+    )
+
+    await interaction.response.send_message(message, ephemeral=True)
 
 # ─────────────────────────────
 # RUN BOT
