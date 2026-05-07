@@ -220,6 +220,8 @@ FAMILY_RELATIONS = [
     "Cousin",
     "Kit",
     "Non-Bio Kit",
+    "Grandparent",
+    "Grandkit",
     "Other"
 ]
 
@@ -500,11 +502,12 @@ def reciprocal_family_relation(relation):
         "Sibling": "Sibling",
         "Cousin": "Cousin",
         "Kit": "Parent",
-        "Non-Bio Kit": "Non-Bio Parental Figure"
+        "Non-Bio Kit": "Non-Bio Parental Figure",
+        "Grandparent": "Grandkit",
+        "Grandkit": "Grandparent"
     }
 
     return opposites.get(relation, "Other")
-
 
 def remove_from_list(cat, key, value):
     if key in cat:
@@ -1779,8 +1782,24 @@ async def injury_moon(interaction: discord.Interaction, name: str, moon: int):
             await interaction.response.send_message(f"{name} has no injury to update.", ephemeral=True)
             return
 
+        injury_name = cat["injury"].get("type", "Unknown injury")
         cat["injury"]["moon"] = moon
-        add_history(cat, f"Injury moon changed to Moon {moon}")
+
+        # Update the visible injury history entry too
+        updated_history = []
+
+        for entry in cat.get("history", []):
+            if "Injured/ill:" in entry and injury_name in entry:
+                updated_history.append(
+                    f"Moon {moon}: Injured/ill: {injury_name} | Severity {cat['injury'].get('severity', '?')}/10 | Moon {moon}"
+                )
+            elif "Injury moon changed to Moon" in entry:
+                continue
+            else:
+                updated_history.append(entry)
+
+        cat["history"] = updated_history
+
         save_data(data)
 
     await interaction.response.send_message(f"🌙 **{name}**'s injury moon is now **Moon {moon}**.")
@@ -2047,6 +2066,8 @@ async def relationship_family(
     app_commands.Choice(name="Cousin", value="Cousin"),
     app_commands.Choice(name="Kit", value="Kit"),
     app_commands.Choice(name="Non-Bio Kit", value="Non-Bio Kit"),
+    app_commands.Choice(name="Grandparent", value="Grandparent"),
+    app_commands.Choice(name="Grandkit", value="Grandkit"),
     app_commands.Choice(name="Other", value="Other")
 ])
 async def relationship_remove(
