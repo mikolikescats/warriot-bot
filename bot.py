@@ -2517,6 +2517,49 @@ async def removerelationship(
         f"🧹 Removed **{relation_value}** relationship between **{cat1}** and **{cat2}**."
     )
 
+@bot.tree.command(name="clearrelationhistory", description="Delete relationship history between two cats")
+async def clearrelationhistory(interaction: discord.Interaction, cat1: str, cat2: str):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if cat1 not in cats:
+            await interaction.response.send_message("First cat not found.", ephemeral=True)
+            return
+
+        if cat2 not in cats:
+            await interaction.response.send_message("Second cat not found.", ephemeral=True)
+            return
+
+        relationship_keywords = [
+            "Became mates with",
+            "Broke up with",
+            "Family relation added",
+            "Removed relationship",
+            "Had a litter",
+            "Born to",
+            "Became mentor to",
+            "Assigned",
+            "previous mentor",
+            "previous apprentice"
+        ]
+
+        for cat_name, other_name in [(cat1, cat2), (cat2, cat1)]:
+            cats[cat_name]["history"] = [
+                entry for entry in cats[cat_name].get("history", [])
+                if not (
+                    other_name.lower() in entry.lower()
+                    and any(keyword.lower() in entry.lower() for keyword in relationship_keywords)
+                )
+            ]
+
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🧹 Cleared relationship history between **{cat1}** and **{cat2}**."
+    )
 
 @bot.tree.command(name="dead", description="View dead cats by clan and afterlife")
 @app_commands.describe(clan="Filter by clan", afterlife="Filter by afterlife")
