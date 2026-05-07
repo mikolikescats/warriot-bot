@@ -699,32 +699,28 @@ async def run_moon_update():
         for name, cat in data.get("cats", {}).items():
             prepare_cat_record(name, cat)
 
-            recovered = process_injury_recovery(cat)
-            if recovered:
-    if cat.get("injury"):
-        report["promotions"].append(f"🩹 {name}'s injury recovery progressed.")
-    else:
-        report["promotions"].append(f"💚 {name} recovered from their injury.")
+                    recovered = process_injury_recovery(cat)
 
-            if str(cat.get("status", "Alive")).lower() == "dead":
-                continue
-
-            cat["age"] = cat.get("age", 0) + 1
-
-            delay = cat.get("ceremony_delay", 0)
-            is_due_for_ceremony = (
-                (cat.get("rank") == "Kit" and cat["age"] >= 6)
-                or (cat.get("rank") == "Apprentice" and cat["age"] >= 12)
-                or (cat.get("rank") in AGING_TO_ELDER_RANKS and cat["age"] >= 95)
-            )
-
-            if delay > 0 and is_due_for_ceremony:
-                cat["ceremony_delay"] = delay - 1
-                add_history(cat, f"Ceremony delayed. {cat['ceremony_delay']} moon(s) remaining")
+        if recovered:
+            if cat.get("injury"):
                 report["promotions"].append(
-                    f"⏳ {name}'s ceremony was delayed. {cat['ceremony_delay']} moon(s) remaining."
+                    f"🩹 {name}'s injury recovery progressed."
                 )
-                continue
+            else:
+                report["promotions"].append(
+                    f"💚 {name} recovered from their injury."
+                )
+
+        if delay > 0 and is_due_for_ceremony:
+            cat["ceremony_delay"] = delay - 1
+            add_history(
+                cat,
+                f"Ceremony delayed. {cat['ceremony_delay']} moon(s) remaining"
+            )
+            report["promotions"].append(
+                f"⏳ {name}'s ceremony was delayed. {cat['ceremony_delay']} moon(s) remaining."
+            )
+            continue
 
             if cat.get("rank") == "Kit" and cat["age"] >= 6:
                 cat["rank"] = "Apprentice"
