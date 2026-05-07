@@ -1196,7 +1196,7 @@ async def botinfo(interaction: discord.Interaction):
         "`/catinfo [name]` — View full details about a cat\n"
         "`/cats [clan]` — View all cats by clan or all clans\n"
         "`/clan [ClanName]` — View one clan roster\n"
-        "`/cattinder [name] [clan]` — Find age-appropriate romance options\n\n"
+        "`/ [name] [clan]` — Find age-appropriate romance options\n\n"
 
         "🛠️ **Staff Cat Management**\n"
         "`/cat add` — Add a new living cat\n"
@@ -2166,8 +2166,61 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
         )
         return
 
-    crush_matches = []
-    adult_matches = []
+    childhood_crushes = []
+    love_interests = []
+    mate_options = []
+
+    def get_match_type(seeker_age, other_age):
+        if other_age < 6:
+            return None
+
+        # 6–11 moons: childhood crushes only, within 4 moons
+        if 6 <= seeker_age <= 11:
+            if 6 <= other_age <= 11 and abs(seeker_age - other_age) <= 4:
+                return "childhood"
+            return None
+
+        # 12–14 moons: crushes/love interests from 10–18 moons
+        if 12 <= seeker_age <= 14:
+            if 10 <= other_age <= 18:
+                return "love"
+            return None
+
+        # 15–17 moons: love interests/crushes, 4 younger to 6 older
+        if 15 <= seeker_age <= 17:
+            if seeker_age - 4 <= other_age <= seeker_age + 6:
+                return "love"
+            return None
+
+        # 18–24 moons: love interests up to 6 younger, mates up to 12 older
+        if 18 <= seeker_age <= 24:
+            if seeker_age - 6 <= other_age < 18:
+                return "love"
+
+            if other_age >= 18 and seeker_age - 6 <= other_age <= seeker_age + 12:
+                return "mate"
+
+            return None
+
+        # 25–36 moons: any 18+ cat up to 12 moons older
+        if 25 <= seeker_age <= 36:
+            if other_age >= 18 and other_age <= seeker_age + 12:
+                return "mate"
+            return None
+
+        # 37–53 moons: any 18+ cat within 18 moons older or younger
+        if 37 <= seeker_age <= 53:
+            if other_age >= 18 and seeker_age - 18 <= other_age <= seeker_age + 18:
+                return "mate"
+            return None
+
+        # 54+ moons: 18 moons younger to 24 moons older
+        if seeker_age >= 54:
+            if other_age >= 18 and seeker_age - 18 <= other_age <= seeker_age + 24:
+                return "mate"
+            return None
+
+        return None
 
     for other_name, other_cat in cats.items():
         if other_name == name:
@@ -2195,41 +2248,27 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
             continue
 
         other_age = int(other_cat.get("age", 0))
+        match_type = get_match_type(seeker_age, other_age)
 
-        if other_age < 6:
+        if not match_type:
             continue
 
         line = f"• **{other_name}** — {other_age} moons | {other_cat.get('clan')} | {other_cat.get('rank')}"
 
-        # 6–11 moons: innocent childhood crushes only, within 4 moons
-        if 6 <= seeker_age <= 11:
-            if 6 <= other_age <= 11 and abs(seeker_age - other_age) <= 4:
-                crush_matches.append(line)
+        if match_type == "childhood":
+            childhood_crushes.append(line)
+        elif match_type == "love":
+            love_interests.append(line)
+        elif match_type == "mate":
+            mate_options.append(line)
 
-        # 12–17 moons: young love/crushes only
-        elif 12 <= seeker_age <= 17:
-            min_age = seeker_age - 4
-            max_age = seeker_age + 6
+    childhood_crushes = list(dict.fromkeys(childhood_crushes))
+    love_interests = list(dict.fromkeys(love_interests))
+    mate_options = list(dict.fromkeys(mate_options))
 
-            if 12 <= other_age <= 23 and min_age <= other_age <= max_age:
-                crush_matches.append(line)
-
-        # 18+ moons: can have crushes 6 moons younger, but official mates must be 18+
-        elif seeker_age >= 18:
-            min_age = seeker_age - 6
-            max_age = seeker_age + 144
-
-            if 12 <= other_age < 18 and min_age <= other_age:
-                crush_matches.append(line)
-
-            elif other_age >= 18 and min_age <= other_age <= max_age:
-                adult_matches.append(line)
-
-    crush_matches = list(dict.fromkeys(crush_matches))
-    adult_matches = list(dict.fromkeys(adult_matches))
-
-    crush_matches.sort(key=lambda item: int(item.split("— ")[1].split(" moons")[0]))
-    adult_matches.sort(key=lambda item: int(item.split("— ")[1].split(" moons")[0]))
+    childhood_crushes.sort(key=lambda item: int(item.split("— ")[1].split(" moons")[0]))
+    love_interests.sort(key=lambda item: int(item.split("— ")[1].split(" moons")[0]))
+    mate_options.sort(key=lambda item: int(item.split("— ")[1].split(" moons")[0]))
 
     lines = [
         f"💕 Cat Tinder for **{name}**",
@@ -2237,21 +2276,26 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
         f"Rank: **{seeker_rank}**",
         f"Searching: **{selected_clan}**",
         "",
-        "Family, mentors, apprentices, current mates, cats with mates, dead cats, hidden cats, and Medicine Cat Apprentices are excluded.",
+        "Dead cats, cats with mates, family members, blocked relationships, hidden cats, and Medicine Cat Apprentices are excluded.",
         ""
     ]
 
-    if crush_matches:
-        lines.append("**Age-Appropriate Love Interests/Crushes Only**")
-        lines.extend(crush_matches)
+    if childhood_crushes:
+        lines.append("**Childhood Crushes Only**")
+        lines.extend(childhood_crushes)
         lines.append("")
 
-    if adult_matches:
-        lines.append("**Love Interests/Crushes/Mates**")
-        lines.extend(adult_matches)
+    if love_interests:
+        lines.append("**Love Interests / Crushes Only**")
+        lines.extend(love_interests)
         lines.append("")
 
-    if not crush_matches and not adult_matches:
+    if mate_options:
+        lines.append("**Mate / Love Interest Options**")
+        lines.extend(mate_options)
+        lines.append("")
+
+    if not childhood_crushes and not love_interests and not mate_options:
         lines.append("No compatible matches found.")
 
     full_message = "\n".join(lines)
