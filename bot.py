@@ -1308,7 +1308,7 @@ def remove_relationship_history_between(cat, other_name):
         entry for entry in cat.get("history", [])
         if not (
             other_name.lower() in entry.lower()
-            and any(keyword.lower() in entry.lower() for keyword in relationship_keywords)
+            and any(keyword.lower() in entry.lower() for keyword in _keywords)
         )
     ]
 
@@ -2050,30 +2050,16 @@ async def relationship_family(
     )
 
 
-@relationship_group.command(name="remove", description="Remove a relationship between two cats")
+@relationship_group.command(name="remove", description="Remove a relationship between two cats by typing the relationship name")
 @app_commands.describe(
     cat1="First cat",
-    relation="Relationship type to remove",
+    relation="Relationship type to remove, example: Mother, Nephew, Grandparent, Other",
     cat2="Second cat"
 )
-@app_commands.choices(relation=[
-    app_commands.Choice(name="Mate", value="Mate"),
-    app_commands.Choice(name="Ex-Mate", value="Ex-Mate"),
-    app_commands.Choice(name="Mother", value="Mother"),
-    app_commands.Choice(name="Father", value="Father"),
-    app_commands.Choice(name="Non-Bio Parental Figure", value="Non-Bio Parental Figure"),
-    app_commands.Choice(name="Sibling", value="Sibling"),
-    app_commands.Choice(name="Cousin", value="Cousin"),
-    app_commands.Choice(name="Kit", value="Kit"),
-    app_commands.Choice(name="Non-Bio Kit", value="Non-Bio Kit"),
-    app_commands.Choice(name="Grandparent", value="Grandparent"),
-    app_commands.Choice(name="Grandkit", value="Grandkit"),
-    app_commands.Choice(name="Other", value="Other")
-])
 async def relationship_remove(
     interaction: discord.Interaction,
     cat1: str,
-    relation: app_commands.Choice[str],
+    relation: str,
     cat2: str
 ):
     if not await staff_command_check(interaction):
@@ -2090,24 +2076,40 @@ async def relationship_remove(
             await interaction.response.send_message("Second cat not found.", ephemeral=True)
             return
 
-        relation_value = relation.value
+        relation_value = relation.strip()
 
-        if relation_value == "Mate":
+        # Remove mates/ex-mates
+        if relation_value.lower() in ["mate", "mates"]:
             remove_from_list(cats[cat1], "mates", cat2)
             remove_from_list(cats[cat2], "mates", cat1)
 
-        elif relation_value == "Ex-Mate":
+        elif relation_value.lower() in ["ex-mate", "ex mate", "ex-mates", "ex mates"]:
             remove_from_list(cats[cat1], "ex_mates", cat2)
             remove_from_list(cats[cat2], "ex_mates", cat1)
 
         else:
-            reverse_relation = reciprocal_family_relation(relation_value)
+            # Remove the typed relation from cat1 → cat2
+            family1 = cats[cat1].get("family", {})
+            for saved_relation in list(family1.keys()):
+                if saved_relation.lower() == relation_value.lower():
+                    family1[saved_relation] = [
+                        relative for relative in family1[saved_relation]
+                        if relative != cat2
+                    ]
 
-            if relation_value in cats[cat1].get("family", {}):
-                remove_from_list(cats[cat1]["family"], relation_value, cat2)
+                    if not family1[saved_relation]:
+                        del family1[saved_relation]
 
-            if reverse_relation in cats[cat2].get("family", {}):
-                remove_from_list(cats[cat2]["family"], reverse_relation, cat1)
+            # Also remove cat1 from ANY matching relation on cat2
+            family2 = cats[cat2].get("family", {})
+            for saved_relation in list(family2.keys()):
+                family2[saved_relation] = [
+                    relative for relative in family2[saved_relation]
+                    if relative != cat1
+                ]
+
+                if not family2[saved_relation]:
+                    del family2[saved_relation]
 
         add_history(cats[cat1], f"Removed relationship with {cat2}: {relation_value}")
         add_history(cats[cat2], f"Removed relationship with {cat1}: {relation_value}")
