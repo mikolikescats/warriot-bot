@@ -216,26 +216,20 @@ FAMILY_RELATIONS = [
     "Mother",
     "Father",
     "Parent",
-
     "Non-Bio Mother",
     "Non-Bio Father",
     "Non-Bio Parent",
     "Non-Bio Parental Figure",
-
     "Sibling",
     "Cousin",
-
     "Kit",
     "Non-Bio Kit",
-
     "Grandmother",
     "Grandfather",
     "Grandparent",
-
     "Grandkit",
     "Other"
 ]
-
 FAMILY_RELATION_CHOICES = [
     app_commands.Choice(name=relation, value=relation)
     for relation in FAMILY_RELATIONS
@@ -1998,7 +1992,7 @@ async def relationship_mate(interaction: discord.Interaction, cat1: str, cat2: s
 
 
 @relationship_group.command(name="breakup", description="Break up two mates and mark them as ex-mates")
-async def relationship_breakup(interaction: discord.interaction, cat1: str, cat2: str):
+async def relationship_breakup(interaction: discord.Interaction, cat1: str, cat2: str):
     if not await staff_command_check(interaction):
         return
 
@@ -2748,7 +2742,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
             f"{history_text}"
         )
 
-    await interaction.response.send_message(message[:1900])
+    await safe_respond(interaction, message[:1900])
 
 @bot.tree.command(name="upcomingceremonies", description="See upcoming ceremonies for the next 3 moons")
 @app_commands.describe(clan="Select clan")
