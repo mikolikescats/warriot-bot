@@ -215,12 +215,23 @@ AFTERLIFE_FILTER_CHOICES = [
 FAMILY_RELATIONS = [
     "Mother",
     "Father",
+    "Parent",
+
+    "Non-Bio Mother",
+    "Non-Bio Father",
+    "Non-Bio Parent",
     "Non-Bio Parental Figure",
+
     "Sibling",
     "Cousin",
+
     "Kit",
     "Non-Bio Kit",
+
+    "Grandmother",
+    "Grandfather",
     "Grandparent",
+
     "Grandkit",
     "Other"
 ]
@@ -498,12 +509,24 @@ def reciprocal_family_relation(relation):
     opposites = {
         "Mother": "Kit",
         "Father": "Kit",
+        "Parent": "Kit",
+
+        "Kit": "Parent",
+
+        "Non-Bio Mother": "Non-Bio Kit",
+        "Non-Bio Father": "Non-Bio Kit",
+        "Non-Bio Parent": "Non-Bio Kit",
         "Non-Bio Parental Figure": "Non-Bio Kit",
+
+        "Non-Bio Kit": "Non-Bio Parent",
+
         "Sibling": "Sibling",
         "Cousin": "Cousin",
-        "Kit": "Parent",
-        "Non-Bio Kit": "Non-Bio Parental Figure",
+
+        "Grandmother": "Grandkit",
+        "Grandfather": "Grandkit",
         "Grandparent": "Grandkit",
+
         "Grandkit": "Grandparent"
     }
 
@@ -811,8 +834,10 @@ async def build_clan_report_text(report=None):
         lines.append(f"⛺ {clan_name}")
 
         clan_cats = {
-            name: cat for name, cat in data.get("cats", {}).items()
-            if cat.get("clan") == clan_name and str(cat.get("status", "Alive")).lower() != "dead"
+            name: cat
+            for name, cat in data.get("cats", {}).items()
+            if cat.get("clan") == clan_name
+            and str(cat.get("status", "Alive")).lower() != "dead"
         }
 
         if not clan_cats:
@@ -822,7 +847,8 @@ async def build_clan_report_text(report=None):
 
         for rank in RANK_ORDER:
             ranked_cats = [
-                (name, cat) for name, cat in clan_cats.items()
+                (name, cat)
+                for name, cat in clan_cats.items()
                 if cat.get("rank") == rank
             ]
 
@@ -840,28 +866,37 @@ async def build_clan_report_text(report=None):
     lines.append("🌫 Outsiders")
 
     outsiders = [
-        (name, cat) for name, cat in data.get("cats", {}).items()
-        if cat.get("clan") == "Outsider" and str(cat.get("status", "Alive")).lower() != "dead"
+        (name, cat)
+        for name, cat in data.get("cats", {}).items()
+        if cat.get("clan") == "Outsider"
+        and str(cat.get("status", "Alive")).lower() != "dead"
     ]
 
     if outsiders:
         outsiders.sort(key=lambda item: item[1].get("age", 0), reverse=True)
+
         for name, cat in outsiders:
             faction = f" | {cat.get('faction')}" if cat.get("faction") else ""
-            lines.append(f"• {name} — {cat.get('rank')} — {cat.get('age', 0)} moons{faction}")
+            lines.append(
+                f"• {name} — {cat.get('rank')} — {cat.get('age', 0)} moons{faction}"
+            )
     else:
         lines.append("No outsiders")
 
     lines.extend(["", "💀 Deaths This Moon"])
 
     recent_dead = [
-        (name, cat) for name, cat in data.get("cats", {}).items()
-        if str(cat.get("status", "Alive")).lower() == "dead" and cat.get("death_moon") == data["moon"]
+        (name, cat)
+        for name, cat in data.get("cats", {}).items()
+        if str(cat.get("status", "Alive")).lower() == "dead"
+        and cat.get("death_moon") == data["moon"]
     ]
 
     if recent_dead:
         for name, cat in recent_dead:
-            lines.append(f"• {name} — {cat.get('age', 0)} moons → {cat.get('afterlife')}")
+            lines.append(
+                f"• {name} — {cat.get('age', 0)} moons → {cat.get('afterlife')}"
+            )
     else:
         lines.append("No deaths")
 
@@ -1227,7 +1262,7 @@ async def botinfo(interaction: discord.Interaction):
         "`/relationship breakup` — Break mates into ex-mates\n"
         "`/relationship family` — Add family relation\n"
         "`/relationship remove` — Remove a specific relation\n"
-        "`/clearrelationhistory` — Fully wipe all relationship history between two cats\n\n"
+        "`/relationship clearhistory` — Fully wipe all relationship history between two cats\n\n"
 
         "🍼 **Litter Command**\n"
         "`/addlitter` — Record kits born to a mother\n\n"
@@ -1241,7 +1276,7 @@ async def botinfo(interaction: discord.Interaction):
         "🌟 Tip: If records are wrong (age, clan, rank, spelling), fix them ASAP so moon reports stay accurate."
     )
 
-    await interaction.response.send_message(message[:1900], ephemeral=True)
+    await safe_respond(interaction, message[:1900], ephemeral=True)
 
 # ─────────────────────────────
 # CLEANED STAFF COMMAND GROUPS
@@ -1963,7 +1998,7 @@ async def relationship_mate(interaction: discord.Interaction, cat1: str, cat2: s
 
 
 @relationship_group.command(name="breakup", description="Break up two mates and mark them as ex-mates")
-async def relationship_breakup(interaction: discord.Interaction, cat1: str, cat2: str):
+async def relationship_breakup(interaction: discord.interaction, cat1: str, cat2: str):
     if not await staff_command_check(interaction):
         return
 
@@ -2118,7 +2153,6 @@ async def relationship_remove(
     await interaction.response.send_message(
         f"🧹 Removed **{relation_value}** relationship between **{cat1}** and **{cat2}**."
     )
-
 
 @relationship_group.command(name="clearhistory", description="Clear relationship history between two cats")
 async def relationship_clearhistory(interaction: discord.Interaction, cat1: str, cat2: str):
