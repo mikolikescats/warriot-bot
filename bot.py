@@ -565,7 +565,7 @@ def handle_succession(report):
             (name, cat) for name, cat in data["cats"].items()
             if cat.get("clan") == clan
             and cat.get("rank") == "Leader"
-            and cat.get("status") != "dead"
+            and str(cat.get("status", "Alive")).lower() != "dead"
         ]
 
         if living_leaders:
@@ -575,7 +575,7 @@ def handle_succession(report):
             (name, cat) for name, cat in data["cats"].items()
             if cat.get("clan") == clan
             and cat.get("rank") == "Deputy"
-            and cat.get("status") != "dead"
+            and str(cat.get("status", "Alive")).lower() != "dead"
         ]
 
         if deputies:
@@ -591,7 +591,7 @@ def handle_medicine_succession(report):
             (name, cat) for name, cat in data["cats"].items()
             if cat.get("clan") == clan
             and cat.get("rank") == "Medicine Cat"
-            and cat.get("status") != "dead"
+            and str(cat.get("status", "Alive")).lower() != "dead"
         ]
 
         if living_meds:
@@ -601,7 +601,7 @@ def handle_medicine_succession(report):
             (name, cat) for name, cat in data["cats"].items()
             if cat.get("clan") == clan
             and cat.get("rank") == "Medicine Cat Apprentice"
-            and cat.get("status") != "dead"
+            and str(cat.get("status", "Alive")).lower() != "dead"
         ]
 
         if med_apps:
@@ -812,7 +812,7 @@ async def build_clan_report_text(report=None):
 
         clan_cats = {
             name: cat for name, cat in data.get("cats", {}).items()
-            if cat.get("clan") == clan_name and cat.get("status") != "dead"
+            if cat.get("clan") == clan_name and str(cat.get("status", "Alive")).lower() != "dead"
         }
 
         if not clan_cats:
@@ -841,7 +841,7 @@ async def build_clan_report_text(report=None):
 
     outsiders = [
         (name, cat) for name, cat in data.get("cats", {}).items()
-        if cat.get("clan") == "Outsider" and cat.get("status") != "dead"
+        if cat.get("clan") == "Outsider" and str(cat.get("status", "Alive")).lower() != "dead"
     ]
 
     if outsiders:
@@ -856,7 +856,7 @@ async def build_clan_report_text(report=None):
 
     recent_dead = [
         (name, cat) for name, cat in data.get("cats", {}).items()
-        if cat.get("status") == "dead" and cat.get("death_moon") == data["moon"]
+        if str(cat.get("status", "Alive")).lower() == "dead" and cat.get("death_moon") == data["moon"]
     ]
 
     if recent_dead:
@@ -1155,7 +1155,7 @@ async def resetmoon(interaction: discord.Interaction, moon: int = 4):
         data["season"] = get_current_season()
 
         for cat in data["cats"].values():
-            if cat.get("status") != "dead":
+            if str(cat.get("status", "Alive")).lower() != "dead":
                 cat["age"] = max(0, cat.get("age", 0) + difference)
 
         save_data(data)
@@ -1199,7 +1199,7 @@ async def botinfo(interaction: discord.Interaction):
         "`/catinfo [name]` — View full details about a cat\n"
         "`/cats [clan]` — View all cats by clan or all clans\n"
         "`/clan [ClanName]` — View one clan roster\n"
-        "`/ [name] [clan]` — Find age-appropriate romance options\n\n"
+        "`/cattinder [name] [clan]` — Find age-appropriate romance options\n\n"
 
         "🛠️ **Staff Cat Management**\n"
         "`/cat add` — Add a new living cat\n"
@@ -1308,10 +1308,9 @@ def remove_relationship_history_between(cat, other_name):
         entry for entry in cat.get("history", [])
         if not (
             other_name.lower() in entry.lower()
-            and any(keyword.lower() in entry.lower() for keyword in _keywords)
+            and any(keyword.lower() in entry.lower() for keyword in relationship_keywords)
         )
     ]
-
 
 # ─────────────────────────────
 # /CAT COMMANDS
@@ -2145,6 +2144,7 @@ async def relationship_clearhistory(interaction: discord.Interaction, cat1: str,
     await interaction.response.send_message(
         f"🧹 Cleared relationship history between **{cat1}** and **{cat2}**."
     )
+    
 @relationship_group.command(name="removeall", description="Remove all relationship records from one cat")
 async def relationship_removeall(interaction: discord.Interaction, name: str):
     if not await staff_command_check(interaction):
@@ -2732,7 +2732,7 @@ async def upcomingceremonies(interaction: discord.Interaction, clan: app_command
         if cat.get("clan") != selected_clan:
             continue
 
-        if cat.get("status") == "dead":
+        if str(cat.get("status", "Alive")).lower() == "dead":
             continue
 
         age = cat.get("age", 0)
@@ -2778,7 +2778,7 @@ async def mentorlist(interaction: discord.Interaction, clan: app_commands.Choice
     valid_mentor_ranks = ["Warrior", "Leader", "Deputy", "Medicine Cat", "Preymaster", "Healer", "Digger", "Pathfinder", "Sporekeeper", "River Guardian"]
 
     for name, cat in data.get("cats", {}).items():
-        if cat.get("clan") != selected_clan or cat.get("status") == "dead":
+        if cat.get("clan") != selected_clan or str(cat.get("status", "Alive")).lower() == "dead":
             continue
 
         rank = cat.get("rank")
@@ -2870,7 +2870,7 @@ async def dead(interaction: discord.Interaction, clan: app_commands.Choice[str],
     dead_cats = []
 
     for name, cat in data.get("cats", {}).items():
-        if cat.get("status") != "dead":
+        if str(cat.get("status", "Alive")).lower() != "dead":
             continue
 
         if clan.value != "All" and cat.get("clan") != clan.value:
