@@ -75,7 +75,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 DATA_ROW_ID = "main"
 REPORT_CHANNEL_ID = 1500707305631780984
-COMMAND_CHANNEL_ID = 1500705057207746610
+COMMAND_CHANNEL_ID = 1503486789900570784
 WEATHER_CHANNEL_ID = 1441502516591202394
 WEATHER_CHANNEL_ID = 123456789
 WEATHER_REPORT_ROLE_ID = 987654321
@@ -340,6 +340,8 @@ def is_medical_staff(interaction: discord.Interaction):
     return bool(MEDICAL_ROLE_IDS.intersection(user_role_ids))
 
 
+MMEDICAL_COMMAND_CHANNEL_ID = 1503486789900570784
+
 async def medical_command_check(interaction: discord.Interaction):
     if not is_medical_staff(interaction):
         await interaction.response.send_message(
@@ -348,9 +350,9 @@ async def medical_command_check(interaction: discord.Interaction):
         )
         return False
 
-    if interaction.channel_id != COMMAND_CHANNEL_ID:
+    if interaction.channel_id != MEDICAL_COMMAND_CHANNEL_ID:
         await interaction.response.send_message(
-            "Use bot commands in the command channel only.",
+            "Use medical commands in the medical channel only.",
             ephemeral=True
         )
         return False
