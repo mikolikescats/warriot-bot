@@ -640,7 +640,6 @@ def handle_medicine_succession(report):
 # ─────────────────────────────
 
 OC_QUESTIONS = [
-    OC_QUESTIONS = [
     "What’s your OC’s favourite season?",
     "What’s your OC’s favourite weather?",
     "What’s your OC’s least favourite weather?",
@@ -741,7 +740,6 @@ OC_QUESTIONS = [
     "Which OC is most likely to become a meme legend?",
     "Which OC is most likely to survive entirely on snacks?",
     "Which OC is most likely to somehow end up on the news?",
-
     "What’s your OC’s favourite pizza chain?",
     "What’s your OC’s least favourite chore?",
     "What would your OC binge-watch for 12 hours straight?",
@@ -847,7 +845,7 @@ OC_QUESTIONS = [
     "What’s your OC’s dream viral tweet?",
     "What would your OC’s mugshot be for?",
     "Would your OC survive working customer service?",
-    "What would your OC absolutely rage quit?"
+    "What would your OC absolutely rage quit?",
 ]
 
 @bot.tree.command(name="question", description="Post a silly OC question")
@@ -884,8 +882,10 @@ async def question(interaction: discord.Interaction):
         save_data(data)
 
     await interaction.response.send_message(
-        f"💭 **OC Question of the Day!**\n\n"
-        f"{chosen_question}"
+        f"<@&1503421848329650196> 🌟 **Gather round, mountain cats!** 🌟\n\n"
+        f"🐾 **Today’s OC Question:**\n"
+        f"**{chosen_question}**\n\n"
+        f"💬 Feel free to answer below!"
     )
 
 # ─────────────────────────────
