@@ -84,6 +84,17 @@ REPORT_CHANNEL_ID = 1441502516591202394
 HELPER_ROLE_ID = 1484027097784516668
 MODERATOR_ROLE_ID = 1441506626371715103
 WEATHER_REPORT_ROLE_ID = 1500967820194877490
+MEDICINE_CAT_ROLE_ID = 1449118843485032599
+MEDICINE_CAT_APPRENTICE_ROLE_ID = 1449118899860672683
+HEALER_ROLE_ID = 1449118955418550364
+
+MEDICAL_ROLE_IDS = {
+    MEDICINE_CAT_ROLE_ID,
+    MEDICINE_CAT_APPRENTICE_ROLE_ID,
+    HEALER_ROLE_ID,
+    HELPER_ROLE_ID,
+    MODERATOR_ROLE_ID
+}
 
 # ─────────────────────────────
 # CLANS, RANKS, AND CHOICES
@@ -317,7 +328,46 @@ data_lock = asyncio.Lock()
 # PERMISSION HELPERS
 # ─────────────────────────────
 
+def is_medical_staff(interaction: discord.Interaction):
+    if not hasattr(interaction.user, "roles"):
+        return False
 
+    user_role_ids = {role.id for role in interaction.user.roles}
+    return bool(MEDICAL_ROLE_IDS.intersection(user_role_ids))
+
+
+async def medical_command_check(interaction: discord.Interaction):
+    if not is_medical_staff(interaction):
+        await interaction.response.send_message(
+            "You do not have permission to use medical commands.",
+            ephemeral=True
+        )
+        return False
+
+    if interaction.channel_id != COMMAND_CHANNEL_ID:
+        await interaction.response.send_message(
+            "Use bot commands in the command channel only.",
+            ephemeral=True
+        )
+        return False
+
+    return True
+
+
+def days_since_iso(iso_value):
+    if not iso_value:
+        return None
+
+    try:
+        old_time = datetime.fromisoformat(iso_value)
+        return (datetime.now(TZ) - old_time).days
+    except Exception:
+        return None
+
+
+def recovery_days_needed(severity):
+    return max(2, int(severity) * 2)
+    
 def is_staff(interaction: discord.Interaction):
     if not hasattr(interaction.user, "roles"):
         return False
@@ -1575,6 +1625,7 @@ cat_group = app_commands.Group(name="cat", description="Manage cat records")
 injury_group = app_commands.Group(name="injury", description="Manage injuries and illnesses")
 mentor_group = app_commands.Group(name="mentor", description="Manage mentors and apprentices")
 relationship_group = app_commands.Group(name="relationship", description="Manage relationships")
+medical_group = app_commands.Group(name="medical", description="Medicine cat treatment commands")
 
 
 def cat_is_dead(cat):
@@ -2145,6 +2196,150 @@ async def injury_moon(interaction: discord.Interaction, name: str, moon: int):
         save_data(data)
 
     await interaction.response.send_message(f"🌙 **{name}**'s injury moon is now **Moon {moon}**.")
+
+# ─────────────────────────────
+# /MEDICAL COMMANDS
+# ─────────────────────────────
+
+@medical_group.command(name="report", description="Show cats who need medical treatment")
+@app_commands.describe(clan="Optional clan filter")
+@app_commands.choices(clan=CLAN_FILTER_CHOICES)
+async def medical_report(
+    interaction: discord.Interaction,
+    clan: app_commands.Choice[str] = None
+):
+    if not await medical_command_check(interaction):
+        return
+
+    async with data_lock:
+        chosen_clan = clan.value if clan else "All"
+        lines = ["🩺 **Medical Treatment Report**", ""]
+
+        injured_cats = []
+
+        for name, cat in data.get("cats", {}).items():
+            if cat_is_dead(cat):
+                continue
+
+            if not cat.get("injury"):
+                continue
+
+            if chosen_clan != "All" and cat.get("clan") != chosen_clan:
+                continue
+
+            injury = cat["injury"]
+            severity = int(injury.get("severity", 1))
+            last_treated_days = days_since_iso(injury.get("last_treated"))
+            last_recovery_days = days_since_iso(injury.get("last_recovery_update"))
+
+            injured_cats.append((cat.get("clan", "Unknown"), name, cat, severity, last_treated_days, last_recovery_days))
+
+        if not injured_cats:
+            await interaction.response.send_message(
+                "💚 No cats currently need medical treatment.",
+                ephemeral=True
+            )
+            return
+
+        injured_cats.sort(key=lambda item: (item[0], -item[3], item[1].lower()))
+
+        current_clan = None
+
+        for clan_name, name, cat, severity, last_treated_days, last_recovery_days in injured_cats:
+            injury = cat["injury"]
+
+            if clan_name != current_clan:
+                current_clan = clan_name
+                lines.append(f"⛺ **{clan_name}**")
+
+            treatment_status = injury.get("care_status", "Needs Care")
+
+            if last_treated_days is None:
+                treated_text = "Not treated yet"
+            elif last_treated_days == 0:
+                treated_text = "Treated today"
+            else:
+                treated_text = f"Last treated {last_treated_days} day(s) ago"
+
+            needed_days = recovery_days_needed(severity)
+
+            lines.append(
+                f"• **{name}** — {injury.get('type', 'Unknown')}\n"
+                f"  Severity: **{severity}/10, {severity_label(severity)}**\n"
+                f"  Status: **{treatment_status}**\n"
+                f"  Care: {treated_text}\n"
+                f"  Natural recovery: about **{needed_days} day(s)** from last recovery update"
+            )
+
+        message = "\n".join(lines)
+        await send_long_message(interaction.channel, message)
+
+    await interaction.response.send_message("🩺 Medical report posted.", ephemeral=True)
+
+
+@medical_group.command(name="treat", description="Mark that a cat received medical care")
+@app_commands.describe(
+    name="Cat name",
+    status="Choose whether the cat is still recovering or fully recovered",
+    notes="Optional treatment notes"
+)
+@app_commands.choices(status=[
+    app_commands.Choice(name="Recovering", value="Recovering"),
+    app_commands.Choice(name="Recovered", value="Recovered")
+])
+async def medical_treat(
+    interaction: discord.Interaction,
+    name: str,
+    status: app_commands.Choice[str],
+    notes: str = None
+):
+    if not await medical_command_check(interaction):
+        return
+
+    async with data_lock:
+        if name not in data.get("cats", {}):
+            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            return
+
+        cat = data["cats"][name]
+
+        if cat_is_dead(cat):
+            await interaction.response.send_message("Dead cats cannot receive medical treatment.", ephemeral=True)
+            return
+
+        if not cat.get("injury"):
+            await interaction.response.send_message(f"**{name}** has no current injury or illness.", ephemeral=True)
+            return
+
+        injury = cat["injury"]
+        injury_name = injury.get("type", "injury/illness")
+        now_iso = datetime.now(TZ).isoformat()
+
+        if status.value == "Recovered":
+            cat.pop("injury", None)
+
+            history_text = f"Recovered from injury/illness: {injury_name}"
+            if notes:
+                history_text += f" | Treatment notes: {notes}"
+
+            add_history(cat, history_text)
+            response = f"💚 **{name}** has recovered from **{injury_name}**."
+
+        else:
+            injury["care_status"] = "Recovering"
+            injury["last_treated"] = now_iso
+            injury["last_recovery_update"] = now_iso
+
+            history_text = f"Received medical care for {injury_name}. Still recovering"
+            if notes:
+                history_text += f" | Notes: {notes}"
+
+            add_history(cat, history_text)
+            response = f"🩹 **{name}** received care for **{injury_name}** and is still recovering."
+
+        save_data(data)
+
+    await interaction.response.send_message(response)
 
 
 # ─────────────────────────────
@@ -3761,7 +3956,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
         if process_injury_recovery(cat):
             save_data(data)
 
-        # ─────────────────────────────
+                # ─────────────────────────────
         # CLEAN HISTORY DISPLAY
         # ─────────────────────────────
         history = [
@@ -3772,10 +3967,12 @@ async def catinfo(interaction: discord.Interaction, name: str):
         formatted_history = []
 
         for entry in history[-10:]:
-            # Make recovery history show exact injury name
+
+            # Recovery history
             if "Recovered from injury/illness:" in entry:
                 try:
                     moon_part, injury_part = entry.split(": ", 1)
+
                     injury_name = injury_part.replace(
                         "Recovered from injury/illness:",
                         ""
@@ -3784,11 +3981,29 @@ async def catinfo(interaction: discord.Interaction, name: str):
                     formatted_history.append(
                         f"**{moon_part}**: Recovered from {injury_name}"
                     )
+
                 except Exception:
                     formatted_history.append(format_history_entry(entry))
 
+            # Medical treatment history
+            elif "Received medical care for" in entry:
+                try:
+                    moon_part, treatment_part = entry.split(": ", 1)
+
+                    treatment_text = treatment_part.replace(
+                        "Received medical care for",
+                        ""
+                    ).strip()
+
+                    formatted_history.append(
+                        f"**{moon_part}**: Received care for {treatment_text}"
+                    )
+
+                except Exception:
+                    formatted_history.append(format_history_entry(entry))
+
+            # Older generic recovery entries
             elif "Recovered from injury/illness" in entry:
-                # fallback for older generic entries
                 formatted_history.append(format_history_entry(entry))
 
             else:
@@ -4159,5 +4374,6 @@ bot.tree.add_command(cat_group)
 bot.tree.add_command(injury_group)
 bot.tree.add_command(mentor_group)
 bot.tree.add_command(relationship_group)
+bot.tree.add_command(medical_group)
 keep_alive()
 bot.run(TOKEN)
