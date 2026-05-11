@@ -1989,42 +1989,6 @@ async def mentor_previous(interaction: discord.Interaction, name: str, mentor: s
 # /RELATIONSHIP COMMANDS
 # ─────────────────────────────
 
-@relationship_group.command(name="breakup", description="Break up two mates and mark them as ex-mates")
-async def relationship_breakup(interaction: discord.Interaction, cat1: str, cat2: str):
-    if not await staff_command_check(interaction):
-        return
-
-    async with data_lock:
-        cats = data.get("cats", {})
-
-        if cat1 not in cats:
-            await interaction.response.send_message("First cat not found.", ephemeral=True)
-            return
-
-        if cat2 not in cats:
-            await interaction.response.send_message("Second cat not found.", ephemeral=True)
-            return
-
-        remove_from_list(cats[cat1], "mates", cat2)
-        remove_from_list(cats[cat2], "mates", cat1)
-
-        cats[cat1].setdefault("ex_mates", [])
-        cats[cat2].setdefault("ex_mates", [])
-
-        if cat2 not in cats[cat1]["ex_mates"]:
-            cats[cat1]["ex_mates"].append(cat2)
-
-        if cat1 not in cats[cat2]["ex_mates"]:
-            cats[cat2]["ex_mates"].append(cat1)
-
-        add_history(cats[cat1], f"Broke up with {cat2}")
-        add_history(cats[cat2], f"Broke up with {cat1}")
-
-        save_data(data)
-
-    await interaction.response.send_message(f"💔 **{cat1}** and **{cat2}** are now ex-mates.")
-
-
 @relationship_group.command(name="mate", description="Set two cats as mates")
 async def relationship_mate(interaction: discord.Interaction, cat1: str, cat2: str):
     if not await staff_command_check(interaction):
@@ -2064,12 +2028,50 @@ async def relationship_mate(interaction: discord.Interaction, cat1: str, cat2: s
 
     await interaction.response.send_message(f"💕 **{cat1}** and **{cat2}** are now mates.")
 
+
+@relationship_group.command(name="breakup", description="Break up two mates and mark them as ex-mates")
+async def relationship_breakup(interaction: discord.Interaction, cat1: str, cat2: str):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if cat1 not in cats:
+            await interaction.response.send_message("First cat not found.", ephemeral=True)
+            return
+
+        if cat2 not in cats:
+            await interaction.response.send_message("Second cat not found.", ephemeral=True)
+            return
+
+        remove_from_list(cats[cat1], "mates", cat2)
+        remove_from_list(cats[cat2], "mates", cat1)
+
+        cats[cat1].setdefault("ex_mates", [])
+        cats[cat2].setdefault("ex_mates", [])
+
+        if cat2 not in cats[cat1]["ex_mates"]:
+            cats[cat1]["ex_mates"].append(cat2)
+
+        if cat1 not in cats[cat2]["ex_mates"]:
+            cats[cat2]["ex_mates"].append(cat1)
+
+        add_history(cats[cat1], f"Broke up with {cat2}")
+        add_history(cats[cat2], f"Broke up with {cat1}")
+
+        save_data(data)
+
+    await interaction.response.send_message(f"💔 **{cat1}** and **{cat2}** are now ex-mates.")
+
+
 @relationship_group.command(name="family", description="Add a family relation between two cats")
 @app_commands.describe(
     name="First cat",
     relation="How the second cat is related to the first cat",
     relative="Second cat",
-    other_relation="Only use this if relation is Other"
+    custom_relation="Only use this if relation is Other. Example: Uncle",
+    custom_reverse_relation="Only use this if relation is Other. Example: Nephew"
 )
 @app_commands.choices(relation=FAMILY_RELATION_CHOICES)
 async def relationship_family(
@@ -2077,7 +2079,8 @@ async def relationship_family(
     name: str,
     relation: app_commands.Choice[str],
     relative: str,
-    other_relation: str = None
+    custom_relation: str = None,
+    custom_reverse_relation: str = None
 ):
     if not await staff_command_check(interaction):
         return
@@ -2096,9 +2099,18 @@ async def relationship_family(
         relation_value = relation.value
 
         if relation_value == "Other":
-            relation_value = other_relation if other_relation else "Other"
+            if not custom_relation or not custom_reverse_relation:
+                await interaction.response.send_message(
+                    "When using Other, please fill in both custom_relation and custom_reverse_relation.\n"
+                    "Example: Rabbitpaw → Uncle: Sher, Sher → Nephew: Rabbitpaw",
+                    ephemeral=True
+                )
+                return
 
-        reverse_relation = reciprocal_family_relation(relation.value)
+            relation_value = custom_relation.strip()
+            reverse_relation = custom_reverse_relation.strip()
+        else:
+            reverse_relation = reciprocal_family_relation(relation_value)
 
         add_family_relation(cats[name], relation_value, relative)
         add_family_relation(cats[relative], reverse_relation, name)
@@ -2143,7 +2155,6 @@ async def relationship_remove(
 
         relation_value = relation.strip()
 
-        # Remove mates/ex-mates
         if relation_value.lower() in ["mate", "mates"]:
             remove_from_list(cats[cat1], "mates", cat2)
             remove_from_list(cats[cat2], "mates", cat1)
@@ -2153,7 +2164,6 @@ async def relationship_remove(
             remove_from_list(cats[cat2], "ex_mates", cat1)
 
         else:
-            # Remove the typed relation from cat1 → cat2
             family1 = cats[cat1].get("family", {})
             for saved_relation in list(family1.keys()):
                 if saved_relation.lower() == relation_value.lower():
@@ -2165,7 +2175,6 @@ async def relationship_remove(
                     if not family1[saved_relation]:
                         del family1[saved_relation]
 
-            # Also remove cat1 from ANY matching relation on cat2
             family2 = cats[cat2].get("family", {})
             for saved_relation in list(family2.keys()):
                 family2[saved_relation] = [
@@ -2184,6 +2193,7 @@ async def relationship_remove(
     await interaction.response.send_message(
         f"🧹 Removed **{relation_value}** relationship between **{cat1}** and **{cat2}**."
     )
+
 
 @relationship_group.command(name="clearhistory", description="Clear relationship history between two cats")
 async def relationship_clearhistory(interaction: discord.Interaction, cat1: str, cat2: str):
@@ -2209,7 +2219,8 @@ async def relationship_clearhistory(interaction: discord.Interaction, cat1: str,
     await interaction.response.send_message(
         f"🧹 Cleared relationship history between **{cat1}** and **{cat2}**."
     )
-    
+
+
 @relationship_group.command(name="removeall", description="Remove all relationship records from one cat")
 async def relationship_removeall(interaction: discord.Interaction, name: str):
     if not await staff_command_check(interaction):
@@ -2224,7 +2235,6 @@ async def relationship_removeall(interaction: discord.Interaction, name: str):
 
         target_cat = cats[name]
 
-        # Remove this cat from everyone else's relationship records
         for other_name, other_cat in cats.items():
             if other_name == name:
                 continue
@@ -2248,7 +2258,6 @@ async def relationship_removeall(interaction: discord.Interaction, name: str):
                 if not family[relation]:
                     del family[relation]
 
-        # Clear this cat's own relationship records
         target_cat.pop("mates", None)
         target_cat.pop("ex_mates", None)
         target_cat.pop("mentor", None)
@@ -2264,157 +2273,6 @@ async def relationship_removeall(interaction: discord.Interaction, name: str):
     await interaction.response.send_message(
         f"🧹 Removed all relationship records for **{name}**."
     )
-
-@relationship_group.command(name="remove", description="Remove a relationship between two cats by typing the relationship name")
-@app_commands.describe(
-    cat1="First cat",
-    relation="Relationship type to remove, example: Mother, Nephew, Grandparent, Other",
-    cat2="Second cat"
-)
-async def relationship_remove(
-    interaction: discord.Interaction,
-    cat1: str,
-    relation: str,
-    cat2: str
-):
-    if not await staff_command_check(interaction):
-        return
-
-    async with data_lock:
-        cats = data.get("cats", {})
-
-        if cat1 not in cats:
-            await interaction.response.send_message("First cat not found.", ephemeral=True)
-            return
-
-        if cat2 not in cats:
-            await interaction.response.send_message("Second cat not found.", ephemeral=True)
-            return
-
-        relation_value = relation.strip()
-
-        # Remove mates/ex-mates
-        if relation_value.lower() in ["mate", "mates"]:
-            remove_from_list(cats[cat1], "mates", cat2)
-            remove_from_list(cats[cat2], "mates", cat1)
-
-        elif relation_value.lower() in ["ex-mate", "ex mate", "ex-mates", "ex mates"]:
-            remove_from_list(cats[cat1], "ex_mates", cat2)
-            remove_from_list(cats[cat2], "ex_mates", cat1)
-
-        else:
-            # Remove the typed relation from cat1 → cat2
-            family1 = cats[cat1].get("family", {})
-            for saved_relation in list(family1.keys()):
-                if saved_relation.lower() == relation_value.lower():
-                    family1[saved_relation] = [
-                        relative for relative in family1[saved_relation]
-                        if relative != cat2
-                    ]
-
-                    if not family1[saved_relation]:
-                        del family1[saved_relation]
-
-            # Also remove cat1 from ANY matching relation on cat2
-            family2 = cats[cat2].get("family", {})
-            for saved_relation in list(family2.keys()):
-                family2[saved_relation] = [
-                    relative for relative in family2[saved_relation]
-                    if relative != cat1
-                ]
-
-                if not family2[saved_relation]:
-                    del family2[saved_relation]
-
-        add_history(cats[cat1], f"Removed relationship with {cat2}: {relation_value}")
-        add_history(cats[cat2], f"Removed relationship with {cat1}: {relation_value}")
-
-        save_data(data)
-
-    await interaction.response.send_message(
-        f"🧹 Removed **{relation_value}** relationship between **{cat1}** and **{cat2}**."
-    )
-
-@relationship_group.command(name="clearhistory", description="Clear relationship history between two cats")
-async def relationship_clearhistory(interaction: discord.Interaction, cat1: str, cat2: str):
-    if not await staff_command_check(interaction):
-        return
-
-    async with data_lock:
-        cats = data.get("cats", {})
-
-        if cat1 not in cats:
-            await interaction.response.send_message("First cat not found.", ephemeral=True)
-            return
-
-        if cat2 not in cats:
-            await interaction.response.send_message("Second cat not found.", ephemeral=True)
-            return
-
-        remove_relationship_history_between(cats[cat1], cat2)
-        remove_relationship_history_between(cats[cat2], cat1)
-
-        save_data(data)
-
-    await interaction.response.send_message(
-        f"🧹 Cleared relationship history between **{cat1}** and **{cat2}**."
-    )
-    
-@relationship_group.command(name="removeall", description="Remove all relationship records from one cat")
-async def relationship_removeall(interaction: discord.Interaction, name: str):
-    if not await staff_command_check(interaction):
-        return
-
-    async with data_lock:
-        cats = data.get("cats", {})
-
-        if name not in cats:
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
-            return
-
-        target_cat = cats[name]
-
-        # Remove this cat from everyone else's relationship records
-        for other_name, other_cat in cats.items():
-            if other_name == name:
-                continue
-
-            remove_from_list(other_cat, "mates", name)
-            remove_from_list(other_cat, "ex_mates", name)
-            remove_from_list(other_cat, "apprentices", name)
-            remove_from_list(other_cat, "past_apprentices", name)
-            remove_from_list(other_cat, "previous_mentors", name)
-
-            if other_cat.get("mentor") == name:
-                other_cat["mentor"] = None
-
-            family = other_cat.get("family", {})
-            for relation in list(family.keys()):
-                family[relation] = [
-                    relative for relative in family[relation]
-                    if relative != name
-                ]
-
-                if not family[relation]:
-                    del family[relation]
-
-        # Clear this cat's own relationship records
-        target_cat.pop("mates", None)
-        target_cat.pop("ex_mates", None)
-        target_cat.pop("mentor", None)
-        target_cat.pop("apprentices", None)
-        target_cat.pop("past_apprentices", None)
-        target_cat.pop("previous_mentors", None)
-        target_cat.pop("family", None)
-
-        add_history(target_cat, "All relationship records removed")
-
-        save_data(data)
-
-    await interaction.response.send_message(
-        f"🧹 Removed all relationship records for **{name}**."
-    )
-
 # ─────────────────────────────
 # CLEANED CAT TINDER
 # ─────────────────────────────
