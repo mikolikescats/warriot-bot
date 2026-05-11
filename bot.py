@@ -425,7 +425,7 @@ def is_story_history(entry):
         "Injured/ill",
         "Recovered from injury",
         "Injury/illness removed",
-        "Became mentor",
+        "Became ",
         "Had a litter",
         "Became mates with",
         "Broke up with",
@@ -433,7 +433,7 @@ def is_story_history(entry):
     ]
 
     excluded_keywords = [
-        "previous mentor",
+        "previous ",
         "previous apprentice",
         "Assigned",
         "Family relation added",
@@ -768,11 +768,11 @@ async def run_moon_update():
                 report["promotions"].append(f"🐾 {name} became an Apprentice.")
 
             elif cat.get("rank") == "Apprentice" and cat["age"] >= 12:
-                old_mentor = cat.get("mentor")
+                old_ = cat.get("")
 
-                if old_mentor:
-                    if "(PAST)" not in str(old_mentor):
-                        cat["mentor"] = f"{old_mentor} (PAST)"
+                if old_:
+                    if "(PAST)" not in str(old_):
+                        cat[""] = f"{old_mentor} (PAST)"
 
                     if old_mentor in data["cats"]:
                         mentor_cat = data["cats"][old_mentor]
@@ -1875,6 +1875,25 @@ async def injury_moon(interaction: discord.Interaction, name: str, moon: int):
 # /MENTOR COMMANDS
 # ─────────────────────────────
 
+def remove_mentor_history_between(cat, other_name):
+    mentor_keywords = [
+        "Assigned",
+        "as mentor",
+        "Became mentor to",
+        "added as a previous mentor",
+        "added as a previous apprentice",
+        "Former apprentice"
+    ]
+
+    cat["history"] = [
+        entry for entry in cat.get("history", [])
+        if not (
+            other_name.lower() in entry.lower()
+            and any(keyword.lower() in entry.lower() for keyword in mentor_keywords)
+        )
+    ]
+
+
 @mentor_group.command(name="assign", description="Assign a mentor to an apprentice")
 async def mentor_assign(interaction: discord.Interaction, apprentice: str, mentor: str):
     if not await staff_command_check(interaction):
@@ -1921,22 +1940,25 @@ async def mentor_assign(interaction: discord.Interaction, apprentice: str, mento
 
         old_mentor = app_cat.get("mentor")
 
-        if old_mentor and old_mentor in cats:
-            cats[old_mentor].setdefault("apprentices", [])
-            if apprentice in cats[old_mentor]["apprentices"]:
-                cats[old_mentor]["apprentices"].remove(apprentice)
+        if old_mentor:
+            clean_old_mentor = str(old_mentor).replace(" (PAST)", "").strip()
 
-            cats[old_mentor].setdefault("past_apprentices", [])
-            if apprentice not in cats[old_mentor]["past_apprentices"]:
-                cats[old_mentor]["past_apprentices"].append(apprentice)
+            if clean_old_mentor in cats:
+                old_mentor_cat = cats[clean_old_mentor]
 
-            app_cat.setdefault("previous_mentors", [])
-            if old_mentor not in app_cat["previous_mentors"]:
-                app_cat["previous_mentors"].append(old_mentor)
+                remove_from_list(old_mentor_cat, "apprentices", apprentice)
+
+                old_mentor_cat.setdefault("past_apprentices", [])
+                if apprentice not in old_mentor_cat["past_apprentices"]:
+                    old_mentor_cat["past_apprentices"].append(apprentice)
+
+                app_cat.setdefault("previous_mentors", [])
+                if clean_old_mentor not in app_cat["previous_mentors"]:
+                    app_cat["previous_mentors"].append(clean_old_mentor)
 
         app_cat["mentor"] = mentor
-        mentor_cat.setdefault("apprentices", [])
 
+        mentor_cat.setdefault("apprentices", [])
         if apprentice not in mentor_cat["apprentices"]:
             mentor_cat["apprentices"].append(apprentice)
 
@@ -1982,6 +2004,53 @@ async def mentor_previous(interaction: discord.Interaction, name: str, mentor: s
 
     await interaction.response.send_message(
         f"🐾 **{mentor}** is now listed as **{name}**'s previous mentor."
+    )
+
+
+@mentor_group.command(name="remove", description="Remove mentor records between two cats without showing in history")
+async def mentor_remove(interaction: discord.Interaction, apprentice: str, mentor: str):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if apprentice not in cats:
+            await interaction.response.send_message("Apprentice/cat not found.", ephemeral=True)
+            return
+
+        if mentor not in cats:
+            await interaction.response.send_message("Mentor not found.", ephemeral=True)
+            return
+
+        app_cat = cats[apprentice]
+        mentor_cat = cats[mentor]
+
+        # Remove current mentor from apprentice
+        current_mentor = app_cat.get("mentor")
+        if current_mentor:
+            clean_current_mentor = str(current_mentor).replace(" (PAST)", "").strip()
+            if clean_current_mentor.lower() == mentor.lower():
+                app_cat.pop("mentor", None)
+
+        # Remove mentor from apprentice's past mentor lists
+        remove_from_list(app_cat, "previous_mentors", mentor)
+
+        # Also clean exact PAST version if it exists in list by mistake
+        remove_from_list(app_cat, "previous_mentors", f"{mentor} (PAST)")
+
+        # Remove apprentice from mentor's lists
+        remove_from_list(mentor_cat, "apprentices", apprentice)
+        remove_from_list(mentor_cat, "past_apprentices", apprentice)
+
+        # Remove old mentor history from both cats
+        remove_mentor_history_between(app_cat, mentor)
+        remove_mentor_history_between(mentor_cat, apprentice)
+
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🧹 Removed mentor records between **{apprentice}** and **{mentor}**."
     )
 
 
