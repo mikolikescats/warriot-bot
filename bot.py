@@ -2573,7 +2573,532 @@ async def weekly_weather_report():
 # ─────────────────────────────
 
 ROLEPLAY_ANNOUNCEMENTS_ROLE_ID = 1442996267470033026
+QUEST_CHANNEL_ID = 1441502516591202394
 
+# ─────────────────────────────
+# QUEST DATABASE
+# ─────────────────────────────
+
+QUEST_TEXT = """
+BLIZZARDCLAN
+
+**Whitecough Outbreak**
+A brutal mountain chill has swept through the Hollow of Teeth, and harsh coughs are beginning to echo beneath the Frozen Teeth. Roll a D4 for each BlizzardClan cat: 1-2 = sick, 3-4 = healthy. If sick, roll a D6 for severity. If your initial D4 roll was a 1, add +1 to severity. Severity: 1 = Very Minor, 2-3 = Mild, 4-5 = Moderate, 6-7 = Serious. Medicine cats must treat the sick before whitecough tightens its icy grip. Remember: no OC will ever be killed without your permission.
+
+**Catch 5 Snowshoe Hares**
+Fresh tracks streak across Cloud Plateau! BlizzardClan has 2 real-life weeks to catch 5 snowshoe hares before they vanish deeper into the snowfields.
+
+**Catch 10 Frost Tunnel Mice**
+The tunnels are practically squeaking with prey. Hunt 10 mice from Frost Tunnels before they scatter through the ice cracks.
+
+**Ptarmigan Patrol**
+A sharp-eyed patrol has spotted a hardy flock of ptarmigan scratching through the snowdrifts near Glacier’s Edge. BlizzardClan must catch 4 before the next mountain storm sends them skyward.
+
+**Young Cats Demand Storytime**
+BlizzardClan’s kits and Apprentices are bouncing off icy den walls. A warrior or elder must gather them for a night of snowy legends and mountain myths before camp descends into adorable chaos.
+
+**Frozen Falls Reflection**
+The sacred Frozen Falls are glowing strangely beneath the moonlight, their icy spray shimmering like StarClan itself. At least 3 cats must journey there for a spiritual vigil and seek wisdom from the mountain.
+
+**Catch 3 Marmots**
+Chunky marmots have been spotted basking on rare sun-warmed stones near Glacier’s Edge. Catch 3 before they retreat into deep burrows and deny the Clan a hearty feast.
+
+**Lost in the Whiteout**
+A sudden snow squall has separated a young apprentice from their patrol! BlizzardClan must organize a rescue mission and brave blinding winds to guide them safely home.
+
+**Avalanche Scare (Rare Event)**
+The mountain groans ominously, and heavy snow shifts dangerously above Glacier’s Edge. Any cat traveling there must roll D20. Roll 1 = caught in a minor avalanche and injured.
+
+**Catch 6 Pikas**
+The warriors are craving the fresh meat of Pikas. Catch 6 pikas before they vanish deeper into BlizzardClan’s icy terrain and boost Blizzardclan’s Morale!
+**Snow Shelter Night**
+The wind is merciless this moon, and every BlizzardClan cat must prove their resilience. Spend one roleplay setting up a temporary camp and sleeping beyond camp’s icy shelter to honour your Clan’s strength.
+
+**Catch 5 Voles**
+Fresh burrows beneath powdery snow have revealed a surge of vole activity. Hunt 5 before the prey disappears beneath the frost.
+
+**Frost Tunnel Herb Patrol**
+Rumours of hardy winter herbs hidden in the frozen dark have reached camp. Lead a brave herb patrol into Frost Tunnels and return before the cave’s dangers close in.
+
+**Catch 10 Shrews**
+The snowbanks are rustling with tiny prey. BlizzardClan must catch 10 shrews to keep the fresh-kill pile strong through bitter nights.
+**Cloud Plateau Bonding Night**
+For one peaceful evening, BlizzardClan cats are encouraged to set aside duty and gather beneath the stars of Cloud Plateau. Friendships, confessions, and snowy bonds await.
+
+**Catch 4 Ptarmigan**
+Another flock has landed high among BlizzardClan’s peaks. Catch 4 before they blend once more into the endless white.
+**Frostbite Check**
+The frost bites hard this moon. Roll D4 for each elder: 1 = frostbite scare, requiring warmth and care from Clanmates. (this one only do if the season is Leaf-Bare)
+
+**Night Hunting Patrol**
+Under silver moonlight, prey moves differently across snow and ice. Lead a patrol into the darkness and prove BlizzardClan’s senses are as sharp as winter itself. No matter what, this patrol’s rolls will have a -3 to every roll.
+
+**Catch 2 Snowshoe Hares Without Injury**
+These hares are swift, clever, and desperate. Catch 2 cleanly without any patrol injuries to prove true hunting precision.
+
+**Frozen Stream Crossing**
+A vital ice crossing has become dangerously slick. BlizzardClan cats must roleplay safely navigating the frozen stream before prey routes are lost. (Roll D4, 1-2 means a -1 on your hunting rolls at Glacier's edge, 3 means no modifier and 4 means +1 to your rolls)
+
+**Catch 5 Mice**
+The Frost Tunnels are bustling once more. Hunt 5 mice before tunnel predators claim them first.
+
+**Campwide Story Night**
+The storm howls outside, but BlizzardClan gathers beneath the Frozen Teeth for warmth, stories, and shared history. A Clan that survives together stays together.
+
+**Tunnel Echo Investigation**
+Strange whispers and unnatural echoes have been reported deep in Frost Tunnels. Is it only shifting ice... or something more? Investigate carefully.
+
+**Catch 3 Red Squirrels**
+Rare flashes of fiery red have been spotted against BlizzardClan’s snowy terrain. Catch 3 red squirrels before they flee to lower forests.
+
+**Blizzard Endurance Race**
+Who is truly BlizzardClan’s swiftest warrior? Race across Cloud Plateau’s icy stretches and prove your stamina. (Roll a D8, the highest roll wins, in case of a tie, roll again!)
+
+**Sacred Dream Visit**
+StarClan’s whispers seem louder near Frozen Falls this moon. Spend one roleplay night seeking visions, omens, or ancient guidance.
+
+**Catch 8 Pikas**
+The mountain cracks are alive with movement. BlizzardClan must catch 8 pikas before prey grows scarce again.
+
+**Apprentice Blizzard Test**
+Every apprentice must one day prove they can survive where others freeze. Complete a BlizzardClan endurance or hunting trial. (Roll a D8, the highest roll wins, in case of a tie, roll again!)
+
+**Snow Den Building**
+Heavy storms are forecasted. BlizzardClan must work together to reinforce shelters for safety beyond camp.
+
+**Great Blizzard Feast**
+The mountain offers prey, but only for the prepared. BlizzardClan has 2 real-life weeks to catch 20 total prey and prove they are the true rulers of ice and stone.
+
+TORRENTCLAN
+**Flood on the Island**
+Relentless rain and swelling tides have begun to swallow parts of TorrentClan’s island home. Water creeps dangerously close to dens, and every paw is needed. At least 3 cats must roleplay helping move kits, elders, and supplies to safety before the tide rises further.
+
+**Catch 10 Catfish**
+The muddy depths of Reedmarsh are stirring with whiskered giants! TorrentClan has 2 real-life weeks to catch 10 catfish before shifting currents send them into deeper, murkier waters.
+
+**Catch 8 Minnows**
+Glistening Pools are flashing silver beneath the sun, packed with darting schools of minnows. Catch 8 before they scatter into reeds and roots.
+
+**Kits Demand Beach Storytime**
+TorrentClan’s kits are absolutely refusing to settle down unless someone takes them to Sunspirit Sands for a proper beachside story. A warrior or elder must answer the call before sleepy chaos turns into sandy rebellion.
+
+**Lead a Marsh Herb Patrol**
+Recent rains have caused Reedmarsh to bloom with medicinal opportunity. The medicine cat needs brave escorts willing to brave mud, reeds, and hidden water channels to gather what the marsh offers.
+
+**Otter Scare**
+Something sleek and mischievous has been slipping through TorrentClan waters! During fishing patrols, roll a D8. Roll 1-2 = an otter steals your hard-earned prey and vanishes downstream.
+
+**Catch 5 Walleye**
+Deep shadows move beneath Reedmarsh’s murkier waters. Catch 5 walleye before they retreat to the hidden depths.
+
+**Duckling Rescue**
+A sudden shift in tide has separated several ducklings from their mother near Trout Run. Will TorrentClan guide the little fluffballs back to safety... or let nature take its course?
+
+**Mud Fever Check**
+Too much time in soggy marshland may come with consequences... Roll a D4 for your cat. 1-2 = Mud Fever symptoms, 3-4 = healthy and muddy.
+
+**Catch 4 Ducks**
+A flock of plump ducks has been paddling a little too boldly near camp. TorrentClan must remind them whose waters these are.
+
+**Sunspirit Sands Celebration**
+Golden sand, warm breezes, and sparkling waves call to TorrentClan! Gather for a celebration of stories, sunning, and seaside joy.
+
+**Catch 6 Perch**
+Trout Run is alive with darting silver prey this moon. Catch 6 perch before stronger currents carry them away.
+
+**Stormy Swim Challenge**
+Dark clouds gather overhead, but TorrentClan does not fear rough water. Brave cats may challenge themselves to a storm swim and prove their river-born strength.
+
+**Medicine Willow Escort**
+The sacred willow roots must be reached, and the medicine cat cannot travel alone. Escort them safely through rising tides and slick crossings. Travel to the Glistening Pools, roll a d8 for success. 1-2 means you slip and get injured, 3+ = safe travels. Roll a D4 for severity.
+
+**Catch 3 Catfish in One Patrol**
+The marsh is thick with prey, but only skilled teamwork will secure victory. One patrol must catch 3 catfish in a single outing.
+
+**Flood Debris Cleanup**
+High waters have scattered branches, reeds, shells, and driftwood across camp. TorrentClan must work together to restore their island sanctuary before the next tide.
+
+**Catch 5 Frogs Without Injury**
+The frogs are practically croaking insults from every muddy bank. Catch 5 cleanly without slips, bites, or embarrassing failures. (Rolling a 1 or lower due to current hunting modifier will result in an injury)
+
+**Reedmarsh Wrestling Day**
+Mud, reeds, and total chaos await! Apprentices and warriors alike are invited to prove that if you can fight in marsh mud, you can fight anywhere. (Roll a D8, the highest roll wins, in case of a tie, roll again!)
+
+**Catch 2 Loons**
+Their haunting calls have echoed over the waters for nights. Catch 2 elusive loons before they vanish into mist and moonlight.
+
+**Island Root Safety Check**
+The tides have been rough, and TorrentClan’s island roots must remain strong. Patrol camp thoroughly and ensure no den is at risk.
+
+**Catch 12 Minnows**
+Minnows are everywhere this moon, flashing through clear shallows and weaving between roots. A Clanwide frenzy is on.
+
+**Fishing Tournament**
+Who is TorrentClan’s greatest fisher? Compete with your Clanmates to catch the most prey before moonhigh.
+
+**Low Tide Adventure**
+The waters have receded farther than usual, revealing hidden stones, forgotten paths, and mysterious shoreline treasures. Explore while the tide allows.
+
+**Goose Avoidance Patrol**
+A furious goose has claimed part of TorrentClan’s shoreline and is absolutely not in the mood for visitors. Patrol carefully... or prepare for feathery violence. On hunting patrols, at the start each cat will roll a D10. Rolling a 1-3 will result in a modifier for your OC for this patrol. A 1 = -3, a 2 =-2 and 3 =-1
+
+**Catch 4 Crayfish**
+Sharp claws, snapping pincers, and slippery shells await. Catch 4 crayfish from beneath river stones for a crunchy challenge.
+
+**Beach Feast Prep**
+Sunspirit Sands calls for a proper feast beneath open skies. Gather prey, friends, and celebration-worthy vibes.
+
+**Storm Flood Warning**
+Dark clouds gather, winds howl, and the tides are rising fast. TorrentClan must prepare camp before floodwaters claim vulnerable ground.
+
+**Catch 5 Fish Any Type**
+The waters are rich this moon, and TorrentClan must take advantage. Catch any 5 fish before prey patterns shift.
+
+**Duck Nest Watch**
+A duck nest near camp may offer prey... or trouble. Observe carefully and decide whether to guard, hunt, or avoid.
+
+**River Crossing Trial**
+Only TorrentClan’s strongest swimmers can conquer Trout Run’s roughest currents. Cross successfully and prove your place among the tideborn. (Roll a d20, if you roll a 12 or higher, you win bragging rights at the next gathering, if you roll a 3 or lower, risk being injured. River Guardians get a +5 to their roll)
+
+**Catch 8 Frogs**
+The marsh chorus is out of control this moon. TorrentClan must thin the croaking crowd before sleep becomes impossible.
+
+**Loon Song Night**
+The loons are singing beneath silver moonlight, their haunting voices drifting across still waters. Gather for stories, songs, and perhaps mysterious warnings.
+
+**Speedy Marsh Patrol**
+Mud, reeds, water, and speed! Compete a fast-paced patrol challenge through Reedmarsh’s thickest terrain. (Roll a D8, the highest roll wins, in case of a tie, roll again!)
+
+**Catch 3 Duck**
+Tiny, fluffy, and deceptively difficult. Catch 3 ducks before they paddle out of reach.
+
+**Water Safety Lesson**
+Young paws must learn quickly in TorrentClan. Lead a lesson for kits or apprentices about tides, currents, and river dangers.
+
+**Catch 6 Perch**
+Another school has arrived in Trout Run! Don’t waste this second wave of bounty.
+
+**Flood Escape Drill**
+If the island flooded tonight, would TorrentClan be ready? Practise emergency flood response before disaster strikes for real.
+
+**Island Camp Bonding Night**
+A peaceful evening beneath sheltering branches, surrounded by soft waves and moonlit tides. Groom, laugh, and strengthen Clan bonds.
+
+**Catch 10 Minnows Clanwide**
+Every paw counts this moon! Work together to catch 10 minnows for an easy but important prey boost.
+
+**Young Cats Swimming Lesson**
+The next generation must swim like true TorrentClan cats. Lead a lesson and teach survival through water.
+
+**Catch 2 Catfish**
+Whiskered prey lurks below. Catch 2 before they disappear beneath muddy depths.
+
+**Mudslide RP Event**
+Heavy rain has shifted Reedmarsh terrain dangerously. Cats must navigate unstable mud and changing waters. (Roll a D10, rolling a 1-2 will result in an injury)
+
+**Catch 4 Water Voles**
+Quick little marsh runners are thriving among reeds and roots. Catch 4 before they vanish.
+
+**Sunspirit Race**
+Race from camp to Sunspirit Sands and back! The winner earns shoreline bragging rights until next moon.
+
+**Storm Story Night**
+Rain pounds leaves, thunder shakes roots, and TorrentClan gathers for dramatic tales of water, bravery, and survival.
+
+**Catch 5 Frogs**
+Simple, slimy, and satisfying. Reedmarsh is croaking with opportunity.
+
+**Medicine Patrol**
+The medicine cat requires another brave escort through TorrentClan’s shifting wetlands.
+
+**Catch 3 Walleye**
+Three sleek river hunters await skilled paws in the deeper waters.
+
+**TorrentClan Whitecough Outbreak**
+Cold river mist and relentless damp winds have settled over TorrentClan’s island, and coughs now ripple through reeds, roots, and shoreline dens. Roll a D4 for each TorrentClan cat: 1-2 = sick, 3-4 = healthy. If sick, roll a D6 for severity. If your initial D4 roll was a 1, add +1 to severity. Severity: 1 = Very Minor, 2-3 = Mild, 4-5 = Moderate, 6-7 = Serious. Medicine cats must act quickly before damp-chill sickness spreads deeper through camp. Remember: no OC will ever be killed without your permission.
+
+FOSSILCLAN
+
+**Western Terrestrial Garter Snake in Camp**
+A sleek garter snake has slithered into FossilClan territory, weaving dangerously between warm stones and unsuspecting paws. Any cat may attempt to catch it without using the hunting bot. Roll a D20, 15+ = successful catch, 3 or lower = snakebite injury. No hunting modifiers apply.
+
+**Catch 10 Mice at Dustwind Flats**
+The tumbleweeds are rustling, and Dustwind Flats are teeming with tiny paws. FossilClan has 2 real-life weeks to catch 10 mice before shifting sands bury their trails.
+
+**Catch 5 Snowshoe Hares**
+Fast white shapes have been spotted darting between red stone and dry brush. Catch 5 snowshoe hares before they flee FossilClan’s hunting grounds.
+
+**Sandstorm Warning**
+The wind has begun to howl across Dustwind Flats, carrying red dust and stinging grit. FossilClan must roleplay protecting kits, elders, and prey stores before the storm swallows camp.
+
+**Kits Demand Dinosaur Stories**
+FossilClan’s youngest are demanding tales of mighty Dinosaur Spirits, ancient claws, and legendary ancestors. A warrior or elder must host storytime before restless kits become total cave-chaos.
+
+**Lead a Dinosaur Spine Herb Patrol**
+The sacred ridge is blooming with precious medicinal opportunity. Escort the medicine cat safely through FossilClan’s spiritual heart while ancient stones whisper beneath your paws.
+
+**Catch 6 Blue Grouse**
+Blue grouse have been scratching through dry brush and root tangles near camp. Catch 6 before they scatter beyond FossilClan’s reach.
+
+**Raptorfang Race Day**
+The towering spires are calling, and FossilClan apprentices are eager to prove themselves. Race, climb, and leap through Raptorfang Spires for glory... or embarrassment. (Roll a D8, the highest roll wins, in case of a tie, roll again!)
+
+**Catch 8 Voles**
+Dustwind Flats are alive with burrowing movement. Catch 8 voles before the dry earth swallows them whole.
+
+**Rockslide Scare**
+Loose stone has begun shifting near the cliffs and spires. FossilClan must roleplay securing vulnerable paths and protecting younger cats from falling rock.
+
+**Catch 4 Chipmunks**
+Quick little prey is darting through cracks and roots. Catch 4 chipmunks before they vanish into FossilClan’s ancient stone maze.
+
+**Spiritual Fossil Night**
+The moon is bright over Dinosaur Spine, and the ancient bones seem to hum with old power. Gather beneath the stars to honour the Dinosaur Spirits.
+
+**Catch 2 Snakes**
+More snakes have been spotted basking on warm red rocks. Roll carefully, hunt bravely, and prove FossilClan fears no slithering threat.
+
+**Cliff Safety Lesson**
+The Red Rock’s edge is no place for foolish paws. Warriors must guide kits or apprentices through an important safety lesson before disaster strikes.
+
+**Catch 3 Pikas**
+Tiny paws skitter through stone cracks and fossil ridges. Catch 3 pikas before they disappear beneath ancient earth.
+
+**Dustwind Sprint**
+The dry flats stretch wide and dangerous. FossilClan cats are challenged to a speed trial across open terrain. (Roll a D8, the highest roll wins, in case of a tie, roll again!)
+
+**Sandstorm Illness Check**
+Too much dust can choke even the strongest hunter. Roll a D4: 1-2 = dust sickness symptoms, 3-4 = healthy.
+
+**Catch 5 Mice**
+Simple prey, but necessary. Dustwind’s small runners are abundant this moon.
+
+**Rexhead Strength Trial**
+The mighty pillars of Rexhead call for bold leaps and fearless displays. FossilClan warriors must prove their power atop the stone heights.
+
+**Catch 3 Squirrels**
+Quick prey has been spotted weaving between fossil ridges and brush. Catch 3 before they vanish.
+
+**Medicine Cat Vision Escort**
+The medicine cat has received troubling dreams from the Dinosaur Spirits. Escort them safely to Dinosaur Spine for answers.
+
+**Catch 4 Grouse**
+Feathers and dust fill the air as grouse surge through FossilClan lands. Hunt 4 before they scatter beyond the stone ridges.
+
+**Camp Story Circle**
+As warm winds hum through red stone, FossilClan gathers to share stories of ancestors, spirits, and victories.
+
+**Snakebite Emergency**
+A FossilClan cat has been bitten! Medicine cats must act quickly, and Clanmates must respond before panic spreads.
+
+**Catch 8 Rodents**
+Dustwind Flats are overflowing with small prey. Catch any 8 rodents before prey patterns shift.
+
+**Spire Climbing Challenge**
+Raptorfang Spires test balance, agility, and courage. Complete a climbing challenge and prove your worth.
+
+**Catch 2 Hares**
+Swift prey has crossed FossilClan’s path. Catch 2 before they outrun you through the flats.
+
+**Sand Den Repair**
+Strong winds and shifting dust have damaged camp walls. FossilClan must roleplay restoring safety to their warm stone home.
+
+**Ancestor Night**
+The moon rises over Dinosaur Spine, and FossilClan is called to honour those who came before through prayer, storytelling, or silent reflection.
+
+**FossilClan Great Hunt**
+The Dinosaur Spirits demand strength this moon. FossilClan has 2 real-life weeks to catch 20 total prey and prove their might beneath red stone and ancient bone.
+
+**FossilClan Whitecough Outbreak**
+A bitter dust storm and sudden cold snap have swept across the Red Rock, leaving FossilClan’s air dry, sharp, and filled with dangerous coughing fits. Roll a D4 for each FossilClan cat: 1-2 = sick, 3-4 = healthy. If sick, roll a D6 for severity. If your initial D4 roll was a 1, add +1 to severity. Severity: 1 = Very Minor, 2-3 = Mild, 4-5 = Moderate, 6-7 = Serious. Medicine cats must treat the sick before dry coughs become something far worse. Remember: no OC will ever be killed without your permission.
+
+SPRUCECLAN 
+
+**Fungal Outbreak in Toadstool Glade**
+A strange bloom of aggressive spores has spread through Toadstool Glade, and sneezes, coughs, and irritated paws are beginning to surface throughout SpruceClan. Roll a D4 for each SpruceClan cat: 1-2 = infected, 3-4 = healthy. Medicine cats must lead a herb patrol before the spores worsen.
+
+**Catch 8 Squirrels**
+Whispering Branches are alive with rustling tails and chattering prey! SpruceClan has 2 real-life weeks to catch 8 squirrels before they retreat deeper into the evergreen canopy.
+
+**Catch 10 Nestlings**
+Greenleaf has filled the lower branches with vulnerable nests. Catch 10 nestlings before stronger winds or rival predators claim them first.
+
+**Kits Demand Mossy Storytime**
+SpruceClan’s kits are refusing to settle unless someone fills the nursery with tales of ancient forests, owls, and brave warriors. A warrior or elder must step up before bedtime becomes a riot.
+
+**Lead a Toadstool Herb Patrol**
+The damp glade is rich with medicinal opportunity... if you know which fungi to avoid. Escort the medicine cat safely through spores and shadows. (Roll a d10, 1-2 means an infection, 3+ means safe passage. Sporekeepers get a +2 on this.)
+
+**Catch 5 Frogs**
+Sundance Pond is croaking with opportunity. Catch 5 frogs before they vanish beneath lily pads and roots.
+
+**Owl Alert**
+Silent wings have been spotted gliding through Whispering Branches after dusk. During hunting patrols, roll D8 every 3 hunting attempts. Roll 1-2 = owl encounter. Retreat immediately.
+
+**Catch 6 Blue Jays**
+Bright flashes of blue have been taunting SpruceClan from above. Catch 6 before they vanish into the canopy.
+
+**Root Maze Rescue**
+A young apprentice has become tangled or lost in Deeproot Tangle’s twisting maze. Lead a rescue patrol and guide them safely home.
+
+**Catch 4 Chipmunks**
+Tiny striped prey are darting through roots and brush. Catch 4 before they disappear underground.
+
+**Sundance Bonding Night**
+Moonlight glimmers across still pond water, and SpruceClan is invited to gather, groom, and bond beneath the stars.
+
+**Catch 3 Ducks**
+Sundance Pond’s calm waters have drawn feathered visitors. Catch 3 before they paddle away.
+
+**Spore Safety Check**
+Toadstool Glade’s fungal bloom is worsening. Roll a D4: 1-2 = minor spore irritation, 3-4 = safe.
+
+**Catch 5 Minnows**
+The shallows are silver with life. Catch 5 minnows from Sundance Pond.
+
+**Great Spruce Vigil**
+The oldest tree in the camp seems especially restless this moon. Gather beneath its roots to honour it’s strength.
+
+**Catch 4 Water Voles**
+The roots are crawling with movement. Catch 4 water voles before they retreat deeper into the tangle.
+
+**Tree Climbing Trial**
+SpruceClan’s apprentices must prove they are worthy of the forest heights. Complete a climbing challenge in Whispering Branches. (Roll a d10, a 5 or higher is a pass and bragging rights at the next gathering, a 4 or lower is a fail and a 1 is a minor injury)
+
+**Catch 2 Herons**
+Tall shadows stalk Sundance Pond’s edge. Catch 2 herons... if your patrol is brave enough.
+
+**Toadstool Hide-and-Seek**
+Toadstool Glade’s giant mushrooms make for perfect hiding spots. Kits, apprentices, and playful warriors are invited to a fun roleplay challenge.
+
+**Catch 5 Songbirds**
+The branches are alive with chirping prey. Catch any 5 songbirds before predators from above intervene.
+
+**Root Tangle Patrol**
+Deeproot Tangle’s winding paths require sharp minds and sharper paws. Patrol and ensure no dangers lurk beneath roots.
+
+**Catch 8 Frogs**
+The frogs are loud, plentiful, and impossible to ignore. Thin their chorus.
+
+**Elder Moss Night**
+SpruceClan’s elders deserve fresh bedding and warm company. Spend a night caring for camp’s wisest paws.
+
+**Fungal Bloom Warning**
+Spores have become dangerously thick in parts of Toadstool Glade. Cats must roleplay navigating or avoiding hazardous growth. Roll a D4: 1-2 = minor spore irritation, 3-4 = safe.
+
+**Catch 3 Turtles**
+Slow, sturdy prey has been spotted sunning by the pond. Catch 3... if you can crack the challenge.
+
+**Sundance Fishing Day**
+A peaceful day of fishing and bonding at Sundance Pond has been declared. Relaxation and prey await.
+
+**Branch Sprint Race**
+Who is SpruceClan’s swiftest through roots, trunks, and branches? Race through forest terrain for bragging rights. (Roll a D8, the highest roll wins, in case of a tie, roll again!)
+
+**Catch 10 Mixed Prey**
+The forest is thriving! Catch any 10 prey from SpruceClan territory before prey patterns shift.
+
+**Medicine Cat Mushroom Watch**
+Some fungi heal. Others harm. Assist the medicine cat in identifying dangerous growth before accidents happen.
+
+**SpruceClan Forest Feast**
+The evergreen forest has provided, but only if SpruceClan is worthy. Catch 20 total prey Clanwide before the 2 weeks end and celebrate beneath the Great Spruce.
+
+**SpruceClan Whitecough Outbreak**
+Freezing rain and damp evergreen winds have soaked Shadow Hearth, and now coughs are rustling through mossy dens beneath the spruce boughs. Roll a D4 for each SpruceClan cat: 1-2 = sick, 3-4 = healthy. If sick, roll a D6 for severity. If your initial D4 roll was a 1, add +1 to severity. Severity: 1 = Very Minor, 2-3 = Mild, 4-5 = Moderate, 6-7 = Serious. Medicine cats must move swiftly before the illness spreads through the forest’s shadows. Remember: no OC will ever be killed without your permission.
+
+OUTSIDER
+
+**Donkey Escape at the Sanctuary**
+One of the Sanctuary’s donkeys has slipped free from its pasture and is trotting far too confidently into unfamiliar territory! Barn cats, rogues, loners, or even visiting Clan cats must work together to safely guide the stubborn runaway back home before twolegs panic.
+
+**Catch 15 Barn Mice**
+The haylofts are practically rustling with fat, careless mice. Outsiders have 2 real-life weeks to catch 15 barn mice before the Sanctuary’s well-fed prey learns caution.
+
+**Neon Path Dumpster Dive**
+The dumpsters are overflowing after a busy twoleg night, and the Neon Path is bursting with rats and scraps. Catch 8 rats... if rival rogues don’t beat you to it first.
+
+**Frostbite Ridge Wind Check**
+The cliffside gusts are especially brutal this moon. Any cat spying or hunting on Frostbite Ridge must roll a D6. Roll 1 = dangerous gust, retreat immediately.
+
+**Kittypet Catmint Mission**
+Rumours are spreading of lush catmint patches hidden deep in Twoleg Town gardens. Sneak through fences, avoid dogs, and return with your dignity intact.
+
+**Sanctuary Story Circle**
+The hay is warm, the night is calm, and the barn cats are gathering for stories beneath lantern light. Share tales, wisdom, or outsider gossip.
+
+**Catch 4 Barn Rats**
+Bigger, bolder, and nastier than mice, barn rats are becoming a nuisance near feed stores. Catch 4 before they grow too confident.
+
+**Rogue Turf Tension**
+Tensions are rising on Neon Path as rival rogue groups eye the same food sources. Roleplay negotiations, alliances, or dramatic confrontations.
+
+**Catch 3 Pigeons**
+Twoleg Town rooftops are bustling with plump city birds. Catch 3 before they take flight.
+
+**Frostbite Ridge Bird Hunt**
+Cliffside winds carry gulls, sparrows, and starlings high above dangerous ledges. Brave the ridge and catch 5 birds.
+
+**Dog Escape Drill**
+A loud, overly enthusiastic dog has broken free in Twoleg Town! Outsiders must roleplay dodging, escaping, or warning others before disaster strikes.
+
+**Catch 8 Village Mice**
+The alleyways and gardens are full of skittish prey. Catch 8 mice from Twoleg Town before they disappear into stone cracks.
+
+**Sanctuary Hayloft Sleepover**
+For once, survival takes a back seat to comfort. Spend a peaceful roleplay night among warm hay, moonlit rafters, and friendly farm scents.
+
+**Catch 5 Gulls**
+Frostbite Ridge is alive with shrieking gulls riding dangerous air currents. Catch 5 before winds grow too fierce.
+
+**Rogue Alliance Night**
+Not every Neon Path gathering has to end in claws. Form alliances, trade stories, or negotiate territory under flickering neon signs.
+
+**Catch 2 Raccoons (Group Hunt)**
+Trash bandits have become bold near Neon Path dumpsters. A hunting party may attempt to catch 2, but teamwork is strongly advised. (To catch a raccoon, no matter the hunting factor, you must roll a 16 or higher).
+
+**Twoleg Monster Dodge**
+Twoleg roads are especially dangerous this moon. Any cat crossing major roads must roleplay carefully avoiding monsters.
+
+**Catch 10 Dumpster Mice**
+Neon Path’s alleys are teeming with prey beneath scraps and garbage. Catch 10 before rival scavengers take over.
+
+**Frostbite Spy Mission**
+The ridge offers a perfect view of nearby Clan movement... if you can handle the cold. Spy carefully and report what you see.
+
+**Sanctuary Peace Patrol**
+Not every patrol is about danger. Check fences, greet familiar animals, and ensure the Sanctuary remains safe and calm.
+
+**Catch 4 Sparrows**
+Twoleg Town gardens and rooftops are alive with tiny fluttering prey. Catch 4 before they scatter.
+
+**Dog Warning Patrol**
+Dogs have been unusually active near key outsider paths. Patrol and warn vulnerable cats.
+
+**Barn Cat Advice Night**
+The Sanctuary’s barn cats have seen everything from foxes to floods. Spend a night hearing wisdom from cats who know survival differently.
+
+**Catch 6 Rats**
+The Neon Path’s shadows are crawling with whiskers. Catch 6 rats before they overrun your scavenging grounds.
+
+**Lost Kittypet Escort**
+A pampered housecat has wandered too far from home and clearly regrets every life choice. Guide them back... or let them learn.
+
+**Sanctuary Feast Prep**
+A rare peaceful feast is being planned among barns and pastures. Gather prey and prepare for a night of safety and shared food.
+
+**Catch 5 Mice**
+Simple, reliable, and always useful. Catch 5 mice from any outsider territory.
+
+**Frostbite Storm Survival**
+A brutal windstorm has swept Frostbite Ridge. Any cats there must roleplay surviving the dangerous cold.
+
+**Neon Path Rivalry**
+Territory disputes are heating up beneath glowing signs. Will you defend, negotiate, or challenge?
+
+**Outsider Survival Challenge**
+From barns to cliffs to alleyways, outsider life demands adaptability. Catch 25 total prey across outsider territories before the 2 weeks end and prove that survival beyond Clan borders requires just as much strength.
+"""
 
 def parse_quests():
     quest_data = {}
@@ -2649,8 +3174,13 @@ def quest_is_allowed(quest):
     season = data.get("season", get_current_season())
     text = f"{quest['title']} {quest['description']}".lower()
 
-    if "leaf-bare only" in text or "leafbare only" in text:
-        return season == "Leafbare"
+    if (
+        "leaf-bare only" in text
+        or "leafbare only" in text
+        or "only do if the season is leaf-bare" in text
+        or "only do if the season is leafbare" in text
+    ):
+        return season.lower().replace("-", "") == "leafbare"
 
     return True
 
@@ -2664,11 +3194,11 @@ def choose_quest_for_group(group, quests):
     if not allowed_quests:
         allowed_quests = quests
 
-    used_titles = set(data["used_quests"].get(group, []))
+    used_keys = set(data["used_quests"].get(group, []))
 
     available = [
         quest for quest in allowed_quests
-        if quest["title"] not in used_titles
+        if f"{quest['title']}|{quest['description']}" not in used_keys
     ]
 
     if not available:
@@ -2676,7 +3206,9 @@ def choose_quest_for_group(group, quests):
         available = allowed_quests
 
     chosen = random.choice(available)
-    data["used_quests"][group].append(chosen["title"])
+
+    quest_key = f"{chosen['title']}|{chosen['description']}"
+    data["used_quests"][group].append(quest_key)
 
     return chosen
 
