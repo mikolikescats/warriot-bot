@@ -477,7 +477,6 @@ def process_injury_recovery(cat):
     else:
         injury["severity"] = new_severity
         injury["last_recovery_update"] = now.isoformat()
-        add_history(cat, f"Injury recovery progressed to severity {new_severity}/10")
 
     return True
 
