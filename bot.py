@@ -1989,46 +1989,6 @@ async def mentor_previous(interaction: discord.Interaction, name: str, mentor: s
 # /RELATIONSHIP COMMANDS
 # ─────────────────────────────
 
-@relationship_group.command(name="mate", description="Set two cats as mates")
-async def relationship_mate(interaction: discord.Interaction, cat1: str, cat2: str):
-    if not await staff_command_check(interaction):
-        return
-
-    if cat1 == cat2:
-        await interaction.response.send_message("A cat cannot be mates with themselves.", ephemeral=True)
-        return
-
-    async with data_lock:
-        cats = data.get("cats", {})
-
-        if cat1 not in cats:
-            await interaction.response.send_message("First cat not found.", ephemeral=True)
-            return
-
-        if cat2 not in cats:
-            await interaction.response.send_message("Second cat not found.", ephemeral=True)
-            return
-
-        cats[cat1].setdefault("mates", [])
-        cats[cat2].setdefault("mates", [])
-
-        if cat2 not in cats[cat1]["mates"]:
-            cats[cat1]["mates"].append(cat2)
-
-        if cat1 not in cats[cat2]["mates"]:
-            cats[cat2]["mates"].append(cat1)
-
-        remove_from_list(cats[cat1], "ex_mates", cat2)
-        remove_from_list(cats[cat2], "ex_mates", cat1)
-
-        add_history(cats[cat1], f"Became mates with {cat2}")
-        add_history(cats[cat2], f"Became mates with {cat1}")
-
-        save_data(data)
-
-    await interaction.response.send_message(f"💕 **{cat1}** and **{cat2}** are now mates.")
-
-
 @relationship_group.command(name="breakup", description="Break up two mates and mark them as ex-mates")
 async def relationship_breakup(interaction: discord.Interaction, cat1: str, cat2: str):
     if not await staff_command_check(interaction):
