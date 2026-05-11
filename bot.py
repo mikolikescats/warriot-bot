@@ -261,7 +261,7 @@ def fresh_default_data():
         "last_weather_week": None,
         "used_prophecies": [],
         "last_quest_period": None,
-        "used_quests": {}
+        "used_quests": {},
         "active_quests": {},
         "quest_results": {}
     }
