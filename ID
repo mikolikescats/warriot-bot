@@ -77,6 +77,9 @@ DATA_ROW_ID = "main"
 REPORT_CHANNEL_ID = 1500707305631780984
 COMMAND_CHANNEL_ID = 1500705057207746610
 WEATHER_CHANNEL_ID = 1441502516591202394
+WEATHER_CHANNEL_ID = 123456789
+WEATHER_REPORT_ROLE_ID = 987654321
+REPORT_CHANNEL_ID = 1441502516591202394
 
 HELPER_ROLE_ID = 1484027097784516668
 MODERATOR_ROLE_ID = 1441506626371715103
@@ -256,7 +259,11 @@ def fresh_default_data():
         "last_moon_month": None,
         "season": "Newleaf",
         "last_weather_week": None,
-        "used_prophecies": []
+        "used_prophecies": [],
+        "last_quest_period": None,
+        "used_quests": {}
+        "active_quests": {},
+        "quest_results": {}
     }
 
 
@@ -1097,6 +1104,9 @@ async def on_ready():
     if not weekly_weather_report.is_running():
         weekly_weather_report.start()
 
+    if not biweekly_quest_report.is_running():
+        biweekly_quest_report.start()
+
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -1222,7 +1232,13 @@ async def botinfo(interaction: discord.Interaction):
         "`/moon` — View the current moon, season, and clan status\n"
         "`/advancemoon` — Staff only. Manually advances one moon and posts the report\n"
         "`/resetmoon` — Staff only. Resets moon count and adjusts living cat ages\n"
-        "`/weatherreport` — View the weekly weather report\n\n"
+        "`/weatherreport` — Manually post this week's weather report\n"
+        "`/setweather` — Staff only. Manually set and post custom weather\n\n"
+
+        "📜 **Quest / Gathering Commands**\n"
+        "`/quests` — Staff only. Manually post new biweekly quests\n"
+        "`/questresult` — Staff only. Mark a Clan or Outsider quest as passed or failed\n"
+        "`/gatheringreport` — Generate a Clan-specific Gathering report, including recent quest results\n\n"
 
         "🐾 **General Member Commands**\n"
         "`/catinfo [name]` — View full details about a cat\n"
@@ -1254,20 +1270,23 @@ async def botinfo(interaction: discord.Interaction):
         "💕 **Staff Relationship Commands**\n"
         "`/relationship mate` — Make two cats mates\n"
         "`/relationship breakup` — Break mates into ex-mates\n"
-        "`/relationship family` — Add family relation\n"
+        "`/relationship family` — Add family relation, including custom Other relations\n"
         "`/relationship remove` — Remove a specific relation\n"
-        "`/relationship clearhistory` — Fully wipe all relationship history between two cats\n\n"
+        "`/relationship clearhistory` — Fully wipe all relationship history between two cats\n"
+        "`/relationship removeall` — Remove all relationship records from one cat\n\n"
 
         "🍼 **Litter Command**\n"
         "`/addlitter` — Record kits born to a mother\n\n"
 
         "📌 **Important Notes**\n"
         "• Most staff commands only work in the bot command channel\n"
+        "• Quests automatically post every other Monday at 10 AM\n"
+        "• The bot tracks the most recent 2 quests per Clan/group for Gathering reports\n"
         "• Dead cats cannot be mentored, injured, or aged\n"
         "• Cat Tinder automatically excludes family, mentors, exes, dead cats, hidden cats, and mates\n"
         "• If something looks wrong, use `/catinfo` first to inspect records\n\n"
 
-        "🌟 Tip: If records are wrong (age, clan, rank, spelling), fix them ASAP so moon reports stay accurate."
+        "🌟 Tip: If records are wrong, fix them ASAP so moon, quest, and Gathering reports stay accurate."
     )
 
     await safe_respond(interaction, message[:1900], ephemeral=True)
@@ -1430,6 +1449,8 @@ async def cat_rank(interaction: discord.Interaction, name: str, rank: app_comman
             return
 
         cat = data["cats"][name]
+        old_rank = cat.get("rank")
+        old_mentor = cat.get("mentor")
 
         validation_error = validate_cat_rank(cat.get("clan"), rank.value, cat.get("faction"))
         if validation_error:
@@ -1437,11 +1458,28 @@ async def cat_rank(interaction: discord.Interaction, name: str, rank: app_comman
             return
 
         cat["rank"] = rank.value
+
+        # If an apprentice becomes a warrior, move mentor to past
+        if old_rank == "Apprentice" and rank.value == "Warrior" and old_mentor:
+            if "(PAST)" not in str(old_mentor):
+                cat["mentor"] = f"{old_mentor} (PAST)"
+
+            if old_mentor in data["cats"]:
+                mentor_cat = data["cats"][old_mentor]
+
+                if name in mentor_cat.get("apprentices", []):
+                    mentor_cat["apprentices"].remove(name)
+
+                mentor_cat.setdefault("past_apprentices", [])
+                if name not in mentor_cat["past_apprentices"]:
+                    mentor_cat["past_apprentices"].append(name)
+
+                add_history(mentor_cat, f"Former apprentice {name} became a Warrior")
+
         add_history(cat, f"Rank changed to {rank.value}")
         save_data(data)
 
     await interaction.response.send_message(f"⚔ **{name}** is now **{rank.value}**.")
-
 
 @cat_group.command(name="rename", description="Rename a cat")
 @app_commands.describe(old_name="Current name", new_name="New name")
@@ -2027,6 +2065,82 @@ async def relationship_breakup(interaction: discord.Interaction, cat1: str, cat2
     await interaction.response.send_message(f"💔 **{cat1}** and **{cat2}** are now ex-mates.")
 
 
+@relationship_group.command(name="mate", description="Set two cats as mates")
+async def relationship_mate(interaction: discord.Interaction, cat1: str, cat2: str):
+    if not await staff_command_check(interaction):
+        return
+
+    if cat1 == cat2:
+        await interaction.response.send_message("A cat cannot be mates with themselves.", ephemeral=True)
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if cat1 not in cats:
+            await interaction.response.send_message("First cat not found.", ephemeral=True)
+            return
+
+        if cat2 not in cats:
+            await interaction.response.send_message("Second cat not found.", ephemeral=True)
+            return
+
+        cats[cat1].setdefault("mates", [])
+        cats[cat2].setdefault("mates", [])
+
+        if cat2 not in cats[cat1]["mates"]:
+            cats[cat1]["mates"].append(cat2)
+
+        if cat1 not in cats[cat2]["mates"]:
+            cats[cat2]["mates"].append(cat1)
+
+        remove_from_list(cats[cat1], "ex_mates", cat2)
+        remove_from_list(cats[cat2], "ex_mates", cat1)
+
+        add_history(cats[cat1], f"Became mates with {cat2}")
+        add_history(cats[cat2], f"Became mates with {cat1}")
+
+        save_data(data)
+
+    await interaction.response.send_message(f"💕 **{cat1}** and **{cat2}** are now mates.")
+
+
+@relationship_group.command(name="breakup", description="Break up two mates and mark them as ex-mates")
+async def relationship_breakup(interaction: discord.Interaction, cat1: str, cat2: str):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if cat1 not in cats:
+            await interaction.response.send_message("First cat not found.", ephemeral=True)
+            return
+
+        if cat2 not in cats:
+            await interaction.response.send_message("Second cat not found.", ephemeral=True)
+            return
+
+        remove_from_list(cats[cat1], "mates", cat2)
+        remove_from_list(cats[cat2], "mates", cat1)
+
+        cats[cat1].setdefault("ex_mates", [])
+        cats[cat2].setdefault("ex_mates", [])
+
+        if cat2 not in cats[cat1]["ex_mates"]:
+            cats[cat1]["ex_mates"].append(cat2)
+
+        if cat1 not in cats[cat2]["ex_mates"]:
+            cats[cat2]["ex_mates"].append(cat1)
+
+        add_history(cats[cat1], f"Broke up with {cat2}")
+        add_history(cats[cat2], f"Broke up with {cat1}")
+
+        save_data(data)
+
+    await interaction.response.send_message(f"💔 **{cat1}** and **{cat2}** are now ex-mates.")
+
+
 @relationship_group.command(name="family", description="Add a family relation between two cats")
 @app_commands.describe(
     name="First cat",
@@ -2077,6 +2191,156 @@ async def relationship_family(
         f"**{relative}** → {reverse_relation}: **{name}**"
     )
 
+
+@relationship_group.command(name="remove", description="Remove a relationship between two cats by typing the relationship name")
+@app_commands.describe(
+    cat1="First cat",
+    relation="Relationship type to remove, example: Mother, Nephew, Grandparent, Other",
+    cat2="Second cat"
+)
+async def relationship_remove(
+    interaction: discord.Interaction,
+    cat1: str,
+    relation: str,
+    cat2: str
+):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if cat1 not in cats:
+            await interaction.response.send_message("First cat not found.", ephemeral=True)
+            return
+
+        if cat2 not in cats:
+            await interaction.response.send_message("Second cat not found.", ephemeral=True)
+            return
+
+        relation_value = relation.strip()
+
+        # Remove mates/ex-mates
+        if relation_value.lower() in ["mate", "mates"]:
+            remove_from_list(cats[cat1], "mates", cat2)
+            remove_from_list(cats[cat2], "mates", cat1)
+
+        elif relation_value.lower() in ["ex-mate", "ex mate", "ex-mates", "ex mates"]:
+            remove_from_list(cats[cat1], "ex_mates", cat2)
+            remove_from_list(cats[cat2], "ex_mates", cat1)
+
+        else:
+            # Remove the typed relation from cat1 → cat2
+            family1 = cats[cat1].get("family", {})
+            for saved_relation in list(family1.keys()):
+                if saved_relation.lower() == relation_value.lower():
+                    family1[saved_relation] = [
+                        relative for relative in family1[saved_relation]
+                        if relative != cat2
+                    ]
+
+                    if not family1[saved_relation]:
+                        del family1[saved_relation]
+
+            # Also remove cat1 from ANY matching relation on cat2
+            family2 = cats[cat2].get("family", {})
+            for saved_relation in list(family2.keys()):
+                family2[saved_relation] = [
+                    relative for relative in family2[saved_relation]
+                    if relative != cat1
+                ]
+
+                if not family2[saved_relation]:
+                    del family2[saved_relation]
+
+        add_history(cats[cat1], f"Removed relationship with {cat2}: {relation_value}")
+        add_history(cats[cat2], f"Removed relationship with {cat1}: {relation_value}")
+
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🧹 Removed **{relation_value}** relationship between **{cat1}** and **{cat2}**."
+    )
+
+@relationship_group.command(name="clearhistory", description="Clear relationship history between two cats")
+async def relationship_clearhistory(interaction: discord.Interaction, cat1: str, cat2: str):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if cat1 not in cats:
+            await interaction.response.send_message("First cat not found.", ephemeral=True)
+            return
+
+        if cat2 not in cats:
+            await interaction.response.send_message("Second cat not found.", ephemeral=True)
+            return
+
+        remove_relationship_history_between(cats[cat1], cat2)
+        remove_relationship_history_between(cats[cat2], cat1)
+
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🧹 Cleared relationship history between **{cat1}** and **{cat2}**."
+    )
+    
+@relationship_group.command(name="removeall", description="Remove all relationship records from one cat")
+async def relationship_removeall(interaction: discord.Interaction, name: str):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if name not in cats:
+            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            return
+
+        target_cat = cats[name]
+
+        # Remove this cat from everyone else's relationship records
+        for other_name, other_cat in cats.items():
+            if other_name == name:
+                continue
+
+            remove_from_list(other_cat, "mates", name)
+            remove_from_list(other_cat, "ex_mates", name)
+            remove_from_list(other_cat, "apprentices", name)
+            remove_from_list(other_cat, "past_apprentices", name)
+            remove_from_list(other_cat, "previous_mentors", name)
+
+            if other_cat.get("mentor") == name:
+                other_cat["mentor"] = None
+
+            family = other_cat.get("family", {})
+            for relation in list(family.keys()):
+                family[relation] = [
+                    relative for relative in family[relation]
+                    if relative != name
+                ]
+
+                if not family[relation]:
+                    del family[relation]
+
+        # Clear this cat's own relationship records
+        target_cat.pop("mates", None)
+        target_cat.pop("ex_mates", None)
+        target_cat.pop("mentor", None)
+        target_cat.pop("apprentices", None)
+        target_cat.pop("past_apprentices", None)
+        target_cat.pop("previous_mentors", None)
+        target_cat.pop("family", None)
+
+        add_history(target_cat, "All relationship records removed")
+
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🧹 Removed all relationship records for **{name}**."
+    )
 
 @relationship_group.command(name="remove", description="Remove a relationship between two cats by typing the relationship name")
 @app_commands.describe(
@@ -2454,30 +2718,269 @@ async def weekly_weather_report():
             )
         )
 
+# ─────────────────────────────
+# QUEST SYSTEM
+# ─────────────────────────────
 
-@bot.tree.command(name="weatherreport", description="Generate this week's territory weather report")
-async def weatherreport(interaction: discord.Interaction):
-    report = generate_weekly_weather()
+ROLEPLAY_ANNOUNCEMENTS_ROLE_ID = 1442996267470033026
 
-    channel = bot.get_channel(WEATHER_CHANNEL_ID)
+
+def parse_quests():
+    quest_data = {}
+    current_group = None
+    current_title = None
+    current_description = []
+
+    valid_groups = {
+        "BLIZZARDCLAN": "BlizzardClan",
+        "TORRENTCLAN": "TorrentClan",
+        "FOSSILCLAN": "FossilClan",
+        "SPRUCECLAN": "SpruceClan",
+        "OUTSIDER": "Outsider"
+    }
+
+    for raw_line in QUEST_TEXT.splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        upper_line = line.upper()
+
+        if upper_line in valid_groups:
+            if current_group and current_title:
+                quest_data.setdefault(current_group, []).append({
+                    "title": current_title,
+                    "description": " ".join(current_description).strip()
+                })
+
+            current_group = valid_groups[upper_line]
+            current_title = None
+            current_description = []
+            quest_data.setdefault(current_group, [])
+            continue
+
+        if line.startswith("**") and line.endswith("**"):
+            if current_group and current_title:
+                quest_data.setdefault(current_group, []).append({
+                    "title": current_title,
+                    "description": " ".join(current_description).strip()
+                })
+
+            current_title = line.replace("**", "").strip()
+            current_description = []
+            continue
+
+        if current_group and current_title:
+            current_description.append(line)
+
+    if current_group and current_title:
+        quest_data.setdefault(current_group, []).append({
+            "title": current_title,
+            "description": " ".join(current_description).strip()
+        })
+
+    cleaned = {}
+
+    for group, quests in quest_data.items():
+        seen = set()
+        cleaned[group] = []
+
+        for quest in quests:
+            key = f"{quest['title']}|{quest['description']}"
+            if key not in seen:
+                cleaned[group].append(quest)
+                seen.add(key)
+
+    return cleaned
+
+
+def quest_is_allowed(quest):
+    season = data.get("season", get_current_season())
+    text = f"{quest['title']} {quest['description']}".lower()
+
+    if "leaf-bare only" in text or "leafbare only" in text:
+        return season == "Leafbare"
+
+    return True
+
+
+def choose_quest_for_group(group, quests):
+    data.setdefault("used_quests", {})
+    data["used_quests"].setdefault(group, [])
+
+    allowed_quests = [quest for quest in quests if quest_is_allowed(quest)]
+
+    if not allowed_quests:
+        allowed_quests = quests
+
+    used_titles = set(data["used_quests"].get(group, []))
+
+    available = [
+        quest for quest in allowed_quests
+        if quest["title"] not in used_titles
+    ]
+
+    if not available:
+        data["used_quests"][group] = []
+        available = allowed_quests
+
+    chosen = random.choice(available)
+    data["used_quests"][group].append(chosen["title"])
+
+    return chosen
+
+
+def record_active_quest(group, quest):
+    data.setdefault("active_quests", {})
+
+    data["active_quests"].setdefault(group, [])
+
+    quest_record = {
+        "title": quest["title"],
+        "description": quest["description"],
+        "moon": data.get("moon", 0),
+        "result": "Pending"
+    }
+
+    data["active_quests"][group].append(quest_record)
+
+    # Keep only the most recent 2 quests for this group
+    data["active_quests"][group] = data["active_quests"][group][-2:]
+
+
+def build_quest_announcement():
+    quest_data = parse_quests()
+
+    lines = [
+        "🌙 **A half moon has passed...**",
+        "",
+        "New quests are now available for every Clan and the Outsiders! Complete them within the next **2 real-life weeks** before the next quest cycle begins.",
+        ""
+    ]
+
+    group_order = [
+        "BlizzardClan",
+        "TorrentClan",
+        "FossilClan",
+        "SpruceClan",
+        "Outsider"
+    ]
+
+    for group in group_order:
+        quests = quest_data.get(group, [])
+
+        if not quests:
+            continue
+
+        chosen = choose_quest_for_group(group, quests)
+        record_active_quest(group, chosen)
+
+        lines.append("━━━━━━━━━━━━━━━")
+        lines.append(f"**{group.upper()} QUEST**")
+        lines.append(f"**{chosen['title']}**")
+        lines.append(chosen["description"])
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+async def send_quest_announcement(channel, message):
+    await channel.send(f"<@&{ROLEPLAY_ANNOUNCEMENTS_ROLE_ID}>")
+    await send_long_message(channel, message)
+
+
+@tasks.loop(minutes=30)
+async def biweekly_quest_report():
+    now = datetime.now(TZ)
+
+    # Monday at 10 AM
+    if now.weekday() != 0 or now.hour != 10:
+        return
+
+    # Every other ISO week
+    if now.isocalendar().week % 2 != 0:
+        return
+
+    quest_period = f"{now.year}-W{now.isocalendar().week}"
+
+    async with data_lock:
+        if data.get("last_quest_period") == quest_period:
+            return
+
+        data["last_quest_period"] = quest_period
+        message = build_quest_announcement()
+        save_data(data)
+
+    channel = bot.get_channel(QUEST_CHANNEL_ID)
+
     if channel:
-        await channel.send(
-            content=f"<@&{WEATHER_REPORT_ROLE_ID}>",
-            embed=discord.Embed(
-                description=report,
-                color=discord.Color.blue()
-            )
-        )
+        await send_quest_announcement(channel, message)
 
-        await interaction.response.send_message(
-            "🌦️ Weather report sent to the weather channel.",
-            ephemeral=True
-        )
+
+@bot.tree.command(name="quests", description="Manually post new biweekly quests")
+async def quests(interaction: discord.Interaction):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        message = build_quest_announcement()
+        save_data(data)
+
+    channel = bot.get_channel(QUEST_CHANNEL_ID)
+
+    if channel:
+        await send_quest_announcement(channel, message)
+        await interaction.response.send_message("🌙 New quests posted.", ephemeral=True)
     else:
-        await interaction.response.send_message(
-            "I could not find the weather channel. Check WEATHER_CHANNEL_ID.",
-            ephemeral=True
-        )
+        await interaction.response.send_message("Quest channel not found. Check QUEST_CHANNEL_ID.", ephemeral=True)
+
+
+@bot.tree.command(name="questresult", description="Mark a Clan or Outsider quest as passed or failed")
+@app_commands.describe(
+    group="Select the Clan or Outsider group",
+    result="Did the most recent quest pass or fail?"
+)
+@app_commands.choices(
+    group=CLAN_CHOICES,
+    result=[
+        app_commands.Choice(name="Pass", value="Passed"),
+        app_commands.Choice(name="Fail", value="Failed")
+    ]
+)
+async def questresult(
+    interaction: discord.Interaction,
+    group: app_commands.Choice[str],
+    result: app_commands.Choice[str]
+):
+    if not await staff_command_check(interaction):
+        return
+
+    selected_group = group.value
+
+    async with data_lock:
+        data.setdefault("active_quests", {})
+        active_quests = data["active_quests"].get(selected_group, [])
+
+        if not active_quests:
+            await interaction.response.send_message(
+                f"No recent quests found for **{selected_group}**. Use `/quests` first.",
+                ephemeral=True
+            )
+            return
+
+        active_quests[-1]["result"] = result.value
+        latest_quest = active_quests[-1]
+
+        save_data(data)
+
+    emoji = "✅" if result.value == "Passed" else "❌"
+
+    await interaction.response.send_message(
+        f"{emoji} **{selected_group}**'s latest quest was marked as **{result.value}**.\n"
+        f"Quest: **{latest_quest['title']}**",
+        ephemeral=True
+    )
 
 
 @bot.tree.command(name="setweather", description="Manually set this week's weather report")
@@ -2876,6 +3379,8 @@ async def gatheringreport(interaction: discord.Interaction, clan: app_commands.C
                 clean_entry = entry.replace(f"Moon {current_moon}: ", "")
                 events.append(f"• **{name}** — {clean_entry}")
 
+    recent_quests = data.get("active_quests", {}).get(selected_clan, [])[-2:]
+
     lines = [
         f"📜 Gathering Report for **{selected_clan}**",
         f"🌙 Moon {current_moon}",
@@ -2888,6 +3393,26 @@ async def gatheringreport(interaction: discord.Interaction, clan: app_commands.C
         lines.extend(events)
     else:
         lines.append("No major updates recorded for this Clan this moon.")
+
+    lines.append("")
+    lines.append("**Recent Quest Results**")
+
+    if recent_quests:
+        for quest in recent_quests:
+            result = quest.get("result", "Pending")
+
+            if result == "Passed":
+                emoji = "✅"
+            elif result == "Failed":
+                emoji = "❌"
+            else:
+                emoji = "⏳"
+
+            lines.append(
+                f"{emoji} **{quest.get('title', 'Unknown Quest')}** — {result}"
+            )
+    else:
+        lines.append("No recent quests recorded for this Clan yet.")
 
     await interaction.response.send_message("\n".join(lines)[:1900])
 
