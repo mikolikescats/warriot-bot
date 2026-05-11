@@ -2739,7 +2739,6 @@ async def send_quest_announcement(channel, message):
     await channel.send(f"<@&{ROLEPLAY_ANNOUNCEMENTS_ROLE_ID}>")
     await send_long_message(channel, message)
 
-
 @tasks.loop(minutes=30)
 async def biweekly_quest_report():
     now = datetime.now(TZ)
@@ -2748,8 +2747,10 @@ async def biweekly_quest_report():
     if now.weekday() != 0 or now.hour != 10:
         return
 
-    # Every other ISO week
-    if now.isocalendar().week % 2 != 0:
+    # Every other week, starting from your chosen launch week
+    START_QUEST_WEEK = 20  # May 11, 2026 launch week
+
+    if (now.isocalendar().week - START_QUEST_WEEK) % 2 != 0:
         return
 
     quest_period = f"{now.year}-W{now.isocalendar().week}"
@@ -2766,7 +2767,6 @@ async def biweekly_quest_report():
 
     if channel:
         await send_quest_announcement(channel, message)
-
 
 @bot.tree.command(name="quests", description="Manually post new biweekly quests")
 async def quests(interaction: discord.Interaction):
