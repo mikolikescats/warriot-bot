@@ -90,7 +90,7 @@ MEDICINE_CAT_ROLE_ID = 1449118843485032599
 MEDICINE_CAT_APPRENTICE_ROLE_ID = 1449118899860672683
 HEALER_ROLE_ID = 1449118955418550364
 
-MEDICAL_ROLE_IDS = {
+_ROLE_IDS = {
     MEDICINE_CAT_ROLE_ID,
     MEDICINE_CAT_APPRENTICE_ROLE_ID,
     HEALER_ROLE_ID,
@@ -2265,20 +2265,19 @@ async def medical_report(
             else:
                 treated_text = f"Last treated {last_treated_days} day(s) ago"
 
-            needed_days = recovery_days_needed(severity)
-
             lines.append(
-                f"• **{name}** — {injury.get('type', 'Unknown')}\n"
-                f"  Severity: **{severity}/10, {severity_label(severity)}**\n"
-                f"  Status: **{treatment_status}**\n"
-                f"  Care: {treated_text}\n"
-                f"  Natural recovery: about **{needed_days} day(s)** from last recovery update"
+                f"**Name:** {name} — {injury.get('type', 'Unknown')}\n"
+                f"**Severity:** {severity}/10, {severity_label(severity)}\n"
+                f"**Status:** {treatment_status}\n"
+                f"**Care:** {treated_text}\n"
             )
 
         message = "\n".join(lines)
-        await send_long_message(interaction.channel, message)
 
     await interaction.response.send_message("🩺 Medical report posted.", ephemeral=True)
+
+    channel = interaction.channel
+    await send_long_message(channel, message)
 
 
 @medical_group.command(name="treat", description="Mark that a cat received medical care")
