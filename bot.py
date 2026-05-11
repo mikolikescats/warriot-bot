@@ -263,7 +263,9 @@ def fresh_default_data():
         "last_quest_period": None,
         "used_quests": {},
         "active_quests": {},
-        "quest_results": {}
+        "quest_results": {},
+        "question_usage": {},
+        "used_questions": []
     }
 
 
@@ -632,6 +634,259 @@ def handle_medicine_succession(report):
             cat["rank"] = "Medicine Cat"
             add_history(cat, f"Became Medicine Cat of {clan}")
             report["succession"].append(f"🌿 {name} became Medicine Cat of {clan}.")
+
+# ─────────────────────────────
+# OC QUESTION SYSTEM
+# ─────────────────────────────
+
+OC_QUESTIONS = [
+    OC_QUESTIONS = [
+    "What’s your OC’s favourite season?",
+    "What’s your OC’s favourite weather?",
+    "What’s your OC’s least favourite weather?",
+    "What’s your OC’s favourite colour?",
+    "What’s your OC’s least favourite colour?",
+    "What’s your OC’s favourite flower?",
+    "What’s your OC’s favourite smell?",
+    "What’s your OC’s least favourite smell?",
+    "What’s your OC’s favourite food?",
+    "What food would your OC absolutely never eat?",
+    "What’s your OC’s favourite dessert?",
+    "What’s your OC’s favourite drink?",
+    "Would your OC choose coffee, tea, or energy drinks?",
+    "What’s your OC’s favourite animal besides cats?",
+    "What would your OC’s dream vacation be?",
+    "Would your OC prefer mountains, beach, forest, or city?",
+    "Is your OC a morning cat or a night owl?",
+    "What’s your OC’s biggest pet peeve?",
+    "What’s one thing your OC is weirdly good at?",
+    "What’s one thing your OC is hilariously bad at?",
+    "What would your OC’s laugh sound like?",
+    "What emoji represents your OC best?",
+    "What’s your OC’s comfort item?",
+    "What’s your OC’s favourite movie genre?",
+    "What’s your OC’s favourite TV genre?",
+    "What’s your OC’s favourite book genre?",
+    "What’s your OC’s favourite music genre?",
+    "What karaoke song would your OC absolutely destroy?",
+    "What would your OC’s signature dance move be?",
+    "What would your OC’s ideal birthday party look like?",
+    "Does your OC prefer sweet, salty, spicy, or sour?",
+    "What’s your OC’s favourite holiday?",
+    "What would your OC’s dream job be outside the Clans?",
+    "What sport would your OC secretly dominate?",
+    "What sport would your OC fail instantly at?",
+    "Would your OC rather be famous or rich?",
+    "What would your OC’s dream car be?",
+    "What would your OC order at a fast food place?",
+    "What’s your OC’s favourite ice cream topping?",
+    "Is your OC good at keeping secrets?",
+    "What’s your OC’s guilty pleasure?",
+    "What fashion style would your OC have?",
+    "What accessory would your OC always wear?",
+    "What’s your OC’s favourite board game?",
+    "What video game would your OC obsess over?",
+    "What social media app would your OC use most?",
+    "Would your OC become an influencer?",
+    "What would your OC go viral for?",
+    "What’s your OC’s most chaotic trait?",
+    "What’s your OC’s most wholesome trait?",
+    "Is your OC competitive?",
+    "Would your OC survive reality TV?",
+    "What reality show would your OC absolutely win?",
+    "What would your OC’s dream concert be?",
+    "If your OC had a YouTube channel, what would it be about?",
+    "What’s your OC’s ideal pizza topping?",
+    "Would your OC support pineapple on pizza?",
+    "What’s your OC’s favourite snack?",
+    "What would your OC name a pet rock?",
+    "What’s your OC’s biggest irrational fear?",
+    "Would your OC rather fly or be invisible?",
+    "If your OC had a superpower, what would it be?",
+    "What Hogwarts house would your OC be in?",
+    "What mythical creature matches your OC best?",
+    "If your OC came with a warning label, what would it say?",
+    "What’s your OC’s go-to excuse for being late?",
+    "Is your OC the planner or the chaotic friend?",
+    "What would your OC’s signature catchphrase be?",
+    "What song would play every time your OC entered a room?",
+    "What’s your OC’s favourite type of candy?",
+    "What would your OC spend way too much money on?",
+    "What skill does your OC think they could totally master… but definitely couldn’t?",
+    "If your OC opened a business, what would it be?",
+    "What’s your OC’s weirdest talent?",
+    "If your OC were a meme, which one would they be?",
+    "Which OC is most likely to accidentally become president?",
+    "Which OC is most likely to join the NHL?",
+    "Which OC is most likely to win the X Games?",
+    "Which OC is most likely to have a wildly successful K-pop career?",
+    "Which OC is most likely to start a cult by accident?",
+    "Which OC is most likely to become a billionaire?",
+    "Which OC is most likely to get cancelled on social media?",
+    "Which OC is most likely to survive a zombie apocalypse?",
+    "Which OC is most likely to cause the zombie apocalypse?",
+    "Which OC is most likely to become a reality TV star?",
+    "Which OC is most likely to get banned from an amusement park?",
+    "Which OC is most likely to go viral for something ridiculous?",
+    "Which OC is most likely to become a conspiracy theorist?",
+    "Which OC is most likely to own 14 pets?",
+    "Which OC is most likely to become a famous actor?",
+    "Which OC is most likely to become a supervillain?",
+    "Which OC is most likely to win a hot dog eating contest?",
+    "Which OC is most likely to become a motivational speaker?",
+    "Which OC is most likely to get arrested for something stupid?",
+    "Which OC is most likely to marry rich?",
+    "Which OC is most likely to live in a van by choice?",
+    "Which OC is most likely to accidentally set something on fire?",
+    "Which OC is most likely to become a meme legend?",
+    "Which OC is most likely to survive entirely on snacks?",
+    "Which OC is most likely to somehow end up on the news?",
+
+    "What’s your OC’s favourite pizza chain?",
+    "What’s your OC’s least favourite chore?",
+    "What would your OC binge-watch for 12 hours straight?",
+    "What’s your OC’s dream pet?",
+    "What’s your OC’s favourite childhood memory?",
+    "What is your OC’s worst habit?",
+    "What’s your OC’s best habit?",
+    "What would your OC do with a million dollars?",
+    "What would your OC buy first after winning the lottery?",
+    "Would your OC survive camping?",
+    "Would your OC survive high school?",
+    "What clique would your OC be in?",
+    "Would your OC be prom king/queen?",
+    "What’s your OC’s favourite amusement park ride?",
+    "What ride would terrify your OC?",
+    "Would your OC rather skydive or scuba dive?",
+    "What’s your OC’s favourite cereal?",
+    "What cereal perfectly matches your OC?",
+    "What would your OC’s perfume/cologne smell like?",
+    "What would your OC’s dating profile bio say?",
+    "What’s your OC’s most embarrassing moment?",
+    "What would instantly annoy your OC?",
+    "What makes your OC cry every time?",
+    "What’s your OC’s toxic trait?",
+    "What’s your OC’s green flag?",
+    "Would your OC thrive in a zombie apocalypse group?",
+    "Would your OC betray the group first?",
+    "What would your OC’s Starbucks order be?",
+    "What aesthetic fits your OC best?",
+    "What’s your OC’s favourite mythical beast?",
+    "What’s your OC’s least favourite social situation?",
+    "Would your OC rather text or call?",
+    "Would your OC leave someone on read?",
+    "What’s your OC’s favourite app?",
+    "What app would your OC absolutely delete forever?",
+    "Would your OC survive being famous?",
+    "What scandal would your OC get cancelled for?",
+    "What’s your OC’s weird food combo?",
+    "What would your OC do during a power outage?",
+    "Would your OC survive Ikea?",
+    "Would your OC cry at weddings?",
+    "Would your OC cry at dog videos?",
+    "What’s your OC’s favourite conspiracy theory?",
+    "What reality dating show would your OC dominate?",
+    "Would your OC survive Big Brother?",
+    "What’s your OC’s favourite holiday candy?",
+    "Would your OC rather ghost someone or be ghosted?",
+    "What’s your OC’s comfort movie?",
+    "What would your OC name their first child?",
+    "What’s your OC’s worst pickup line?",
+    "What’s your OC’s best pickup line?",
+    "Would your OC own Crocs?",
+    "Would your OC wear socks with sandals?",
+    "What’s your OC’s dream house?",
+    "Would your OC survive living alone?",
+    "Would your OC rather live in a mansion or cabin?",
+    "What’s your OC’s favourite fast food sauce?",
+    "What’s your OC’s weirdest fear?",
+    "What’s your OC’s Roman Empire?",
+    "What fictional world would your OC thrive in?",
+    "What fictional world would destroy your OC?",
+    "Would your OC survive The Hunger Games?",
+    "Would your OC volunteer as tribute?",
+    "What’s your OC’s favourite internet trend?",
+    "What trend would your OC absolutely hate?",
+    "Would your OC become a TikTok menace?",
+    "What’s your OC’s secret talent show act?",
+    "What would your OC get famous for on Twitch?",
+    "What’s your OC’s dream band name?",
+    "What would your OC’s wrestler name be?",
+    "What’s your OC’s drag name?",
+    "What’s your OC’s villain origin story?",
+    "What minor inconvenience would turn your OC evil?",
+    "What would your OC do first in Vegas?",
+    "Would your OC survive a road trip?",
+    "Would your OC be driver, DJ, or menace?",
+    "What’s your OC’s dream festival?",
+    "What’s your OC’s guilty pleasure song?",
+    "What’s your OC’s favourite meme format?",
+    "Would your OC win Survivor?",
+    "Would your OC get voted off first?",
+    "What’s your OC’s go-to prank?",
+    "What prank would break your OC?",
+    "What’s your OC’s cursed talent?",
+    "Would your OC survive retail?",
+    "Would your OC ask to speak to the manager?",
+    "What would your OC’s autobiography be called?",
+    "What would your OC’s TED Talk be about?",
+    "What would your OC’s podcast be called?",
+    "What’s your OC’s favourite emoji combo?",
+    "What’s your OC’s most unhinged opinion?",
+    "Which OC is most likely to get abducted by aliens?",
+    "What would your OC get banned from?",
+    "What would your OC’s warning announcement sound like?",
+    "What’s your OC’s ultimate comfort purchase?",
+    "What’s your OC’s “hear me out”?",
+    "What would your OC’s catchphrase on reality TV be?",
+    "What’s your OC’s biggest main character moment?",
+    "What’s your OC’s most NPC trait?",
+    "Would your OC survive Comic Con?",
+    "What cosplay would your OC absolutely commit to?",
+    "Would your OC thrive at karaoke night?",
+    "What’s your OC’s dream viral tweet?",
+    "What would your OC’s mugshot be for?",
+    "Would your OC survive working customer service?",
+    "What would your OC absolutely rage quit?"
+]
+
+@bot.tree.command(name="question", description="Post a silly OC question")
+async def question(interaction: discord.Interaction):
+    async with data_lock:
+        data.setdefault("question_usage", {})
+        data.setdefault("used_questions", [])
+
+        today = datetime.now(TZ).date().isoformat()
+
+        usage = data["question_usage"].setdefault(today, 0)
+
+        if usage >= 2:
+            await interaction.response.send_message(
+                "❌ The OC question command has already been used twice today. Try again tomorrow!",
+                ephemeral=True
+            )
+            return
+
+        available_questions = [
+            question for question in OC_QUESTIONS
+            if question not in data["used_questions"]
+        ]
+
+        if not available_questions:
+            data["used_questions"] = []
+            available_questions = OC_QUESTIONS.copy()
+
+        chosen_question = random.choice(available_questions)
+
+        data["used_questions"].append(chosen_question)
+        data["question_usage"][today] = usage + 1
+
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"💭 **OC Question of the Day!**\n\n"
+        f"{chosen_question}"
+    )
 
 # ─────────────────────────────
 # PROPHECY SYSTEM
@@ -1231,64 +1486,86 @@ async def botinfo(interaction: discord.Interaction):
         "`/moon` — View the current moon, season, and clan status\n"
         "`/advancemoon` — Staff only. Manually advances one moon and posts the report\n"
         "`/resetmoon` — Staff only. Resets moon count and adjusts living cat ages\n"
-        "`/weatherreport` — Manually post this week's weather report\n"
-        "`/setweather` — Staff only. Manually set and post custom weather\n\n"
+        "`/weatherreport` — Manually post or view this week's weather report\n"
+        "`/setweather` — Staff only. Manually set custom weather\n"
+        "`/question` — Public command. Posts a random OC question in any channel (max 2 uses per Toronto calendar day)\n\n"
 
         "📜 **Quest / Gathering Commands**\n"
         "`/quests` — Staff only. Manually post new biweekly quests\n"
         "`/questresult` — Staff only. Mark a Clan or Outsider quest as passed or failed\n"
-        "`/gatheringreport` — Generate a Clan-specific Gathering report, including recent quest results\n\n"
+        "`/gatheringreport [ClanName]` — Generate a Clan-specific report including recent promotions, deaths, injuries, quest results, and major story changes\n\n"
 
         "🐾 **General Member Commands**\n"
-        "`/catinfo [name]` — View full details about a cat\n"
-        "`/cats [clan]` — View all cats by clan or all clans\n"
+        "`/catinfo [Name]` — View full details about a cat\n"
+        "`/cats [Clan]` — View all cats by clan or all clans\n"
         "`/clan [ClanName]` — View one clan roster\n"
-        "`/cattinder [name] [clan]` — Find age-appropriate romance options\n\n"
+        "`/cattinder [Name] [Clan]` — Find age-appropriate romance options\n"
+        "`/question` — Random OC question prompt system\n\n"
 
         "🛠️ **Staff Cat Management**\n"
         "`/cat add` — Add a new living cat\n"
         "`/cat adddead` — Add a dead cat to records\n"
         "`/cat delete` — Permanently delete a cat\n"
-        "`/cat rename` — Rename a cat and update references\n"
-        "`/cat rank` — Change rank\n"
+        "`/cat rename` — Rename a cat and update all references\n"
+        "`/cat rank` — Change rank manually\n"
         "`/cat age` — Set exact age\n"
-        "`/cat markdead` — Mark living cat as dead\n"
-        "`/cat delayceremony` — Delay rank-up ceremonies\n"
-        "`/cat tinderhide` — Hide/unhide from Cat Tinder\n\n"
+        "`/cat markdead` — Mark a living cat as dead\n"
+        "`/cat delayceremony` — Delay automatic rank-up ceremonies\n"
+        "`/cat tinderhide` — Hide/unhide a cat from Cat Tinder\n\n"
 
         "🩹 **Staff Injury Commands**\n"
-        "`/injury add` — Add injury or illness\n"
-        "`/injury remove` — Recover or delete injury\n"
-        "`/injury severity` — Adjust severity manually\n"
+        "`/injury add` — Add an injury or illness\n"
+        "`/injury remove` — Remove or resolve injury\n"
+        "`/injury severity` — Override injury severity\n"
         "`/injury moon` — Change injury moon\n\n"
 
         "🎓 **Staff Mentor Commands**\n"
-        "`/mentor assign` — Assign a current mentor\n"
-        "`/mentor previous` — Add a previous mentor\n\n"
+        "`/mentor assign` — Assign a mentor to an apprentice\n"
+        "`/mentor previous` — Add previous mentor history\n\n"
 
         "💕 **Staff Relationship Commands**\n"
         "`/relationship mate` — Make two cats mates\n"
         "`/relationship breakup` — Break mates into ex-mates\n"
-        "`/relationship family` — Add family relation, including custom Other relations\n"
-        "`/relationship remove` — Remove a specific relation\n"
-        "`/relationship clearhistory` — Fully wipe all relationship history between two cats\n"
-        "`/relationship removeall` — Remove all relationship records from one cat\n\n"
+        "`/relationship family` — Add family relations\n"
+        "`/relationship remove` — Remove a specific relationship\n"
+        "`/relationship clearhistory` — Remove relationship history between two cats\n"
+        "`/relationship removeall` — Remove all relationships from one cat\n\n"
 
         "🍼 **Litter Command**\n"
-        "`/addlitter` — Record kits born to a mother\n\n"
+        "`/addlitter` — Record kits born to a mother and connect family automatically\n\n"
+
+        "💭 **OC Question System**\n"
+        "• `/question` works in any channel\n"
+        "• Maximum 2 uses per Toronto calendar day\n"
+        "• Pulls randomly from your massive OC question list\n"
+        "• Prevents repeats until all questions are used\n"
+        "• Includes personality prompts, silly hypotheticals, and “most likely to” questions\n\n"
 
         "📌 **Important Notes**\n"
-        "• Most staff commands only work in the bot command channel\n"
+        "• Most staff commands only work in the designated bot command channel\n"
         "• Quests automatically post every other Monday at 10 AM\n"
-        "• The bot tracks the most recent 2 quests per Clan/group for Gathering reports\n"
-        "• Dead cats cannot be mentored, injured, or aged\n"
-        "• Cat Tinder automatically excludes family, mentors, exes, dead cats, hidden cats, and mates\n"
-        "• If something looks wrong, use `/catinfo` first to inspect records\n\n"
+        "• Weather updates post weekly\n"
+        "• Moon progression is monthly unless manually advanced\n"
+        "• Dead cats cannot be mentored, injured, or appear in Cat Tinder\n"
+        "• Cat Tinder excludes dead cats, mates, exes, mentors, family, and hidden cats\n"
+        "• Once all OC questions are used, the question list resets automatically\n"
+        "• `/catinfo` is your best debugging tool for checking records\n\n"
 
-        "🌟 Tip: If records are wrong, fix them ASAP so moon, quest, and Gathering reports stay accurate."
+        "🌟 Tip: If records seem broken, check `/catinfo` first before editing anything."
     )
 
-    await safe_respond(interaction, message[:1900], ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+
+    max_length = 1900
+    while message:
+        chunk = message[:max_length]
+        split_at = chunk.rfind("\n")
+
+        if split_at == -1 or len(message) <= max_length:
+            split_at = len(chunk)
+
+        await interaction.followup.send(message[:split_at], ephemeral=True)
+        message = message[split_at:].lstrip()
 
 # ─────────────────────────────
 # CLEANED STAFF COMMAND GROUPS
@@ -3831,20 +4108,48 @@ async def dead(interaction: discord.Interaction, clan: app_commands.Choice[str],
 
     await interaction.response.send_message("\n".join(lines)[:1900])
 
-@bot.tree.command(name="bothelp", description="View member bot commands")
+@bot.tree.command(name="bothelp", description="View a list of member bot commands")
 async def bothelp(interaction: discord.Interaction):
     message = (
-        "📘 **Member Bot Help**\n\n"
-        "🌙 `/moon` — Check the current moon and season.\n"
-        "⛺ `/clan [ClanName]` — View a Clan or Outsider roster.\n"
-        "🐾 `/catinfo [name]` — View a cat’s profile, health, relationships, mentor, apprentices, and recent history.\n"
-        "💕 `/cattinder [name] [clan]` — Find age-appropriate romance options for a cat.\n"
-        "💀 `/dead [clan] [afterlife]` — View deceased cats by Clan and afterlife.\n"
-        "🌦️ `/weatherreport` — Send/view the weekly territory weather report.\n\n"
-        "📌 **Tip:** If a cat’s age, rank, Clan, name, or relationship looks wrong, tell staff so they can fix the records."
+        "📘 **ECHOSTONE MOUNTAIN BOT HELP** 📘\n\n"
+
+        "🐾 **General Member Commands**\n"
+        "`/moon` — Check the current moon, season, and Clan status.\n"
+        "`/clan [ClanName]` — View the roster and ranks for one Clan.\n"
+        "`/cats [clan]` — View cats by Clan, or view all cats.\n"
+        "`/catinfo [Name]` — Look up a specific cat’s full information.\n"
+        "`/cattinder [Name] [Clan]` — Find age-appropriate romance options for a cat.\n"
+        "`/question` — Posts a silly OC question for the server. This can be used in any channel, but only twice per calendar day.\n\n"
+
+        "🌦️ **Weather / World Commands**\n"
+        "`/weather` or `/weatherreport` — View the current weekly weather report, if available.\n\n"
+
+        "📜 **Quest / Story Commands**\n"
+        "`/gatheringreport [ClanName]` — View recent story updates, quest results, injuries, rank changes, and major events for a specific Clan.\n\n"
+
+        "💭 **About /question**\n"
+        "The `/question` command randomly pulls from the OC question list. Questions can be silly personality questions, modern AU-style questions, or “most likely to” prompts.\n"
+        "It resets by calendar day using Toronto time.\n"
+        "Once all questions have been used, the list resets so questions can appear again.\n\n"
+
+        "📌 **Notes**\n"
+        "• Member commands can be used by anyone unless stated otherwise.\n"
+        "• Some commands may only work in certain channels depending on how staff set them up.\n"
+        "• If something looks wrong with a cat’s records, use `/catinfo` first to check their details.\n"
+        "• Staff commands are not listed here to keep this guide simple.\n"
     )
 
-    await interaction.response.send_message(message, ephemeral=True)
+    if interaction.response.is_done():
+        await send_long_message(interaction.channel, message)
+    else:
+        await interaction.response.defer(ephemeral=True)
+        await interaction.followup.send(message[:1900], ephemeral=True)
+
+        remaining = message[1900:]
+        while remaining:
+            chunk = remaining[:1900]
+            await interaction.followup.send(chunk, ephemeral=True)
+            remaining = remaining[1900:]
 
 # ─────────────────────────────
 # RUN BOT
