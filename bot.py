@@ -2064,43 +2064,6 @@ async def relationship_mate(interaction: discord.Interaction, cat1: str, cat2: s
 
     await interaction.response.send_message(f"💕 **{cat1}** and **{cat2}** are now mates.")
 
-
-@relationship_group.command(name="breakup", description="Break up two mates and mark them as ex-mates")
-async def relationship_breakup(interaction: discord.Interaction, cat1: str, cat2: str):
-    if not await staff_command_check(interaction):
-        return
-
-    async with data_lock:
-        cats = data.get("cats", {})
-
-        if cat1 not in cats:
-            await interaction.response.send_message("First cat not found.", ephemeral=True)
-            return
-
-        if cat2 not in cats:
-            await interaction.response.send_message("Second cat not found.", ephemeral=True)
-            return
-
-        remove_from_list(cats[cat1], "mates", cat2)
-        remove_from_list(cats[cat2], "mates", cat1)
-
-        cats[cat1].setdefault("ex_mates", [])
-        cats[cat2].setdefault("ex_mates", [])
-
-        if cat2 not in cats[cat1]["ex_mates"]:
-            cats[cat1]["ex_mates"].append(cat2)
-
-        if cat1 not in cats[cat2]["ex_mates"]:
-            cats[cat2]["ex_mates"].append(cat1)
-
-        add_history(cats[cat1], f"Broke up with {cat2}")
-        add_history(cats[cat2], f"Broke up with {cat1}")
-
-        save_data(data)
-
-    await interaction.response.send_message(f"💔 **{cat1}** and **{cat2}** are now ex-mates.")
-
-
 @relationship_group.command(name="family", description="Add a family relation between two cats")
 @app_commands.describe(
     name="First cat",
