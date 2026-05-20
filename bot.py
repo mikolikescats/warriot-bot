@@ -2,7 +2,7 @@ import os
 import json
 import random
 import asyncio
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 from threading import Thread
 
@@ -279,7 +279,8 @@ def fresh_default_data():
         "active_quests": {},
         "quest_results": {},
         "question_usage": {},
-        "used_questions": []
+        "used_questions": [],
+        "hiatuses": {}
     }
 
 
@@ -1416,6 +1417,9 @@ async def on_ready():
     if not biweekly_quest_report.is_running():
         biweekly_quest_report.start()
 
+    if not check_hiatuses.is_running():
+        check_hiatuses.start()
+
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -1631,6 +1635,61 @@ injury_group = app_commands.Group(name="injury", description="Manage injuries an
 mentor_group = app_commands.Group(name="mentor", description="Manage mentors and apprentices")
 relationship_group = app_commands.Group(name="relationship", description="Manage relationships")
 medical_group = app_commands.Group(name="medical", description="Medicine cat treatment commands")
+hiatus_group = app_commands.Group(name="hiatus", description="Manage member hiatuses")
+
+@hiatus_group.command(name="add", description="Add a hiatus using a raw Discord user ID")
+@app_commands.describe(
+    user_id="Raw Discord user ID from /raw-format",
+    days="How many days the hiatus lasts"
+)
+async def hiatus_add(interaction: discord.Interaction, user_id: str, days: int):
+    if not await staff_command_check(interaction):
+        return
+
+    if days < 1:
+        await interaction.response.send_message("Hiatus must be at least 1 day.", ephemeral=True)
+        return
+
+    end_date = datetime.now(TZ) + timedelta(days=days)
+
+    async with data_lock:
+        data.setdefault("hiatuses", {})
+        data["hiatuses"][user_id] = {
+            "days": days,
+            "start_date": datetime.now(TZ).date().isoformat(),
+            "end_date": end_date.date().isoformat()
+        }
+
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🌙 <@{user_id}> has been placed on hiatus for **{days} day(s)**.\n"
+        f"They are set to return on **{end_date.strftime('%B %d, %Y')}**."
+    )
+
+
+@hiatus_group.command(name="end", description="Manually end a hiatus using a raw Discord user ID")
+@app_commands.describe(user_id="Raw Discord user ID from /raw-format")
+async def hiatus_end(interaction: discord.Interaction, user_id: str):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        data.setdefault("hiatuses", {})
+
+        if user_id not in data["hiatuses"]:
+            await interaction.response.send_message(
+                f"<@{user_id}> is not currently listed as on hiatus.",
+                ephemeral=True
+            )
+            return
+
+        del data["hiatuses"][user_id]
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"✅ <@{user_id}> has been manually removed from hiatus."
+    )
 
 
 def cat_is_dead(cat):
@@ -3871,6 +3930,36 @@ async def setweather(interaction: discord.Interaction, weather: str, modifier: i
     await interaction.response.send_message("🌦️ Weather report sent.", ephemeral=True)
 
 # ─────────────────────────────
+# HIATUS
+# ─────────────────────────────
+
+@tasks.loop(hours=24)
+async def check_hiatuses():
+    today = datetime.now(TZ).date()
+    ended_hiatuses = []
+
+    async with data_lock:
+        data.setdefault("hiatuses", {})
+
+        for user_id, info in list(data["hiatuses"].items()):
+            end_date = datetime.fromisoformat(info["end_date"]).date()
+
+            if today >= end_date:
+                ended_hiatuses.append(user_id)
+
+        for user_id in ended_hiatuses:
+            del data["hiatuses"][user_id]
+
+        if ended_hiatuses:
+            save_data(data)
+
+    channel = bot.get_channel(REPORT_CHANNEL_ID)
+
+    if channel:
+        for user_id in ended_hiatuses:
+            await channel.send(f"✅ <@{user_id}> is now off hiatus!")
+
+# ─────────────────────────────
 # MONTHLY MOON LOOP
 # ─────────────────────────────
 
@@ -4379,5 +4468,6 @@ bot.tree.add_command(injury_group)
 bot.tree.add_command(mentor_group)
 bot.tree.add_command(relationship_group)
 bot.tree.add_command(medical_group)
+bot.tree.add_command(hiatus_group)
 keep_alive()
 bot.run(TOKEN)
