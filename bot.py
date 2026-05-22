@@ -1592,6 +1592,11 @@ async def botinfo(interaction: discord.Interaction):
 
         "🍼 **Litter Command**\n"
         "`/addlitter` — Record kits born to a mother and connect family automatically\n\n"
+        "🌙 **Hiatus Commands**\n"
+        "`/hiatus add [user_id] [days]` — Staff only. Add a hiatus using a raw Discord user ID\n"
+        "`/hiatus edit [user_id] [days]` — Staff only. Change how long a current hiatus lasts from today\n"
+        "`/hiatus end [user_id]` — Staff only. Manually remove someone from hiatus\n"
+        "`/hiatus all` — Staff only. View everyone currently on hiatus and how many days remain\n\n"
 
         "💭 **OC Question System**\n"
         "• `/question` works in any channel\n"
@@ -1689,6 +1694,79 @@ async def hiatus_end(interaction: discord.Interaction, user_id: str):
 
     await interaction.response.send_message(
         f"✅ <@{user_id}> has been manually removed from hiatus."
+    )
+
+@hiatus_group.command(name="all", description="View everyone currently on hiatus")
+async def hiatus_all(interaction: discord.Interaction):
+    if not await staff_command_check(interaction):
+        return
+
+    today = datetime.now(TZ).date()
+
+    async with data_lock:
+        data.setdefault("hiatuses", {})
+        hiatuses = data["hiatuses"]
+
+        if not hiatuses:
+            await interaction.response.send_message(
+                "✅ No one is currently on hiatus.",
+                ephemeral=True
+            )
+            return
+
+        lines = ["🌙 **Current Hiatus List**", ""]
+
+        for user_id, info in hiatuses.items():
+            end_date = datetime.fromisoformat(info["end_date"]).date()
+            days_left = max(0, (end_date - today).days)
+
+            if days_left == 0:
+                days_text = "ends today"
+            elif days_left == 1:
+                days_text = "1 day left"
+            else:
+                days_text = f"{days_left} days left"
+
+            lines.append(
+                f"• <@{user_id}> — **{days_text}** "
+                f"(returns **{end_date.strftime('%B %d, %Y')}**)"
+            )
+
+    await interaction.response.send_message("\n".join(lines)[:1900])
+
+@hiatus_group.command(name="edit", description="Edit how long a current hiatus lasts")
+@app_commands.describe(
+    user_id="Raw Discord user ID from /raw-format",
+    days="New total number of days from today"
+)
+async def hiatus_edit(interaction: discord.Interaction, user_id: str, days: int):
+    if not await staff_command_check(interaction):
+        return
+
+    if days < 1:
+        await interaction.response.send_message("Hiatus must be at least 1 day.", ephemeral=True)
+        return
+
+    async with data_lock:
+        data.setdefault("hiatuses", {})
+
+        if user_id not in data["hiatuses"]:
+            await interaction.response.send_message(
+                f"<@{user_id}> is not currently listed as on hiatus.",
+                ephemeral=True
+            )
+            return
+
+        end_date = datetime.now(TZ) + timedelta(days=days)
+
+        data["hiatuses"][user_id]["days"] = days
+        data["hiatuses"][user_id]["end_date"] = end_date.date().isoformat()
+
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"✏️ <@{user_id}>'s hiatus has been updated to **{days} day(s)** from today.\n"
+        f"They are now set to return on **{end_date.strftime('%B %d, %Y')}**."
     )
 
 
