@@ -3739,6 +3739,24 @@ async def weekly_weather_report():
 
 ROLEPLAY_ANNOUNCEMENTS_ROLE_ID = 1442996267470033026
 QUEST_CHANNEL_ID = 1441502516591202394
+ROLEPLAY_ANNOUNCEMENTS_ROLE_ID = 1442996267470033026
+QUEST_CHANNEL_ID = 1441502516591202394
+
+CLAN_ROLE_IDS = {
+    "BlizzardClan": 1445529729309605978,
+    "TorrentClan": 1445529635780563034,
+    "SpruceClan": 1445530840170758225,
+    "FossilClan": 1445529918518591559,
+    "Outsider": 1445530928083505294
+}
+
+def clan_mention(group):
+    role_id = CLAN_ROLE_IDS.get(group)
+
+    if not role_id:
+        return group
+
+    return f"<@&{role_id}>"
 
 # ─────────────────────────────
 # QUEST DATABASE
@@ -4265,6 +4283,24 @@ Territory disputes are heating up beneath glowing signs. Will you defend, negoti
 From barns to cliffs to alleyways, outsider life demands adaptability. Catch 25 total prey across outsider territories before the 2 weeks end and prove that survival beyond Clan borders requires just as much strength.
 """
 
+CLAN_ROLE_IDS = {
+    "BlizzardClan": 1445529729309605978,
+    "TorrentClan": 1445529635780563034,
+    "SpruceClan": 1445530840170758225,
+    "FossilClan": 1445529918518591559,
+    "Outsider": 1445530928083505294
+}
+
+
+def clan_mention(group):
+    role_id = CLAN_ROLE_IDS.get(group)
+
+    if not role_id:
+        return group
+
+    return f"<@&{role_id}>"
+
+
 def parse_quests():
     quest_data = {}
     current_group = None
@@ -4378,16 +4414,67 @@ def choose_quest_for_group(group, quests):
     return chosen
 
 
+def is_hunting_quest(quest):
+    title = quest.get("title", "").lower()
+    description = quest.get("description", "").lower()
+
+    hunting_words = [
+        "catch ",
+        "hunt ",
+        "hunting",
+        "prey",
+        "mice",
+        "mouse",
+        "hare",
+        "hares",
+        "pika",
+        "pikas",
+        "marmot",
+        "marmots",
+        "vole",
+        "voles",
+        "frog",
+        "frogs",
+        "duck",
+        "ducks",
+        "perch",
+        "minnow",
+        "minnows",
+        "walleye",
+        "catfish",
+        "fish",
+        "loon",
+        "loons",
+        "bird",
+        "birds",
+        "squirrel",
+        "squirrels",
+        "rabbit",
+        "rabbits"
+    ]
+
+    return any(word in title or word in description for word in hunting_words)
+
+
+def format_modifier(value):
+    value = int(value)
+    return f"+{value}" if value > 0 else str(value)
+
+
 def record_active_quest(group, quest):
     data.setdefault("active_quests", {})
-
     data["active_quests"].setdefault(group, [])
+
+    now = datetime.now(TZ)
 
     quest_record = {
         "title": quest["title"],
         "description": quest["description"],
         "moon": data.get("moon", 0),
-        "result": "Pending"
+        "result": "Pending",
+        "issued_at": now.isoformat(),
+        "is_hunting": is_hunting_quest(quest),
+        "quest_modifier": 0
     }
 
     data["active_quests"][group].append(quest_record)
@@ -4396,8 +4483,42 @@ def record_active_quest(group, quest):
     data["active_quests"][group] = data["active_quests"][group][-2:]
 
 
+def mark_pending_previous_quests_failed():
+    data.setdefault("active_quests", {})
+
+    failed_lines = []
+
+    group_order = [
+        "BlizzardClan",
+        "TorrentClan",
+        "FossilClan",
+        "SpruceClan",
+        "Outsider"
+    ]
+
+    for group in group_order:
+        active_quests = data["active_quests"].get(group, [])
+
+        if not active_quests:
+            continue
+
+        latest_quest = active_quests[-1]
+
+        if latest_quest.get("result") == "Pending":
+            latest_quest["result"] = "Failed"
+
+            failed_lines.append(
+                f"{clan_mention(group)}, previous quest failed! Please redo the entire quest thing.\n"
+                f"Previous Quest: **{latest_quest.get('title', 'Unknown Quest')}**"
+            )
+
+    return failed_lines
+
+
 def build_quest_announcement():
     quest_data = parse_quests()
+
+    failed_lines = mark_pending_previous_quests_failed()
 
     lines = [
         "🌙 **A half moon has passed...**",
@@ -4405,6 +4526,12 @@ def build_quest_announcement():
         "New quests are now available for every Clan and the Outsiders! Complete them within the next **2 real-life weeks** before the next quest cycle begins.",
         ""
     ]
+
+    if failed_lines:
+        lines.append("━━━━━━━━━━━━━━━")
+        lines.append("⚠️ **PREVIOUS QUEST RESULTS**")
+        lines.extend(failed_lines)
+        lines.append("")
 
     group_order = [
         "BlizzardClan",
@@ -4423,10 +4550,18 @@ def build_quest_announcement():
         chosen = choose_quest_for_group(group, quests)
         record_active_quest(group, chosen)
 
+        group_label = "OUTSIDER" if group == "Outsider" else group.upper()
+
         lines.append("━━━━━━━━━━━━━━━")
-        lines.append(f"**{group.upper()} QUEST**")
+        lines.append(clan_mention(group))
+        lines.append(f"**{group_label} QUEST**")
         lines.append(f"**{chosen['title']}**")
         lines.append(chosen["description"])
+
+        if is_hunting_quest(chosen):
+            lines.append("")
+            lines.append("🎯 **Hunting Quest Perk:** If this quest is passed, this group may earn a temporary hunting bonus until the end of the moon.")
+
         lines.append("")
 
     return "\n".join(lines)
@@ -4435,6 +4570,100 @@ def build_quest_announcement():
 async def send_quest_announcement(channel, message):
     await channel.send(f"<@&{ROLEPLAY_ANNOUNCEMENTS_ROLE_ID}>")
     await send_long_message(channel, message)
+
+
+def build_quest_reminder(days_remaining):
+    group_order = [
+        "BlizzardClan",
+        "TorrentClan",
+        "FossilClan",
+        "SpruceClan",
+        "Outsider"
+    ]
+
+    lines = [
+        f"🌙 **Quest Reminder: {days_remaining} days remaining!**",
+        "",
+        f"You only have **{days_remaining} days** left to complete your current quests before the next quest cycle begins.",
+        ""
+    ]
+
+    for group in group_order:
+        active_quests = data.get("active_quests", {}).get(group, [])
+
+        if not active_quests:
+            continue
+
+        latest_quest = active_quests[-1]
+
+        if latest_quest.get("result") != "Pending":
+            continue
+
+        group_label = "Outsiders" if group == "Outsider" else group
+
+        lines.append("━━━━━━━━━━━━━━━")
+        lines.append(clan_mention(group))
+        lines.append(f"**{group_label}: {latest_quest.get('title', 'Unknown Quest')}**")
+        lines.append(latest_quest.get("description", "No description found."))
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+@tasks.loop(minutes=30)
+async def quest_reminder_report():
+    now = datetime.now(TZ)
+
+    # Reminders go out at 10 AM only.
+    if now.hour != 10:
+        return
+
+    async with data_lock:
+        data.setdefault("active_quests", {})
+        data.setdefault("quest_reminders_sent", {})
+
+        pending_quests = []
+
+        for group, quests in data["active_quests"].items():
+            if quests and quests[-1].get("result") == "Pending":
+                pending_quests.append(quests[-1])
+
+        if not pending_quests:
+            return
+
+        issued_dates = [
+            datetime.fromisoformat(quest["issued_at"])
+            for quest in pending_quests
+            if quest.get("issued_at")
+        ]
+
+        if not issued_dates:
+            return
+
+        first_issued = min(issued_dates)
+        days_passed = (now.date() - first_issued.date()).days
+
+        if days_passed == 7:
+            days_remaining = 7
+        elif days_passed == 11:
+            days_remaining = 3
+        else:
+            return
+
+        reminder_key = f"{first_issued.date().isoformat()}-{days_remaining}"
+
+        if data["quest_reminders_sent"].get(reminder_key):
+            return
+
+        data["quest_reminders_sent"][reminder_key] = True
+        message = build_quest_reminder(days_remaining)
+        save_data(data)
+
+    channel = bot.get_channel(QUEST_CHANNEL_ID)
+
+    if channel:
+        await send_long_message(channel, message)
+
 
 @tasks.loop(minutes=30)
 async def biweekly_quest_report():
@@ -4465,6 +4694,7 @@ async def biweekly_quest_report():
     if channel:
         await send_quest_announcement(channel, message)
 
+
 @bot.tree.command(name="quests", description="Manually post new biweekly quests")
 async def quests(interaction: discord.Interaction):
     if not await staff_command_check(interaction):
@@ -4486,27 +4716,37 @@ async def quests(interaction: discord.Interaction):
 @bot.tree.command(name="questresult", description="Mark a Clan or Outsider quest as passed or failed")
 @app_commands.describe(
     group="Select the Clan or Outsider group",
-    result="Did the most recent quest pass or fail?"
+    result="Did the most recent quest pass or fail?",
+    hunting_bonus="Optional hunting bonus if this was a hunting quest. Use 0, 1, or 2."
 )
 @app_commands.choices(
     group=CLAN_CHOICES,
     result=[
         app_commands.Choice(name="Pass", value="Passed"),
         app_commands.Choice(name="Fail", value="Failed")
+    ],
+    hunting_bonus=[
+        app_commands.Choice(name="No Bonus", value=0),
+        app_commands.Choice(name="+1 Hunting Bonus", value=1),
+        app_commands.Choice(name="+2 Hunting Bonus", value=2)
     ]
 )
 async def questresult(
     interaction: discord.Interaction,
     group: app_commands.Choice[str],
-    result: app_commands.Choice[str]
+    result: app_commands.Choice[str],
+    hunting_bonus: app_commands.Choice[int] = None
 ):
     if not await staff_command_check(interaction):
         return
 
     selected_group = group.value
+    selected_bonus = hunting_bonus.value if hunting_bonus else 0
 
     async with data_lock:
         data.setdefault("active_quests", {})
+        data.setdefault("quest_modifiers", {})
+
         active_quests = data["active_quests"].get(selected_group, [])
 
         if not active_quests:
@@ -4519,16 +4759,82 @@ async def questresult(
         active_quests[-1]["result"] = result.value
         latest_quest = active_quests[-1]
 
+        perk_message = ""
+
+        if result.value == "Passed" and latest_quest.get("is_hunting") and selected_bonus > 0:
+            latest_quest["quest_modifier"] = selected_bonus
+
+            data["quest_modifiers"][selected_group] = {
+                "modifier": selected_bonus,
+                "moon": data.get("moon", 0),
+                "quest_title": latest_quest["title"]
+            }
+
+            perk_message = (
+                f"\n🎯 Hunting perk activated: **{selected_group} gets {format_modifier(selected_bonus)} "
+                f"on hunting rolls until the end of Moon {data.get('moon', '?')}**."
+            )
+
+        if result.value == "Failed":
+            data["quest_modifiers"].pop(selected_group, None)
+
         save_data(data)
 
     emoji = "✅" if result.value == "Passed" else "❌"
 
     await interaction.response.send_message(
         f"{emoji} **{selected_group}**'s latest quest was marked as **{result.value}**.\n"
-        f"Quest: **{latest_quest['title']}**",
+        f"Quest: **{latest_quest['title']}**"
+        f"{perk_message}",
         ephemeral=True
     )
 
+
+@bot.tree.command(name="rollhelp", description="Calculate whether a hunting roll caught the prey")
+@app_commands.describe(
+    base_hunting_stat="The number your OC needs to meet or beat to catch the prey",
+    current_roll="The number you rolled",
+    prey_modifier="The prey modifier, example: -2, 0, 1",
+    specialty_prey="Is this your OC's specialty prey?",
+    weather_modifier="Current weather hunting modifier",
+    quest_modifier="Current quest modifier, if any",
+    other_modifier="Any other modifier"
+)
+async def rollhelp(
+    interaction: discord.Interaction,
+    base_hunting_stat: int,
+    current_roll: int,
+    prey_modifier: int,
+    specialty_prey: bool,
+    weather_modifier: int,
+    quest_modifier: int = 0,
+    other_modifier: int = 0
+):
+    specialty_bonus = 2 if specialty_prey else 0
+
+    final_roll = (
+        current_roll
+        + prey_modifier
+        + specialty_bonus
+        + weather_modifier
+        + quest_modifier
+        + other_modifier
+    )
+
+    result = "✅ **Caught!**" if final_roll >= base_hunting_stat else "❌ **Missed!**"
+
+    await interaction.response.send_message(
+        f"🎯 **Hunting Roll Helper**\n\n"
+        f"Number Needed: **{base_hunting_stat}**\n"
+        f"Current Roll: **{current_roll}**\n"
+        f"Prey Modifier: **{format_modifier(prey_modifier)}**\n"
+        f"Specialty Prey Bonus: **{format_modifier(specialty_bonus)}**\n"
+        f"Weather Modifier: **{format_modifier(weather_modifier)}**\n"
+        f"Quest Modifier: **{format_modifier(quest_modifier)}**\n"
+        f"Other Modifier: **{format_modifier(other_modifier)}**\n\n"
+        f"Final Roll: **{final_roll}**\n"
+        f"{result}"
+    )
 
 @bot.tree.command(name="setweather", description="Manually set this week's weather report")
 @app_commands.describe(
@@ -5064,7 +5370,8 @@ async def bothelp(interaction: discord.Interaction):
         "`/weather` or `/weatherreport` — View the current weekly weather report, if available.\n\n"
 
         "📜 **Quest / Story Commands**\n"
-        "`/gatheringreport [ClanName]` — View recent story updates, quest results, injuries, rank changes, and major events for a specific Clan.\n\n"
+        "`/gatheringreport [ClanName]` — View recent story updates, quest results, injuries, rank changes, and major events for a specific Clan.\n"
+        "`/rollhelp` — Helps calculate whether an OC caught their prey by adding the roll, prey modifier, specialty prey bonus, weather modifier, quest modifier, and any other modifier against the OC’s required hunting number.\n\n"
 
         "💭 **About /question**\n"
         "The `/question` command randomly pulls from the OC question list. Questions can be silly personality questions, modern AU-style questions, or “most likely to” prompts.\n"
