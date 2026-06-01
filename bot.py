@@ -1439,133 +1439,328 @@ BANFF_MONTHLY_AVERAGES = {
 }
 
 SEASONAL_OPENERS = {
-    "Newleaf": [
-        "🌱 The frost has begun to loosen its grip on the territories. Soft earth returns beneath each pawstep, and fresh green shoots push through the mud.",
-        "🌧️ Newleaf has washed over the land in rain and fresh growth. The trails are damp, the air smells of earth, and prey begins to stir."
-    ],
-    "Greenleaf": [
-        "☀️ Greenleaf stretches warmly across the territories. Thick leaves cast shade over the forest floor, rivers run clear, and prey moves boldly.",
-        "🌿 The land is full and bright beneath Greenleaf’s warmth. Herbs grow thick, insects hum in the grass, and the forest feels alive."
-    ],
-    "Leaf-fall": [
-        "🍂 Bright colours fade to muted browns, and morning frost begins to blanket the territories, bringing a crunch to each cat’s step.",
-        "🌫️ Leaf-fall settles heavily over the forest. Trails grow damp, branches grow bare, and prey begins preparing for colder moons."
-    ],
-    "Leafbare": [
-        "❄️ Leaf-bare tightens its cold grip around the territories. Snow hushes the forest floor, prey shelters deep, and bitter winds test every warrior.",
-        "🌨️ Frost blankets the dens, branches, and trails. The world feels quieter now, as though the forest itself is saving strength."
-    ]
-}
+    "Newleaf": {
+        "wet": [
+            "🌧️ Rain beads on fresh leaves as Newleaf settles over the mountain, turning the trails soft beneath every pawstep.",
+            "🌧️ The territories smell of wet earth and new growth, with rain darkening the bark and weighing down the young grass.",
+            "🌦️ Newleaf rain sweeps through the forest, waking roots, moss, and hidden seeds beneath the mud.",
+            "🌧️ Damp air clings to the mountain, carrying the scent of rain-soaked soil and fresh shoots.",
+            "🌧️ Water drips steadily from the branches, and the forest feels newly washed beneath the grey Newleaf sky."
+        ],
+        "clear": [
+            "🌱 Newleaf sunlight spills across the mountain, warming fresh shoots and softening the last traces of cold.",
+            "☀️ Clear skies brighten the new growth, and the forest feels awake beneath the warmth of Newleaf.",
+            "🌿 Sunlight filters through budding branches, turning the damp forest floor bright and green.",
+            "🌱 The mountain breathes easier beneath clear Newleaf skies, with young plants pushing boldly through the earth.",
+            "☀️ Warm light catches on fresh leaves and open trails, giving the territories a bright, hopeful feeling."
+        ],
+        "cloudy": [
+            "☁️ Soft clouds drift over the mountain, keeping the Newleaf air cool and comfortable.",
+            "🌥️ The sky is muted, but the forest below is alive with fresh scents and new growth.",
+            "☁️ A blanket of cloud settles above the territories, dimming the light without stealing Newleaf’s warmth.",
+            "🌫️ The mountain rests under a pale Newleaf sky, quiet but full of life stirring beneath the leaves.",
+            "☁️ Gentle cloud cover keeps the forest calm while fresh shoots brighten the trails below."
+        ],
+        "windy": [
+            "🍃 A Newleaf breeze moves through the budding branches, carrying the scent of damp moss and fresh grass.",
+            "🌬️ Wind stirs the young leaves and sends ripples through the grass along the trails.",
+            "🍃 Fresh air sweeps across the mountain, shaking rainwater from the branches and waking the undergrowth.",
+            "🌱 A cool breeze threads through the new growth, making the forest feel restless but alive.",
+            "🍃 The mountain carries the clean scent of Newleaf on every gust, from fresh roots to open sky."
+        ],
+        "cold": [
+            "🌱 Newleaf has arrived, but a chill still lingers in the shaded parts of the mountain.",
+            "❄️ The last bite of leaf-bare clings to the air, even as fresh shoots break through the soil.",
+            "🌬️ Cool Newleaf air settles over the territories, crisp enough to remind every cat that winter has only just passed.",
+            "🌱 The forest is waking slowly, with cold earth underpaw and green life pushing through anyway.",
+            "🧊 A faint chill hangs over the new growth, but the mountain is beginning to thaw."
+        ],
+        "neutral": [
+            "🌱 Newleaf has softened the mountain, bringing fresh scents, muddy trails, and the first promise of warmer days.",
+            "🌿 New growth spreads across the territories, brightening dens, trails, and hunting grounds alike.",
+            "🌱 The forest feels newly awake, with fresh leaves unfurling and life stirring beneath the roots.",
+            "🌿 Soft earth, young grass, and fresh moss mark Newleaf’s return to the mountain.",
+            "🌱 The territories feel renewed, with the old cold fading and green life rising in its place."
+        ]
+    },
 
-PREY_REPORTS = {
-    "Newleaf": [
-        "🐇 Prey is returning, though many creatures remain cautious after leaf-bare. Rain may weaken scent trails, but fresh growth draws small prey out.",
-        "🌿 Herbs are sprouting again, making this an important time for medicine cats to gather while the forest renews itself."
-    ],
-    "Greenleaf": [
-        "🐿️ Prey is plentiful in many parts of the territory, especially where shade and fresh water are nearby.",
-        "🌾 Herbs are abundant, though hot weather may dry exposed patches if they are not gathered in time."
-    ],
-    "Leaf-fall": [
-        "🦎 Amphibians and reptiles are slower now, and prey animals are beginning to store food before leaf-bare.",
-        "🍁 The territory is preparing for the cold. Prey is cautious, herbs are fading, and patrols should use good hunting weather wisely."
-    ],
-    "Leafbare": [
-        "🐁 Prey is scarce, but not impossible to find. Tracks in snow, clear visibility, or a brief thaw can turn a difficult hunt lucky.",
-        "🌨️ Herbs are difficult to replace, and medicine cats may need to rely on stored supplies until Newleaf returns."
-    ]
+    "Greenleaf": {
+        "wet": [
+            "🌧️ Warm rain rolls through the Greenleaf canopy, darkening the leaves and cooling the forest floor.",
+            "⛈️ Rain drums against the thick summer leaves, filling the territory with the scent of wet grass.",
+            "🌧️ A humid rain settles over the mountain, leaving the trails slick and the air heavy.",
+            "🌦️ Greenleaf rain sweeps across the territories, cooling the heat and sending drops scattering from every branch.",
+            "⛈️ The forest shivers beneath summer rain, loud with dripping leaves and distant thunder."
+        ],
+        "clear": [
+            "☀️ Greenleaf sunlight stretches warmly across the territories, brightening every path and pool.",
+            "🌞 The mountain glows under clear Greenleaf skies, alive with buzzing insects and rustling grass.",
+            "☀️ Sunlight pours through the canopy, warming the stones, dens, and open trails.",
+            "🌿 The forest is bright and full beneath the Greenleaf sun, thick with scent and movement.",
+            "☀️ Clear summer skies make the whole mountain feel wide awake and alive."
+        ],
+        "cloudy": [
+            "☁️ Clouds soften the Greenleaf heat, leaving the forest warm but comfortable.",
+            "🌥️ The canopy stirs beneath a muted sky, with the territory calm and steady below.",
+            "☁️ A cloudy Greenleaf sky hangs over the mountain, dulling the heat without cooling the air too much.",
+            "🌥️ Warm clouds drift above the forest, giving patrols shelter from the strongest sun.",
+            "☁️ The territory rests under gentle cloud cover, with the thick leaves holding in the summer warmth."
+        ],
+        "windy": [
+            "🍃 A warm Greenleaf breeze moves through the canopy, rustling leaves and carrying scent across the trails.",
+            "🌬️ Wind pushes through the summer grass, making the whole territory whisper with movement.",
+            "🍃 Fresh air cuts through the heat, stirring the ferns and cooling the shaded paths.",
+            "🌿 A breeze ripples across the mountain, shaking sunlight through the leaves.",
+            "🍃 The forest feels lively beneath the wind, with every branch and blade of grass in motion."
+        ],
+        "cold": [
+            "🌿 A rare coolness settles over the Greenleaf territory, easing the heat from the trails.",
+            "🌥️ The air is cooler than expected for Greenleaf, leaving the forest calm and comfortable.",
+            "🍃 Cool shade gathers beneath the thick leaves, giving the mountain a softer summer feeling.",
+            "🌿 The warmth of Greenleaf remains, but a cooler edge moves through the air.",
+            "☁️ The mountain rests in gentle Greenleaf coolness, a welcome break from heavier heat."
+        ],
+        "neutral": [
+            "🌿 Greenleaf is full across the mountain, with thick leaves, warm air, and busy trails.",
+            "🌾 The territory hums with summer life, from buzzing insects to prey moving through the grass.",
+            "🌿 The forest feels rich and crowded with life, every den and trail warmed by Greenleaf.",
+            "🌳 Thick greenery covers the mountain, filling the air with the scent of leaves and sun-warmed earth.",
+            "🌿 Greenleaf holds the territories in full bloom, bright, noisy, and alive."
+        ]
+    },
+
+    "Leaf-fall": {
+        "wet": [
+            "🌧️ Cold rain darkens the fallen leaves, turning the trails slick beneath every pawstep.",
+            "🍂 Rain clings to the fading leaves, weighing down the undergrowth and sharpening the scent of earth.",
+            "🌧️ Leaf-fall rain sweeps through the territory, washing colour from the trees and mud onto the paths.",
+            "🌫️ Damp air settles over the mountain, heavy with the smell of wet leaves and colder days ahead.",
+            "🌧️ Rain patters through thinning branches, making the forest feel quieter and colder."
+        ],
+        "clear": [
+            "🍂 Clear Leaf-fall skies brighten the golden leaves, making the whole mountain glow.",
+            "☀️ Pale sunlight spills through thinning branches, lighting the forest in amber and brown.",
+            "🍁 The territory shines beneath a clear Leaf-fall sky, crisp and bright underpaw.",
+            "☀️ Cold sunlight catches on the fallen leaves, giving the mountain a sharp golden beauty.",
+            "🍂 Clear air stretches across the territory, making every colour of Leaf-fall stand out."
+        ],
+        "cloudy": [
+            "☁️ Grey clouds hang over the Leaf-fall forest, dulling the colours but keeping the air steady.",
+            "🍂 A muted sky settles above the territory, while dry leaves gather along the trails.",
+            "☁️ The mountain rests beneath heavy clouds, quiet with the feeling of colder moons approaching.",
+            "🌥️ Cloud cover softens the Leaf-fall light, leaving the forest cool and watchful.",
+            "☁️ The sky is pale and dim, but the forest remains calm beneath its thinning canopy."
+        ],
+        "windy": [
+            "🍃 Wind scatters leaves across the trails, sending them skittering over roots and stones.",
+            "🌬️ A sharp Leaf-fall breeze rattles the branches and pulls more leaves from the trees.",
+            "🍂 Gusts move through the territory, making the fallen leaves dance underpaw.",
+            "🌬️ The forest whispers and cracks beneath the wind, each branch warning of colder moons ahead.",
+            "🍁 Fresh wind carries the scent of dry leaves, damp bark, and distant frost."
+        ],
+        "cold": [
+            "❄️ A cold bite lingers in the Leaf-fall air, warning that leaf-bare is drawing closer.",
+            "🍂 Frost touches the grass in shaded places, silvering the edges of fallen leaves.",
+            "🌬️ The air is crisp and cold, making every breath feel sharper on the mountain.",
+            "🍁 Leaf-fall has turned chilly, with frost hiding in the roots and cold air under the trees.",
+            "❄️ The mountain feels colder now, the warmth of Greenleaf fading with every fallen leaf."
+        ],
+        "neutral": [
+            "🍂 Leaf-fall has painted the mountain in gold, brown, and fading green.",
+            "🍁 The forest is thinning, with fallen leaves gathering in dens, trails, and sheltered hollows.",
+            "🍂 The territory feels watchful beneath the changing leaves, preparing for the cold ahead.",
+            "🍁 Leaf-fall settles over the mountain, crisp, colourful, and quietly restless.",
+            "🍂 The air smells of dry leaves and damp earth as the forest shifts toward leaf-bare."
+        ]
+    },
+
+    "Leafbare": {
+        "wet": [
+            "🌨️ Frozen rain coats the territory, turning branches and stones slick beneath the cold sky.",
+            "❄️ Snow falls across the mountain, softening every sound and hiding old scent trails.",
+            "🌨️ Ice and snow cling to the forest, making the territory glitter but dangerous.",
+            "❄️ Leaf-bare weather presses heavily over the mountain, covering paths and dens in cold white.",
+            "🌨️ Snow drifts through the trees, leaving the forest quiet, pale, and difficult to cross."
+        ],
+        "clear": [
+            "☀️ Pale winter sun shines over the frozen territory, bright against the snow.",
+            "❄️ Clear Leafbare skies make the mountain glitter with frost and hard-packed snow.",
+            "☀️ Cold sunlight spills across the territory, offering brightness without much warmth.",
+            "❄️ The forest is sharp and clear beneath the winter sky, every movement easy to spot.",
+            "☀️ A calm winter brightness settles over the mountain, turning frost into silver."
+        ],
+        "cloudy": [
+            "☁️ Grey winter clouds hang low over the territory, heavy with the promise of more snow.",
+            "❄️ The sky is dull and cold, leaving the forest quiet beneath a blanket of cloud.",
+            "☁️ Cloud cover dims the snowlight, softening the frozen trails and shaded dens.",
+            "🌨️ Pale clouds stretch above the mountain, holding the cold close to the ground.",
+            "☁️ The territory feels hushed beneath the winter clouds, still and watchful."
+        ],
+        "windy": [
+            "🌬️ Bitter wind cuts across the mountain, pulling at fur and scattering loose snow.",
+            "❄️ Wind drives cold through the trees, making the frozen branches creak overhead.",
+            "🌬️ Leaf-bare gusts sweep over the territory, carrying ice crystals and broken scent trails.",
+            "❄️ The forest shudders beneath the wind, every den and hollow feeling the cold.",
+            "🌬️ A hard winter wind moves through the mountain, sharp enough to make patrols lower their heads."
+        ],
+        "cold": [
+            "🧊 Deep cold grips the mountain, sinking into stone, snow, and frozen earth.",
+            "❄️ The territory lies under a hard Leafbare chill, with prey hidden deep and dens packed tight.",
+            "🧊 Frost clings to every branch and blade of grass, making the forest glitter in silence.",
+            "❄️ The cold is heavy across the mountain, slowing movement and stealing warmth from every pawstep.",
+            "🧊 Leaf-bare holds the territory firmly, frozen and unforgiving beneath the pale sky."
+        ],
+        "neutral": [
+            "❄️ Leaf-bare has settled over the mountain, quieting the forest beneath frost and snow.",
+            "🌨️ The territory feels still and cold, with every trail marked by frozen pawprints.",
+            "❄️ Snow and frost shape the forest now, muting scent and sound beneath the trees.",
+            "🌨️ The mountain is deep in leaf-bare, harsh but beautiful beneath its winter covering.",
+            "❄️ The clans move carefully through the frozen territory, saving strength where they can."
+        ]
+    }
 }
 
 WEATHER_BY_SEASON = {
     "Newleaf": [
-        ("Heavy rain", -2, "Heavy rain makes scent trails muddy and visibility poor."),
-        ("Cold rain", -2, "Cold rain soaks the territory and keeps prey hidden."),
-        ("Thunder showers", -2, "Sudden thunder makes prey scatter quickly."),
-        ("Thick mist", -1, "Mist makes movement harder to track."),
-        ("Wet underpaws", -1, "The ground is slippery and scent is weak."),
-        ("Chilly drizzle", -1, "A damp chill makes hunting uncomfortable."),
-        ("Cloudy", 0, "Cloud cover keeps the forest calm."),
-        ("Soft breeze", 0, "A soft breeze moves through the trees without helping or hurting hunts."),
-        ("Cool morning", 0, "The air is cool, but conditions are steady."),
-        ("Overcast skies", 0, "The sky is grey, but the territory is manageable."),
-        ("Damp forest", 0, "The ground is damp, but not enough to affect hunting."),
-        ("Fresh newleaf air", 0, "The territory feels awake, but prey remains cautious."),
-        ("Light clouds", 0, "Light clouds drift overhead."),
-        ("Quiet drizzle", 0, "A light drizzle falls, but it causes little trouble."),
-        ("Sunny breaks", 1, "Warm light brings prey out between showers."),
-        ("Warm breeze", 1, "A warm breeze carries scent gently through the territory."),
-        ("Clear afternoon", 1, "Clear skies make prey movement easier to spot."),
-        ("Fresh growth", 1, "New growth attracts prey into the open."),
-        ("Mild sunshine", 2, "The pleasant warmth draws prey from shelter."),
-        ("Bright newleaf day", 2, "A perfect newleaf day brings strong hunting conditions.")
+        ("Heavy rain", -2, "Heavy rain churns the trails into mud, blurring scent and making every pawstep heavier."),
+        ("Cold rain", -2, "Cold rain soaks through fur and keeps most prey tucked deep in shelter."),
+        ("Thunder showers", -2, "Thunder rolls over the mountain, startling birds from the trees and sending small prey underground."),
+        ("Thick mist", -1, "Mist curls between the trunks, softening shapes and making movement harder to track."),
+        ("Wet ground", -1, "The forest floor is slick and muddy, weakening scent trails and slowing patrols."),
+        ("Chilly drizzle", -1, "A damp chill lingers in the air, making hunting uncomfortable and prey cautious."),
+        ("Cloudy", 0, "Cloud cover keeps the forest calm and dim, with steady but unremarkable hunting conditions."),
+        ("Soft breeze", 0, "A soft breeze moves through the trees without helping or hurting the hunt."),
+        ("Cool", 0, "The air is cool and steady, comfortable enough for patrols to move without trouble."),
+        ("Overcast skies", 0, "Grey skies hang over the territory, but the forest remains manageable."),
+        ("Damp forest", 0, "The ground is damp and the air smells of wet moss, though hunting remains steady."),
+        ("Fresh newleaf air", 0, "The territory feels awake with fresh scents, though prey remains cautious."),
+        ("Light clouds", 0, "Light clouds drift overhead, giving patrols easy travelling weather."),
+        ("Quiet drizzle", 0, "A gentle drizzle falls through the branches, soft enough to cause little trouble."),
+        ("Sunny breaks", 1, "Warm light breaks through the clouds, drawing prey out between patches of shade."),
+        ("Warm breeze", 1, "A warm breeze carries scent gently through the territory, helping hunters track movement."),
+        ("Clear skies", 1, "Clear skies brighten the forest, making prey movement easier to spot."),
+        ("Fresh growth", 1, "New shoots and soft greenery draw small prey into the open."),
+        ("Mild sunshine", 2, "Pleasant warmth spreads through the territory, coaxing prey from their hiding places."),
+        ("Sunny", 2, "Bright sun warms the forest floor, creating strong hunting conditions across the territory.")
     ],
+
     "Greenleaf": [
-        ("Thunderstorm", -3, "Thunder and heavy rain scatter prey."),
-        ("Heat haze", -2, "Heavy heat makes prey hide deep in shade."),
-        ("Dry wind", -1, "Dry wind scatters scent trails."),
-        ("Sudden downpour", -1, "A fast storm interrupts hunting patrols."),
-        ("Warm and cloudy", 0, "The day is warm but ordinary."),
-        ("Still air", 0, "The air is still, making the forest feel quiet."),
-        ("Humid morning", 0, "Humidity hangs in the air, but prey is still active."),
-        ("Cloudy with sun", 0, "Mixed skies bring average hunting conditions."),
-        ("Light summer rain", 0, "A small rain cools the territory."),
-        ("Mild greenleaf day", 0, "The weather is steady and calm."),
-        ("Sunny", 2, "Warm sun brings prey into the open."),
-        ("Partly cloudy", 1, "Good hunting weather with mild cover."),
-        ("Light breeze", 1, "A breeze helps carry scent through the territory."),
-        ("Golden sunshine", 2, "Bright sun warms the forest and prey is active."),
-        ("Clear skies", 2, "Clear weather makes hunting easier."),
-        ("Warm forest paths", 1, "Dry paths make travel easy for hunting patrols."),
-        ("Cool shade", 1, "Shade keeps prey moving instead of hiding."),
-        ("Fresh breeze", 1, "Fresh air helps hunters catch scent."),
-        ("Perfect hunting day", 2, "The territory is full of movement and scent."),
-        ("Peaceful greenleaf morning", 2, "Prey is active in the soft morning warmth.")
+        ("Thunderstorm", -3, "Thunder and heavy rain shake the canopy, scattering prey and making patrols difficult."),
+        ("Heat haze", -2, "Heavy heat presses over the territory, pushing prey into deep shade and slowing hunters."),
+        ("Dry wind", -1, "Dry wind tugs scent trails apart, making tracking unreliable."),
+        ("Sudden downpour", -1, "A fast burst of rain interrupts patrols and sends prey scrambling for cover."),
+        ("Warm and cloudy", 0, "Warm clouds hang overhead, leaving the forest comfortable but ordinary."),
+        ("Still air", 0, "The air is still and heavy, making the forest feel watchful and quiet."),
+        ("Humid", 0, "Humidity clings to the grass and leaves, but prey continues moving."),
+        ("Cloudy with sun", 0, "Mixed skies bring average hunting conditions, with shifting light across the trails."),
+        ("Light summer rain", 0, "A gentle rain cools the territory without causing much trouble."),
+        ("Mild", 0, "The weather is mild and steady, giving patrols an easy day across the territory."),
+        ("Sunny", 2, "Warm sun brings prey into the open and brightens the hunting trails."),
+        ("Partly cloudy", 1, "Patchy cloud cover gives hunters good light with enough shade to move quietly."),
+        ("Light breeze", 1, "A light breeze carries scent clearly through the territory."),
+        ("Golden sunshine", 2, "Rich sunlight warms the forest, making prey active and easier to spot."),
+        ("Clear skies", 2, "Clear weather gives hunters sharp visibility and easy travelling conditions."),
+        ("Dry paths", 1, "Dry paths make travel quiet and easy for hunting patrols."),
+        ("Cool shade", 1, "Cool pockets of shade keep prey moving instead of hiding from the heat."),
+        ("Fresh breeze", 1, "Fresh air moves through the leaves, helping hunters catch scent."),
+        ("Ideal hunting conditions", 2, "The territory is full of movement, scent, and opportunity."),
+        ("Warm and calm", 2, "Soft warmth settles over the territory, keeping prey active and patrols comfortable.")
     ],
+
     "Leaf-fall": [
-        ("Cold rain", -2, "Cold rain makes hunting uncomfortable and difficult."),
-        ("Foggy", -2, "Fog makes it hard to see movement clearly."),
-        ("Windy", -1, "Wind scatters scent trails."),
-        ("Wet leaves", -1, "Wet leaves make pawsteps slippery."),
-        ("Early frost", -1, "Frost keeps prey hidden in warmer dens."),
-        ("Sharp gusts", -2, "Strong gusts make scent unreliable."),
-        ("Cloudy and cool", 0, "Prey is cautious as the air grows colder."),
-        ("Grey sky", 0, "The day is gloomy but manageable."),
-        ("Dry leaves", 0, "Leaves crunch underpaw, but prey can still be found."),
-        ("Cool breeze", 0, "The breeze is steady and not too harsh."),
-        ("Quiet forest", 0, "The territory feels still and watchful."),
-        ("Pale sunlight", 0, "Weak sunlight filters through thinning trees."),
-        ("Crisp morning", 0, "The air is crisp but calm."),
-        ("Damp leaf-fall air", 0, "The air is damp, but hunting remains normal."),
-        ("Crisp and clear", 1, "Clear air makes tracking easier."),
-        ("Fresh leaf-fall breeze", 1, "The breeze carries scent cleanly."),
-        ("Dry clear day", 1, "Dry ground helps hunting patrols move quietly."),
-        ("Bright cold sun", 1, "Bright sunlight helps cats spot prey movement."),
-        ("Prey gathering day", 2, "Prey is active while gathering food before leafbare."),
-        ("Golden leaf-fall afternoon", 2, "The mild weather brings prey into the open.")
+        ("Cold rain", -2, "Cold rain darkens the leaves and makes hunting uncomfortable and difficult."),
+        ("Foggy", -2, "Fog pools low between the trees, making it hard to see movement clearly."),
+        ("Windy", -1, "Wind rattles the branches and scatters scent trails across the territory."),
+        ("Wet leaves", -1, "Wet leaves cling to the ground, making pawsteps slippery and quiet movement harder."),
+        ("Early frost", -1, "Frost bites at the grass and keeps prey hidden in warmer dens."),
+        ("Sharp gusts", -2, "Strong gusts tear through the trees, making scent unreliable and patrols tiring."),
+        ("Cloudy and cool", 0, "The air is cool and the sky is dull, but hunting remains manageable."),
+        ("Grey skies", 0, "A grey sky hangs over the territory, gloomy but steady."),
+        ("Dry leaves", 0, "Dry leaves crunch beneath pawsteps, though careful hunters can still find prey."),
+        ("Cool breeze", 0, "A cool breeze moves through the trees without becoming too harsh."),
+        ("Quiet forest", 0, "The territory feels still and watchful, with average hunting conditions."),
+        ("Pale sunlight", 0, "Weak sunlight filters through thinning branches, offering just enough visibility."),
+        ("Crisp", 0, "The air is crisp and clean, but prey remains cautious."),
+        ("Damp air", 0, "Damp leaf-fall air hangs over the trails, though hunting remains normal."),
+        ("Crisp and clear", 1, "Clear air sharpens scent and sight, helping patrols track movement."),
+        ("Fresh leaf-fall breeze", 1, "A fresh breeze carries scent cleanly through the thinning trees."),
+        ("Dry and clear", 1, "Dry ground and clear skies help hunting patrols move quietly."),
+        ("Bright cold sun", 1, "Cold sunlight brightens the leaves and helps cats spot prey movement."),
+        ("Prey gathering weather", 2, "Prey is active while gathering food before leaf-bare, giving hunters a strong advantage."),
+        ("Mild and golden", 2, "Mild air and golden leaves draw prey into the open.")
     ],
+
     "Leafbare": [
-        ("Heavy snow", -4, "Deep snow makes hunting very difficult."),
-        ("Snow", -3, "Snow covers scent trails and muffles prey movement."),
-        ("Freezing fog", -3, "The cold fog makes it hard to see or scent prey."),
-        ("Ice crust", -2, "Ice makes travel dangerous and noisy."),
-        ("Bitter wind", -2, "The wind cuts through fur and scatters scent."),
-        ("Blizzard", -4, "A blizzard makes hunting nearly impossible."),
-        ("Frozen rain", -3, "Frozen rain coats the territory in slippery ice."),
-        ("Deep cold", -2, "The cold keeps prey hidden and cats tired."),
-        ("Clear and cold", 0, "The cold is sharp, but visibility is good."),
-        ("Cloudy with flurries", 0, "Light flurries fall without causing much trouble."),
-        ("Still winter air", 0, "The air is cold but calm."),
-        ("Pale winter sun", 0, "Weak sunlight brightens the territory."),
-        ("Hard-packed snow", 0, "The snow is firm enough to walk on."),
-        ("Quiet frozen morning", 0, "The forest is still, but manageable."),
-        ("Cold cloudy day", 0, "The sky is grey and the air is cold."),
-        ("Light frost", 0, "Frost covers the ground but does not stop patrols."),
-        ("Fresh tracks in snow", 1, "Fresh pawprints make prey easier to follow."),
-        ("Bright snowlight", 1, "The snow reflects light and makes movement easy to spot."),
-        ("Calm winter sun", 1, "A rare calm day helps hunting patrols."),
-        ("Thawing afternoon", 2, "A brief thaw brings prey out from shelter.")
+        ("Heavy snow", -4, "Deep snow weighs down the territory, covering scent and making every hunt difficult."),
+        ("Snow", -3, "Snow covers tracks and muffles prey movement, leaving hunters with little to follow."),
+        ("Freezing fog", -3, "Freezing fog clouds the forest, making it hard to see or scent prey."),
+        ("Ice crust", -2, "A crust of ice makes travel dangerous, noisy, and slow."),
+        ("Bitter wind", -2, "Bitter wind cuts through fur and scatters scent across the frozen ground."),
+        ("Blizzard", -4, "A blizzard lashes the territory, making hunting nearly impossible."),
+        ("Frozen rain", -3, "Frozen rain coats branches and paths in slick ice, making patrols risky."),
+        ("Deep cold", -2, "The cold sinks into the earth, keeping prey hidden and cats tired."),
+        ("Clear and cold", 0, "The cold is sharp, but visibility is good enough for careful patrols."),
+        ("Cloudy with flurries", 0, "Light flurries drift through the air without causing much trouble."),
+        ("Still winter air", 0, "The air is cold and still, leaving the forest quiet but manageable."),
+        ("Pale winter sun", 0, "Weak sunlight brightens the snow, helping patrols see movement."),
+        ("Hard-packed snow", 0, "Firm snow makes travel easier than fresh drifts."),
+        ("Quiet and frozen", 0, "The forest is frozen and still, but manageable for steady patrols."),
+        ("Cold and cloudy", 0, "The sky is grey and the air is cold, but conditions remain stable."),
+        ("Light frost", 0, "Frost covers the ground without fully stopping patrols."),
+        ("Fresh tracks", 1, "Fresh tracks mark the snow, giving hunters something useful to follow."),
+        ("Bright snowlight", 1, "Snow reflects the light and makes small movements easier to spot."),
+        ("Calm winter sun", 1, "A rare calm settles over the territory, helping hunting patrols move with care."),
+        ("Brief thaw", 2, "A brief thaw softens the snow and brings prey out from shelter.")
     ]
 }
+
+
+def get_weather_opener_category(weather, modifier):
+    weather_lower = weather.lower()
+
+    wet_words = [
+        "rain", "drizzle", "shower", "downpour", "thunder",
+        "snow", "blizzard", "flurries", "fog", "mist"
+    ]
+
+    clear_words = [
+        "sun", "sunny", "clear", "golden", "bright", "snowlight"
+    ]
+
+    cloudy_words = [
+        "cloud", "overcast", "grey"
+    ]
+
+    windy_words = [
+        "wind", "breeze", "gust"
+    ]
+
+    cold_words = [
+        "cold", "frost", "frozen", "freezing", "ice", "thaw"
+    ]
+
+    if any(word in weather_lower for word in wet_words):
+        return "wet"
+
+    if any(word in weather_lower for word in clear_words):
+        return "clear"
+
+    if any(word in weather_lower for word in cloudy_words):
+        return "cloudy"
+
+    if any(word in weather_lower for word in windy_words):
+        return "windy"
+
+    if any(word in weather_lower for word in cold_words):
+        return "cold"
+
+    if modifier > 0:
+        return "clear"
+
+    if modifier < 0:
+        return "cold"
+
+    return "neutral"
 
 
 def generate_weekly_weather():
@@ -1577,10 +1772,28 @@ def generate_weekly_weather():
         WEATHER_BY_SEASON.get(season, WEATHER_BY_SEASON["Newleaf"])
     )
 
+    opener_category = get_weather_opener_category(weather, modifier)
+
+    opener_options = (
+        SEASONAL_OPENERS
+        .get(season, SEASONAL_OPENERS["Newleaf"])
+        .get(opener_category, [])
+    )
+
+    if not opener_options:
+        opener_options = (
+            SEASONAL_OPENERS
+            .get(season, SEASONAL_OPENERS["Newleaf"])
+            .get("neutral", [])
+        )
+
+    opener = random.choice(opener_options)
+
     avg_temp = random.randint(averages["low"], averages["high"])
     modifier_text = f"+{modifier}" if modifier > 0 else str(modifier)
 
     return (
+        f"{opener}\n\n"
         f"🍃 Season: {season}\n"
         f"🌡️ Average Temp: {avg_temp}°C\n"
         f"☁️ Weekly Weather: {weather}\n"
