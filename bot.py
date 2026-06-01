@@ -2,6 +2,7 @@ import os
 import json
 import random
 import asyncio
+import copy
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 from threading import Thread
@@ -281,7 +282,8 @@ def fresh_default_data():
         "quest_results": {},
         "question_usage": {},
         "used_questions": [],
-        "hiatuses": {}
+        "hiatuses": {},
+        "last_moon_snapshot": None
     }
 
 
@@ -1006,10 +1008,10 @@ PROPHECIES = [
 def generate_prophecy(report):
     data.setdefault("used_prophecies", [])
 
-    if random.randint(1, 100) > 65:
-        return
-
-    available = [prophecy for prophecy in PROPHECIES if prophecy not in data["used_prophecies"]]
+    available = [
+        prophecy for prophecy in PROPHECIES
+        if prophecy not in data["used_prophecies"]
+    ]
 
     if not available:
         data["used_prophecies"] = []
@@ -1021,8 +1023,25 @@ def generate_prophecy(report):
 
 async def run_moon_update():
     async with data_lock:
+        snapshot = copy.deepcopy(data)
+        snapshot["last_moon_snapshot"] = None
+        data["last_moon_snapshot"] = snapshot
+
+        old_moon = data["moon"]
+        new_moon = old_moon + 1
+
         report = {
-            "promotions": [],
+            "old_moon": old_moon,
+            "new_moon": new_moon,
+            "recovered": [],
+            "recovery_progress": [],
+            "apprentice_news": [],
+            "rank_changes": [],
+            "elder_retirements": [],
+            "ceremony_delays": [],
+            "upcoming_apprentices": [],
+            "warrior_assessments": [],
+            "upcoming_elders": [],
             "births": [],
             "deaths": [],
             "succession": [],
@@ -1030,9 +1049,9 @@ async def run_moon_update():
             "season": None
         }
 
-        data["moon"] += 1
-        data["season"] = get_current_season()
-        report["season"] = data["season"]
+        # ─────────────────────────────
+        # WHAT HAPPENED IN THE OLD MOON
+        # ─────────────────────────────
 
         for name, cat in data.get("cats", {}).items():
             prepare_cat_record(name, cat)
@@ -1041,76 +1060,158 @@ async def run_moon_update():
 
             if recovered:
                 if cat.get("injury"):
-                    report["promotions"].append(
-                        f"🩹 {name}'s injury recovery progressed."
+                    report["recovery_progress"].append(
+                        f"🩹 {name}'s recovery has progressed."
                     )
                 else:
-                    report["promotions"].append(
-                        f"💚 {name} recovered from their injury."
+                    report["recovered"].append(
+                        f"💚 {name} has recovered."
                     )
+
+        for name, cat in data.get("cats", {}).items():
+            history = cat.get("history", [])
+
+            old_moon_entries = [
+                entry for entry in history
+                if entry.startswith(f"Moon {old_moon}:")
+            ]
+
+            if not old_moon_entries:
+                continue
+
+            latest_rank_change = None
+            mentor_assigned = None
+
+            for entry in old_moon_entries:
+                clean_entry = entry.replace(f"Moon {old_moon}: ", "", 1)
+
+                if clean_entry.startswith("Rank changed to "):
+                    latest_rank_change = clean_entry.replace("Rank changed to ", "", 1).strip()
+
+                if clean_entry.startswith("Assigned ") and " as mentor" in clean_entry:
+                    mentor_assigned = clean_entry.replace("Assigned ", "", 1).replace(" as mentor", "", 1).strip()
+
+                if clean_entry.startswith("Retired as an Elder"):
+                    report["elder_retirements"].append(
+                        f"🍂 {name} retired as an Elder."
+                    )
+
+                if clean_entry.startswith("Died and went to"):
+                    report["deaths"].append(
+                        f"💀 {name} {clean_entry.lower()}."
+                    )
+
+                if clean_entry.startswith("Had a litter"):
+                    report["births"].append(
+                        f"🍼 {name} {clean_entry.lower()}."
+                    )
+
+            if latest_rank_change:
+                mentor = mentor_assigned or cat.get("mentor")
+
+                if latest_rank_change == "Apprentice":
+                    if mentor:
+                        report["apprentice_news"].append(
+                            f"🐾 {name} became an Apprentice to {mentor}."
+                        )
+                    else:
+                        report["apprentice_news"].append(
+                            f"🐾 {name} became an Apprentice."
+                        )
+
+                elif latest_rank_change == "Medicine Cat Apprentice":
+                    if mentor:
+                        report["apprentice_news"].append(
+                            f"🌿 {name} became a Medicine Cat Apprentice to {mentor}."
+                        )
+                    else:
+                        report["apprentice_news"].append(
+                            f"🌿 {name} became a Medicine Cat Apprentice."
+                        )
+
+                elif latest_rank_change == "Warrior":
+                    report["rank_changes"].append(
+                        f"⚔ {name} became a Warrior."
+                    )
+
+                else:
+                    report["rank_changes"].append(
+                        f"⚔ {name} became {latest_rank_change}."
+                    )
+
+            elif mentor_assigned and cat.get("rank") == "Apprentice":
+                report["apprentice_news"].append(
+                    f"🐾 {name} became an Apprentice to {mentor_assigned}."
+                )
+
+            elif mentor_assigned and cat.get("rank") == "Medicine Cat Apprentice":
+                report["apprentice_news"].append(
+                    f"🌿 {name} became a Medicine Cat Apprentice to {mentor_assigned}."
+                )
+
+        # ─────────────────────────────
+        # ADVANCE INTO THE NEW MOON
+        # ─────────────────────────────
+
+        data["moon"] = new_moon
+        data["season"] = get_current_season()
+        report["season"] = data["season"]
+
+        for name, cat in data.get("cats", {}).items():
+            prepare_cat_record(name, cat)
 
             if str(cat.get("status", "Alive")).lower() == "dead":
                 continue
 
             cat["age"] = cat.get("age", 0) + 1
 
-            delay = cat.get("ceremony_delay", 0)
-            is_due_for_ceremony = (
-                (cat.get("rank") == "Kit" and cat["age"] >= 6)
-                or (cat.get("rank") == "Apprentice" and cat["age"] >= 12)
-                or (cat.get("rank") in AGING_TO_ELDER_RANKS and cat["age"] >= 95)
-            )
+        # ─────────────────────────────
+        # THINGS TO LOOK FORWARD TO IN THE NEW MOON
+        # ─────────────────────────────
 
-            if delay > 0 and is_due_for_ceremony:
-                cat["ceremony_delay"] = delay - 1
-                add_history(
-                    cat,
-                    f"Ceremony delayed. {cat['ceremony_delay']} moon(s) remaining"
-                )
-                report["promotions"].append(
-                    f"⏳ {name}'s ceremony was delayed. {cat['ceremony_delay']} moon(s) remaining."
-                )
+        for name, cat in data.get("cats", {}).items():
+            if str(cat.get("status", "Alive")).lower() == "dead":
                 continue
 
-            if cat.get("rank") == "Kit" and cat["age"] >= 6:
-                cat["rank"] = "Apprentice"
-                cat.pop("ceremony_delay", None)
-                add_history(cat, "Became an Apprentice")
-                report["promotions"].append(f"🐾 {name} became an Apprentice.")
+            rank = cat.get("rank")
+            age = cat.get("age", 0)
+            clan = cat.get("clan", "Unknown Clan")
 
-            elif cat.get("rank") == "Apprentice" and cat["age"] >= 12:
-                old_ = cat.get("")
+            delay = cat.get("ceremony_delay", 0)
 
-                if old_:
-                    if "(PAST)" not in str(old_):
-                        cat[""] = f"{old_mentor} (PAST)"
+            if delay > 0:
+                is_due_for_ceremony = (
+                    (rank == "Kit" and age >= 6)
+                    or (rank == "Apprentice" and age >= 11)
+                    or (rank in AGING_TO_ELDER_RANKS and age >= 95)
+                )
 
-                    if old_mentor in data["cats"]:
-                        mentor_cat = data["cats"][old_mentor]
-                        apprentices = mentor_cat.get("apprentices", [])
+                if is_due_for_ceremony:
+                    cat["ceremony_delay"] = delay - 1
+                    add_history(
+                        cat,
+                        f"Ceremony delayed. {cat['ceremony_delay']} moon(s) remaining"
+                    )
+                    report["ceremony_delays"].append(
+                        f"⏳ {name}'s ceremony is delayed. {cat['ceremony_delay']} moon(s) remaining."
+                    )
 
-                        if name in apprentices:
-                            apprentices.remove(name)
+                continue
 
-                        past_apprentices = mentor_cat.setdefault("past_apprentices", [])
-                        if name not in past_apprentices:
-                            past_apprentices.append(name)
+            if rank == "Kit" and age >= 6:
+                report["upcoming_apprentices"].append(
+                    f"🐾 {name} will be old enough to become an Apprentice."
+                )
 
-                        add_history(
-                            mentor_cat,
-                            f"Former apprentice {name} became a Warrior"
-                        )
+            elif rank == "Apprentice" and age >= 11:
+                report["warrior_assessments"].append(
+                    f"⚔ {name} of {clan} can take their Warrior Assessment."
+                )
 
-                cat["rank"] = "Warrior"
-                cat.pop("ceremony_delay", None)
-                add_history(cat, "Became a Warrior")
-                report["promotions"].append(f"⚔ {name} became a Warrior.")
-
-            elif cat.get("rank") in AGING_TO_ELDER_RANKS and cat["age"] >= 95:
-                cat["rank"] = "Elder"
-                cat.pop("ceremony_delay", None)
-                add_history(cat, "Retired as an Elder")
-                report["promotions"].append(f"🍂 {name} retired as an Elder.")
+            elif rank in AGING_TO_ELDER_RANKS and age >= 95:
+                report["upcoming_elders"].append(
+                    f"🍂 {name} will be old enough to retire as an Elder."
+                )
 
         handle_succession(report)
         handle_medicine_succession(report)
@@ -1126,8 +1227,20 @@ async def run_moon_update():
 
 async def build_clan_report_text(report=None):
     if report is None:
+        current_moon = data.get("moon", 0)
+
         report = {
-            "promotions": [],
+            "old_moon": current_moon - 1,
+            "new_moon": current_moon,
+            "recovered": [],
+            "recovery_progress": [],
+            "apprentice_news": [],
+            "rank_changes": [],
+            "elder_retirements": [],
+            "ceremony_delays": [],
+            "upcoming_apprentices": [],
+            "warrior_assessments": [],
+            "upcoming_elders": [],
             "births": [],
             "deaths": [],
             "succession": [],
@@ -1135,12 +1248,17 @@ async def build_clan_report_text(report=None):
             "season": data.get("season", get_current_season())
         }
 
+    old_moon = report.get("old_moon", data.get("moon", 0) - 1)
+    new_moon = report.get("new_moon", data.get("moon", 0))
+
     lines = [
-        f"🌙 Moon {data['moon']} Report",
+        f"🌙 Moon {new_moon} Report",
         f"🍃 Season: {report.get('season', data.get('season', 'Unknown'))} ({get_season_moon()}/3)",
-        "Clan records updated.",
         ""
     ]
+
+    lines.append("📋 Current Clan Records")
+    lines.append("")
 
     for clan_name in CLAN_NAMES_ONLY:
         lines.append(f"⛺ {clan_name}")
@@ -1171,7 +1289,16 @@ async def build_clan_report_text(report=None):
             lines.append(f"{rank}:")
 
             for name, cat in ranked_cats:
-                lines.append(f"• {name} — {cat.get('age', 0)} moons")
+                mentor = cat.get("mentor")
+
+                if rank in ["Apprentice", "Medicine Cat Apprentice"] and mentor:
+                    lines.append(
+                        f"• {name} — {cat.get('age', 0)} moons | Mentor: {mentor}"
+                    )
+                else:
+                    lines.append(
+                        f"• {name} — {cat.get('age', 0)} moons"
+                    )
 
             lines.append("")
 
@@ -1195,34 +1322,100 @@ async def build_clan_report_text(report=None):
     else:
         lines.append("No outsiders")
 
-    lines.extend(["", "💀 Deaths This Moon"])
+    lines.extend(["", f"📜 What Happened in Moon {old_moon}"])
 
-    recent_dead = [
-        (name, cat)
-        for name, cat in data.get("cats", {}).items()
-        if str(cat.get("status", "Alive")).lower() == "dead"
-        and cat.get("death_moon") == data["moon"]
-    ]
-
-    if recent_dead:
-        for name, cat in recent_dead:
-            lines.append(
-                f"• {name} — {cat.get('age', 0)} moons → {cat.get('afterlife')}"
-            )
+    if (
+        not report.get("recovered")
+        and not report.get("recovery_progress")
+        and not report.get("apprentice_news")
+        and not report.get("rank_changes")
+        and not report.get("elder_retirements")
+        and not report.get("births")
+        and not report.get("deaths")
+        and not report.get("succession")
+    ):
+        lines.append("No major updates were recorded.")
     else:
-        lines.append("No deaths")
+        if report.get("recovered"):
+            lines.extend(["", "💚 Recovered"])
+            lines.extend(report["recovered"])
 
-    lines.extend(["", "🍼 Births This Moon"])
-    lines.extend(report["births"] if report.get("births") else ["No births"])
+        if report.get("recovery_progress"):
+            lines.extend(["", "🩹 Still Recovering"])
+            lines.extend(report["recovery_progress"])
 
-    lines.extend(["", "⚔ Promotions This Moon"])
-    lines.extend(report["promotions"] if report.get("promotions") else ["No promotions"])
+        if report.get("apprentice_news"):
+            lines.extend(["", "🐾 New Apprentices"])
+            lines.extend(report["apprentice_news"])
 
-    lines.extend(["", "👑 Succession Updates"])
-    lines.extend(report["succession"] if report.get("succession") else ["No succession changes"])
+        if report.get("rank_changes"):
+            lines.extend(["", "⚔ Rank Changes"])
+            lines.extend(report["rank_changes"])
+
+        if report.get("elder_retirements"):
+            lines.extend(["", "🍂 Elder Retirements"])
+            lines.extend(report["elder_retirements"])
+
+        if report.get("births"):
+            lines.extend(["", "🍼 Births"])
+            lines.extend(report["births"])
+
+        if report.get("deaths"):
+            lines.extend(["", "💀 Deaths"])
+            lines.extend(report["deaths"])
+
+        if report.get("succession"):
+            lines.extend(["", "👑 Succession Updates"])
+            lines.extend(report["succession"])
+
+    lines.extend(["", f"🔮 Things to Look Forward to in Moon {new_moon}"])
+
+    if (
+        not report.get("upcoming_apprentices")
+        and not report.get("warrior_assessments")
+        and not report.get("upcoming_elders")
+        and not report.get("ceremony_delays")
+    ):
+        lines.append("No upcoming ceremonies are currently expected.")
+    else:
+        if report.get("upcoming_apprentices"):
+            lines.extend(["", "🐾 Kits Old Enough to Become Apprentices"])
+            lines.extend(report["upcoming_apprentices"])
+
+        if report.get("warrior_assessments"):
+            lines.extend(["", "⚔ Warrior Assessments"])
+
+            for clan_name in CLAN_NAMES_ONLY:
+                clan_assessments = [
+                    line for line in report["warrior_assessments"]
+                    if f" of {clan_name} " in line
+                ]
+
+                if clan_assessments:
+                    lines.append(f"{clan_name}:")
+                    lines.extend(clan_assessments)
+                    lines.append("")
+
+            outsider_assessments = [
+                line for line in report["warrior_assessments"]
+                if " of Outsider " in line
+            ]
+
+            if outsider_assessments:
+                lines.append("Outsider:")
+                lines.extend(outsider_assessments)
+                lines.append("")
+
+        if report.get("upcoming_elders"):
+            lines.extend(["", "🍂 Cats Old Enough to Retire"])
+            lines.extend(report["upcoming_elders"])
+
+        if report.get("ceremony_delays"):
+            lines.extend(["", "⏳ Ceremony Delays"])
+            lines.extend(report["ceremony_delays"])
 
     lines.extend(["", "🌙 Prophecies / Omens"])
-    lines.extend(report["prophecies"] if report.get("prophecies") else ["No omens this moon"])
+    lines.extend(report["prophecies"] if report.get("prophecies") else ["No prophecy was recorded."])
 
     return "\n".join(lines)
 
@@ -1515,6 +1708,76 @@ async def resetmoon(interaction: discord.Interaction, moon: int = 4):
 
     await interaction.response.send_message(f"🌙 Moon set to {moon} and all living ages adjusted by {difference} moons.")
 
+@bot.tree.command(name="revertmoon", description="Staff only. Revert to the saved state before the last moon advance")
+@app_commands.describe(
+    confirm="Type YES to confirm you want to revert the last moon advance"
+)
+async def revertmoon(interaction: discord.Interaction, confirm: str):
+    if not await staff_command_check(interaction):
+        return
+
+    if confirm != "YES":
+        await interaction.response.send_message(
+            "⚠️ This will restore the bot to the saved state before the last moon advance.\n"
+            "Run `/revertmoon confirm: YES` if you are sure.",
+            ephemeral=True
+        )
+        return
+
+    async with data_lock:
+        snapshot = data.get("last_moon_snapshot")
+
+        if not snapshot:
+            await interaction.response.send_message(
+                "❌ No moon snapshot was found. I can only revert a moon after `/advancemoon` has saved a snapshot.",
+                ephemeral=True
+            )
+            return
+
+        current_moon = data.get("moon", "Unknown")
+        snapshot_moon = snapshot.get("moon", "Unknown")
+
+        data.clear()
+        data.update(copy.deepcopy(snapshot))
+
+        # Keep a copy so you do not lose the ability to inspect/revert info immediately
+        data["last_moon_snapshot"] = snapshot
+
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"↩️ Moon reverted successfully.\n"
+        f"Restored from **Moon {current_moon}** back to **Moon {snapshot_moon}**.",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="prophecy", description="Staff only. Post a custom prophecy or omen")
+@app_commands.describe(
+    text="The custom prophecy or omen to post"
+)
+async def prophecy(interaction: discord.Interaction, text: str):
+    if not await staff_command_check(interaction):
+        return
+
+    message = (
+        "🌙 **A prophecy has been received...**\n\n"
+        f"{text}"
+    )
+
+    channel = bot.get_channel(REPORT_CHANNEL_ID)
+
+    if channel:
+        await send_long_message(channel, message)
+        await interaction.response.send_message(
+            "🌙 Custom prophecy posted.",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            "Could not find the report channel.",
+            ephemeral=True
+        )
+
 
 @bot.tree.command(name="advancemoon", description="Advance the moon manually")
 async def advance_moon(interaction: discord.Interaction):
@@ -1548,7 +1811,8 @@ async def botinfo(interaction: discord.Interaction):
         "`/resetmoon` — Staff only. Resets moon count and adjusts living cat ages\n"
         "`/weatherreport` — Manually post or view this week's weather report\n"
         "`/setweather` — Staff only. Manually set custom weather\n"
-        "`/question` — Public command. Posts a random OC question in any channel (max 2 uses per Toronto calendar day)\n\n"
+        "`/prophecy` — Staff only. Post a custom prophecy or omen\n"
+        "`/revertmoon` — Staff only. Reverts to the saved state before the last moon advance\n\n"
 
         "📜 **Quest / Gathering Commands**\n"
         "`/quests` — Staff only. Manually post new biweekly quests\n"
@@ -1572,6 +1836,7 @@ async def botinfo(interaction: discord.Interaction):
         "`/cat markdead` — Mark a living cat as dead\n"
         "`/cat delayceremony` — Delay automatic rank-up ceremonies\n"
         "`/cat tinderhide` — Hide/unhide a cat from Cat Tinder\n\n"
+        "`/cat clearhistorymoon` — Delete cat history entries from a specific moon\n"
 
         "🩹 **Staff Injury Commands**\n"
         "`/injury add` — Add an injury or illness\n"
@@ -2168,6 +2433,80 @@ async def cat_tinderhide(interaction: discord.Interaction, name: str, hidden: bo
         save_data(data)
 
     await interaction.response.send_message(message)
+
+@cat_group.command(name="clearhistorymoon", description="Delete cat history entries from a specific moon")
+@app_commands.describe(
+    moon="The moon number to delete history entries from",
+    cat_name="Optional. Leave blank to clear this moon from all cats."
+)
+async def cat_clear_history_moon(
+    interaction: discord.Interaction,
+    moon: int,
+    cat_name: str = None
+):
+    if not await staff_command_check(interaction):
+        return
+
+    if moon < 0:
+        await interaction.response.send_message(
+            "Moon number must be 0 or higher.",
+            ephemeral=True
+        )
+        return
+
+    prefix = f"Moon {moon}:"
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if cat_name:
+            if cat_name not in cats:
+                await interaction.response.send_message(
+                    f"Cat not found: **{cat_name}**",
+                    ephemeral=True
+                )
+                return
+
+            cat = cats[cat_name]
+            old_count = len(cat.get("history", []))
+
+            cat["history"] = [
+                entry for entry in cat.get("history", [])
+                if not entry.startswith(prefix)
+            ]
+
+            removed_count = old_count - len(cat["history"])
+            save_data(data)
+
+            await interaction.response.send_message(
+                f"🧹 Removed **{removed_count}** history entr{'y' if removed_count == 1 else 'ies'} from **{cat_name}** for **Moon {moon}**.",
+                ephemeral=True
+            )
+            return
+
+        total_removed = 0
+        affected_cats = 0
+
+        for name, cat in cats.items():
+            old_count = len(cat.get("history", []))
+
+            cat["history"] = [
+                entry for entry in cat.get("history", [])
+                if not entry.startswith(prefix)
+            ]
+
+            removed_count = old_count - len(cat["history"])
+
+            if removed_count > 0:
+                total_removed += removed_count
+                affected_cats += 1
+
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🧹 Removed **{total_removed}** history entr{'y' if total_removed == 1 else 'ies'} from **Moon {moon}** across **{affected_cats}** cat{'s' if affected_cats != 1 else ''}.",
+        ephemeral=True
+    )
 
 
 # ─────────────────────────────
