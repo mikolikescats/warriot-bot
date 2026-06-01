@@ -1225,6 +1225,42 @@ async def run_moon_update():
 # ─────────────────────────────
 
 
+# ─────────────────────────────
+# CLAN REPORT BUILDER
+# ─────────────────────────────
+
+def plural_rank(rank):
+    plural_map = {
+        "Leader": "Leaders",
+        "Deputy": "Deputies",
+        "Medicine Cat": "Medicine Cats",
+        "Medicine Cat Apprentice": "Medicine Cat Apprentices",
+        "Preymaster": "Preymasters",
+        "Healer": "Healers",
+        "Digger": "Diggers",
+        "Pathfinder": "Pathfinders",
+        "Sporekeeper": "Sporekeepers",
+        "River Guardian": "River Guardians",
+        "Warrior": "Warriors",
+        "Elder": "Elders",
+        "Queen": "Queens",
+        "Den Dad": "Den Dads",
+        "Apprentice": "Apprentices",
+        "Kit": "Kits"
+    }
+
+    return plural_map.get(rank, f"{rank}s")
+
+
+def bold_clan_names(text):
+    for clan_name in CLAN_NAMES_ONLY:
+        text = text.replace(f" of {clan_name} ", f" of **{clan_name}** ")
+
+    text = text.replace(" of Outsider ", " of **Outsider** ")
+
+    return text
+
+
 async def build_clan_report_text(report=None):
     if report is None:
         current_moon = data.get("moon", 0)
@@ -1261,7 +1297,7 @@ async def build_clan_report_text(report=None):
     lines.append("")
 
     for clan_name in CLAN_NAMES_ONLY:
-        lines.append(f"⛺ {clan_name}")
+        lines.append(f"⛺ **{clan_name}**")
 
         clan_cats = {
             name: cat
@@ -1286,23 +1322,23 @@ async def build_clan_report_text(report=None):
                 continue
 
             ranked_cats.sort(key=lambda item: item[1].get("age", 0), reverse=True)
-            lines.append(f"{rank}:")
+            lines.append(f"**{plural_rank(rank)}**")
 
             for name, cat in ranked_cats:
                 mentor = cat.get("mentor")
 
                 if rank in ["Apprentice", "Medicine Cat Apprentice"] and mentor:
                     lines.append(
-                        f"• {name} — {cat.get('age', 0)} moons | Mentor: {mentor}"
+                        f"• {name} - {cat.get('age', 0)} moons | Mentor: {mentor}"
                     )
                 else:
                     lines.append(
-                        f"• {name} — {cat.get('age', 0)} moons"
+                        f"• {name} - {cat.get('age', 0)} moons"
                     )
 
             lines.append("")
 
-    lines.append("🌫 Outsiders")
+    lines.append("🌫 **Outsiders**")
 
     outsiders = [
         (name, cat)
@@ -1317,12 +1353,12 @@ async def build_clan_report_text(report=None):
         for name, cat in outsiders:
             faction = f" | {cat.get('faction')}" if cat.get("faction") else ""
             lines.append(
-                f"• {name} — {cat.get('rank')} — {cat.get('age', 0)} moons{faction}"
+                f"• {name} - {cat.get('rank')} - {cat.get('age', 0)} moons{faction}"
             )
     else:
         lines.append("No outsiders")
 
-    lines.extend(["", f"📜 What Happened in Moon {old_moon}"])
+    lines.extend(["", f"## 📜 What Happened in Moon {old_moon}"])
 
     if (
         not report.get("recovered")
@@ -1337,38 +1373,38 @@ async def build_clan_report_text(report=None):
         lines.append("No major updates were recorded.")
     else:
         if report.get("recovered"):
-            lines.extend(["", "💚 Recovered"])
+            lines.extend(["", "### 💚 Recovered"])
             lines.extend(report["recovered"])
 
         if report.get("recovery_progress"):
-            lines.extend(["", "🩹 Still Recovering"])
+            lines.extend(["", "### 🩹 Still Recovering"])
             lines.extend(report["recovery_progress"])
 
         if report.get("apprentice_news"):
-            lines.extend(["", "🐾 New Apprentices"])
+            lines.extend(["", "### 🐾 New Apprentices"])
             lines.extend(report["apprentice_news"])
 
         if report.get("rank_changes"):
-            lines.extend(["", "⚔ Rank Changes"])
+            lines.extend(["", "### ⚔ Rank Changes"])
             lines.extend(report["rank_changes"])
 
         if report.get("elder_retirements"):
-            lines.extend(["", "🍂 Elder Retirements"])
+            lines.extend(["", "### 🍂 Elder Retirements"])
             lines.extend(report["elder_retirements"])
 
         if report.get("births"):
-            lines.extend(["", "🍼 Births"])
+            lines.extend(["", "### 🍼 Births"])
             lines.extend(report["births"])
 
         if report.get("deaths"):
-            lines.extend(["", "💀 Deaths"])
+            lines.extend(["", "### 💀 Deaths"])
             lines.extend(report["deaths"])
 
         if report.get("succession"):
-            lines.extend(["", "👑 Succession Updates"])
+            lines.extend(["", "### 👑 Succession Updates"])
             lines.extend(report["succession"])
 
-    lines.extend(["", f"🔮 Things to Look Forward to in Moon {new_moon}"])
+    lines.extend(["", f"## 🔮 Things to Look Forward to in Moon {new_moon}"])
 
     if (
         not report.get("upcoming_apprentices")
@@ -1379,45 +1415,147 @@ async def build_clan_report_text(report=None):
         lines.append("No upcoming ceremonies are currently expected.")
     else:
         if report.get("upcoming_apprentices"):
-            lines.extend(["", "🐾 Kits Old Enough to Become Apprentices"])
+            lines.extend(["", "### 🐾 Kits Old Enough to Become Apprentices"])
             lines.extend(report["upcoming_apprentices"])
 
         if report.get("warrior_assessments"):
-            lines.extend(["", "⚔ Warrior Assessments"])
+            lines.extend(["", "### ⚔ Warrior Assessments"])
 
             for clan_name in CLAN_NAMES_ONLY:
                 clan_assessments = [
-                    line for line in report["warrior_assessments"]
+                    bold_clan_names(line)
+                    for line in report["warrior_assessments"]
                     if f" of {clan_name} " in line
                 ]
 
                 if clan_assessments:
-                    lines.append(f"{clan_name}:")
+                    lines.append(f"**{clan_name}**")
                     lines.extend(clan_assessments)
                     lines.append("")
 
             outsider_assessments = [
-                line for line in report["warrior_assessments"]
+                bold_clan_names(line)
+                for line in report["warrior_assessments"]
                 if " of Outsider " in line
             ]
 
             if outsider_assessments:
-                lines.append("Outsider:")
+                lines.append("**Outsider**")
                 lines.extend(outsider_assessments)
                 lines.append("")
 
         if report.get("upcoming_elders"):
-            lines.extend(["", "🍂 Cats Old Enough to Retire"])
+            lines.extend(["", "### 🍂 Cats Old Enough to Retire"])
             lines.extend(report["upcoming_elders"])
 
         if report.get("ceremony_delays"):
-            lines.extend(["", "⏳ Ceremony Delays"])
+            lines.extend(["", "### ⏳ Ceremony Delays"])
             lines.extend(report["ceremony_delays"])
 
-    lines.extend(["", "🌙 Prophecies / Omens"])
+    lines.extend(["", "### 🌙 Prophecies / Omens"])
     lines.extend(report["prophecies"] if report.get("prophecies") else ["No prophecy was recorded."])
 
     return "\n".join(lines)
+
+@bot.tree.command(name="moontest", description="Preview what the moon report would look like for a future moon")
+@app_commands.describe(
+    target_moon="The moon number you want to preview"
+)
+async def moontest(interaction: discord.Interaction, target_moon: int):
+    if not await staff_command_check(interaction):
+        return
+
+    current_moon = data.get("moon", 0)
+
+    if target_moon <= current_moon:
+        await interaction.response.send_message(
+            f"Please choose a moon higher than the current moon. Current moon is **{current_moon}**.",
+            ephemeral=True
+        )
+        return
+
+    moons_ahead = target_moon - current_moon
+
+    preview_data = copy.deepcopy(data)
+
+    old_data = globals()["data"]
+    globals()["data"] = preview_data
+
+    try:
+        old_moon = current_moon
+        preview_data["moon"] = target_moon
+        preview_data["season"] = get_current_season()
+
+        report = {
+            "old_moon": old_moon,
+            "new_moon": target_moon,
+            "recovered": [],
+            "recovery_progress": [],
+            "apprentice_news": [],
+            "rank_changes": [],
+            "elder_retirements": [],
+            "ceremony_delays": [],
+            "upcoming_apprentices": [],
+            "warrior_assessments": [],
+            "upcoming_elders": [],
+            "births": [],
+            "deaths": [],
+            "succession": [],
+            "prophecies": [],
+            "season": preview_data.get("season", get_current_season())
+        }
+
+        for name, cat in preview_data.get("cats", {}).items():
+            prepare_cat_record(name, cat)
+
+            if str(cat.get("status", "Alive")).lower() == "dead":
+                continue
+
+            cat["age"] = cat.get("age", 0) + moons_ahead
+
+        for name, cat in preview_data.get("cats", {}).items():
+            if str(cat.get("status", "Alive")).lower() == "dead":
+                continue
+
+            rank = cat.get("rank")
+            age = cat.get("age", 0)
+            clan = cat.get("clan", "Unknown Clan")
+
+            if rank == "Kit" and age >= 6:
+                report["upcoming_apprentices"].append(
+                    f"🐾 {name} will be old enough to become an Apprentice."
+                )
+
+            elif rank == "Apprentice" and age >= 11:
+                report["warrior_assessments"].append(
+                    f"⚔ {name} of {clan} can take their Warrior Assessment."
+                )
+
+            elif rank in AGING_TO_ELDER_RANKS and age >= 95:
+                report["upcoming_elders"].append(
+                    f"🍂 {name} will be old enough to retire as an Elder."
+                )
+
+        report["prophecies"].append("Preview only. No prophecy was rolled or saved.")
+
+        message = await build_clan_report_text(report)
+
+    finally:
+        globals()["data"] = old_data
+
+    channel = bot.get_channel(COMMAND_CHANNEL_ID)
+
+    if channel:
+        await send_long_message(channel, message)
+        await interaction.response.send_message(
+            f"🌙 Moon {target_moon} preview sent.",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            "Command channel not found.",
+            ephemeral=True
+        )
 
 # ─────────────────────────────
 # WEATHER SYSTEM
