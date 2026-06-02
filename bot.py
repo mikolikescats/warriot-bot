@@ -5336,8 +5336,8 @@ async def catinfo(interaction: discord.Interaction, name: str):
         cat = data["cats"][name]
         prepare_cat_record(name, cat)
 
-    if process_injury_recovery(cat):
-        save_data(data)
+        if process_injury_recovery(cat):
+            save_data(data)
 
         # ─────────────────────────────
         # CLEAN HISTORY DISPLAY
@@ -5478,6 +5478,8 @@ async def catinfo(interaction: discord.Interaction, name: str):
         # ─────────────────────────────
         # FINAL DISPLAY
         # ─────────────────────────────
+        hunger_text = format_hunger_status(cat)
+
         message = (
             f"🐾 **{name}**\n"
             f"**Clan**: {cat.get('clan')}\n"
@@ -5488,8 +5490,6 @@ async def catinfo(interaction: discord.Interaction, name: str):
         if cat.get("clan") == "Outsider":
             faction = cat.get("faction") or "None"
             message += f"**Faction**: {faction}\n"
-
-        hunger_text = format_hunger_status(cat)
 
         message += (
             f"**Age**: {cat.get('age', 0)} moons\n"
@@ -5502,7 +5502,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
             f"{relationships_text}\n\n"
             f"📜 **Recent History:**\n"
             f"{history_text}"
-)
+        )
 
     await safe_respond(interaction, message[:1900])
 
