@@ -254,6 +254,11 @@ FAMILY_RELATION_CHOICES = [
     for relation in FAMILY_RELATIONS
 ]
 
+PREY_SIZE_CHOICES = [
+    app_commands.Choice(name="Normal Prey", value="normal"),
+    app_commands.Choice(name="Large Prey", value="large")
+]
+
 # ─────────────────────────────
 # DATA FUNCTIONS
 # ─────────────────────────────
@@ -419,6 +424,9 @@ def prepare_cat_record(name, cat):
     cat.setdefault("afterlife", None)
     cat.setdefault("faction", None)
     cat.setdefault("death_moon", None)
+    cat.setdefault("hunger_level", "Satisfied")
+    cat.setdefault("last_fed", None)
+    cat.setdefault("last_hunger_update", None)
 
 
 def format_history_entry(entry):
@@ -622,6 +630,185 @@ async def send_long_message(channel, text):
     for chunk in chunks:
         if chunk.strip():
             await channel.send(chunk)
+
+# ─────────────────────────────
+# HUNGER / FEEDING SYSTEM
+# ─────────────────────────────
+
+HUNGER_LEVELS = [
+    "Starving",
+    "Hungry",
+    "Satisfied",
+    "Fed",
+    "Well-fed",
+    "Thriving",
+    "Stuffed"
+]
+
+HUNGER_MODIFIERS = {
+    "Starving": -2,
+    "Hungry": -1,
+    "Satisfied": 0,
+    "Fed": 0,
+    "Well-fed": 1,
+    "Thriving": 2,
+    "Stuffed": -1
+}
+
+HUNGER_DECAY_DAYS = {
+    "Stuffed": 7,
+    "Thriving": 14,
+    "Well-fed": 14,
+    "Fed": 14,
+    "Satisfied": 14,
+    "Hungry": 14,
+    "Starving": None
+}
+
+
+def normalize_hunger_level(level):
+    if level in HUNGER_LEVELS:
+        return level
+
+    # Handles any older saved data from when this level was called Sated.
+    if level == "Sated":
+        return "Satisfied"
+
+    return "Satisfied"
+
+
+def update_hunger_decay(cat):
+    """
+    Applies hunger decay based on real-life time.
+
+    Stuffed lasts 1 week before dropping to Thriving.
+    Every other level lasts 2 weeks before dropping by 1 level.
+    Starving does not decay lower.
+    """
+    now = datetime.now(TZ)
+
+    hunger = normalize_hunger_level(cat.get("hunger_level", "Satisfied"))
+    last_hunger_update = cat.get("last_hunger_update") or cat.get("last_fed")
+
+    if not last_hunger_update:
+        cat["hunger_level"] = hunger
+        cat["last_hunger_update"] = now.isoformat()
+        return hunger
+
+    try:
+        last_update_time = datetime.fromisoformat(last_hunger_update)
+    except Exception:
+        cat["hunger_level"] = hunger
+        cat["last_hunger_update"] = now.isoformat()
+        return hunger
+
+    while hunger != "Starving":
+        decay_days = HUNGER_DECAY_DAYS.get(hunger)
+
+        if decay_days is None:
+            break
+
+        next_decay_time = last_update_time + timedelta(days=decay_days)
+
+        if now < next_decay_time:
+            break
+
+        current_index = HUNGER_LEVELS.index(hunger)
+        hunger = HUNGER_LEVELS[max(0, current_index - 1)]
+        last_update_time = next_decay_time
+
+    cat["hunger_level"] = hunger
+    cat["last_hunger_update"] = last_update_time.isoformat()
+
+    return hunger
+
+
+def get_hunger_status(cat):
+    return update_hunger_decay(cat)
+
+
+def get_hunger_modifier(cat):
+    hunger = get_hunger_status(cat)
+    return HUNGER_MODIFIERS.get(hunger, 0)
+
+
+def days_until_starving(cat):
+    """
+    Returns how many days until the cat reaches Starving.
+
+    Only shown for Satisfied and Hungry because those are the warning levels.
+    """
+    hunger = get_hunger_status(cat)
+
+    if hunger not in ["Satisfied", "Hungry"]:
+        return None
+
+    last_hunger_update = cat.get("last_hunger_update") or cat.get("last_fed")
+
+    if not last_hunger_update:
+        return None
+
+    try:
+        last_update_time = datetime.fromisoformat(last_hunger_update)
+    except Exception:
+        return None
+
+    now = datetime.now(TZ)
+
+    if hunger == "Satisfied":
+        starving_time = last_update_time + timedelta(days=28)
+    else:
+        starving_time = last_update_time + timedelta(days=14)
+
+    days_left = (starving_time - now).days
+
+    return max(0, days_left)
+
+
+def format_hunger_status(cat):
+    hunger = get_hunger_status(cat)
+    modifier = HUNGER_MODIFIERS.get(hunger, 0)
+    days_left = days_until_starving(cat)
+
+    modifier_text = ""
+    if modifier != 0:
+        modifier_text = f"{format_modifier(modifier)} hunting"
+
+    countdown_text = ""
+    if days_left is not None:
+        day_word = "day" if days_left == 1 else "days"
+        countdown_text = f"{days_left} {day_word} til starving"
+
+    details = [text for text in [modifier_text, countdown_text] if text]
+
+    if details:
+        return f"{hunger} ({', '.join(details)})"
+
+    return hunger
+
+
+def feed_cat(cat, prey_size="normal"):
+    """
+    Normal prey bumps hunger up by 1 level.
+    Large prey bumps hunger up by 2 levels.
+
+    Feeding resets the hunger decay timer.
+    Feeding does not add to Recent History.
+    """
+    current_hunger = get_hunger_status(cat)
+    current_index = HUNGER_LEVELS.index(current_hunger)
+
+    bump = 2 if prey_size == "large" else 1
+    new_index = min(current_index + bump, len(HUNGER_LEVELS) - 1)
+
+    new_hunger = HUNGER_LEVELS[new_index]
+    now = datetime.now(TZ).isoformat()
+
+    cat["hunger_level"] = new_hunger
+    cat["last_fed"] = now
+    cat["last_hunger_update"] = now
+
+    return current_hunger, new_hunger
 
 
 # ─────────────────────────────
@@ -2176,6 +2363,13 @@ async def botinfo(interaction: discord.Interaction):
         "`/clan [ClanName]` — View one clan roster\n"
         "`/cattinder [Name] [Clan]` — Find age-appropriate romance options\n"
         "`/question` — Random OC question prompt system\n\n"
+        
+        "🍽️ **Feeding / Hunger Commands**\n"
+        "`/feed cat [Name]` — Feed an OC normal prey and raise their hunger level by 1\n"
+        "`/feed cat [Name] [Large Prey]` — Feed an OC large prey and raise their hunger level by 2\n"
+        "`/feed hunger [Clan]` — Check which cats in a Clan are Starving, Hungry, or Satisfied\n"
+        "Stuffed lasts 1 week. Every other hunger level lasts 2 weeks before dropping down by 1 level.\n"
+        "Hunger affects hunting rolls: Starving -2, Hungry -1, Satisfied/Fed no change, Well-fed +1, Thriving +2, Stuffed -1.\n\n"
 
         "🛠️ **Staff Cat Management**\n"
         "`/cat add` — Add a new living cat\n"
@@ -4930,6 +5124,7 @@ async def questresult(
 
 @bot.tree.command(name="rollhelp", description="Calculate whether a hunting roll caught the prey")
 @app_commands.describe(
+    name="The OC who is hunting",
     base_hunting_stat="The number your OC needs to meet or beat to catch the prey",
     current_roll="The number you rolled",
     prey_modifier="The prey modifier, example: -2, 0, 1",
@@ -4940,6 +5135,7 @@ async def questresult(
 )
 async def rollhelp(
     interaction: discord.Interaction,
+    name: str,
     base_hunting_stat: int,
     current_roll: int,
     prey_modifier: int,
@@ -4948,6 +5144,21 @@ async def rollhelp(
     quest_modifier: int = 0,
     other_modifier: int = 0
 ):
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if name not in cats:
+            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            return
+
+        cat = cats[name]
+        prepare_cat_record(name, cat)
+
+        hunger = get_hunger_status(cat)
+        hunger_modifier = HUNGER_MODIFIERS.get(hunger, 0)
+
+        save_data(data)
+
     specialty_bonus = 2 if specialty_prey else 0
 
     final_roll = (
@@ -4956,6 +5167,7 @@ async def rollhelp(
         + specialty_bonus
         + weather_modifier
         + quest_modifier
+        + hunger_modifier
         + other_modifier
     )
 
@@ -4963,12 +5175,14 @@ async def rollhelp(
 
     await interaction.response.send_message(
         f"🎯 **Hunting Roll Helper**\n\n"
+        f"Cat: **{name}**\n"
         f"Number Needed: **{base_hunting_stat}**\n"
         f"Current Roll: **{current_roll}**\n"
         f"Prey Modifier: **{format_modifier(prey_modifier)}**\n"
         f"Specialty Prey Bonus: **{format_modifier(specialty_bonus)}**\n"
         f"Weather Modifier: **{format_modifier(weather_modifier)}**\n"
         f"Quest Modifier: **{format_modifier(quest_modifier)}**\n"
+        f"Hunger: **{hunger}** ({format_modifier(hunger_modifier)})\n"
         f"Other Modifier: **{format_modifier(other_modifier)}**\n\n"
         f"Final Roll: **{final_roll}**\n"
         f"{result}"
@@ -5120,11 +5334,12 @@ async def catinfo(interaction: discord.Interaction, name: str):
 
     async with data_lock:
         cat = data["cats"][name]
+        prepare_cat_record(name, cat)
 
-        if process_injury_recovery(cat):
-            save_data(data)
+    if process_injury_recovery(cat):
+        save_data(data)
 
-                # ─────────────────────────────
+        # ─────────────────────────────
         # CLEAN HISTORY DISPLAY
         # ─────────────────────────────
         history = [
@@ -5274,19 +5489,124 @@ async def catinfo(interaction: discord.Interaction, name: str):
             faction = cat.get("faction") or "None"
             message += f"**Faction**: {faction}\n"
 
+        hunger_text = format_hunger_status(cat)
+
         message += (
             f"**Age**: {cat.get('age', 0)} moons\n"
             f"**Status**: {status}\n"
             f"**Current Health**: {injury_text}\n"
+            f"**Hunger**: {hunger_text}\n"
             f"**Mentor**: {mentor}\n"
             f"**Apprentices**: {apprentices}\n"
             f"**Afterlife**: {afterlife}\n\n"
             f"{relationships_text}\n\n"
             f"📜 **Recent History:**\n"
             f"{history_text}"
-        )
+)
 
     await safe_respond(interaction, message[:1900])
+
+feed_group = app_commands.Group(
+    name="feed",
+    description="Feed cats and check Clan hunger"
+)
+
+
+@feed_group.command(name="cat", description="Feed an OC")
+@app_commands.describe(
+    name="The cat you want to feed",
+    prey_size="Normal prey raises hunger by 1 level. Large prey raises hunger by 2 levels."
+)
+@app_commands.choices(prey_size=PREY_SIZE_CHOICES)
+async def feed_cat_command(
+    interaction: discord.Interaction,
+    name: str,
+    prey_size: app_commands.Choice[str] = None
+):
+    selected_prey_size = prey_size.value if prey_size else "normal"
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if name not in cats:
+            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            return
+
+        cat = cats[name]
+        prepare_cat_record(name, cat)
+
+        if str(cat.get("status", "Alive")).lower() == "dead":
+            await interaction.response.send_message(
+                "Dead cats cannot be fed.",
+                ephemeral=True
+            )
+            return
+
+        old_hunger, new_hunger = feed_cat(cat, selected_prey_size)
+
+        prey_text = "large prey" if selected_prey_size == "large" else "prey"
+        new_status_text = format_hunger_status(cat)
+
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🍽️ **{name}** ate some {prey_text}!\n"
+        f"**Hunger:** {old_hunger} → **{new_hunger}**\n"
+        f"**Current Status:** {new_status_text}"
+    )
+
+
+@feed_group.command(name="hunger", description="Check which cats in a Clan need to eat")
+@app_commands.describe(
+    clan="The Clan or Outsider group you want to check"
+)
+@app_commands.choices(clan=CLAN_CHOICES)
+async def feed_hunger_command(
+    interaction: discord.Interaction,
+    clan: app_commands.Choice[str]
+):
+    selected_clan = clan.value
+
+    async with data_lock:
+        cats = data.get("cats", {})
+        hungry_cats = []
+
+        for name, cat in cats.items():
+            prepare_cat_record(name, cat)
+
+            if cat.get("clan") != selected_clan:
+                continue
+
+            if str(cat.get("status", "Alive")).lower() == "dead":
+                continue
+
+            hunger = get_hunger_status(cat)
+
+            if hunger in ["Starving", "Hungry", "Satisfied"]:
+                hungry_cats.append((name, hunger, cat))
+
+        save_data(data)
+
+    if not hungry_cats:
+        await interaction.response.send_message(
+            f"🍽️ **{selected_clan} Hunger Check**\n\n"
+            f"Everyone in **{selected_clan}** is currently Fed or better."
+        )
+        return
+
+    hungry_cats.sort(key=lambda item: HUNGER_LEVELS.index(item[1]))
+
+    lines = [
+        f"🍽️ **{selected_clan} Hunger Check**",
+        "",
+        "These cats should eat soon:"
+    ]
+
+    for name, hunger, cat in hungry_cats:
+        status_text = format_hunger_status(cat)
+        lines.append(f"• **{name}** — {status_text}")
+
+    await interaction.response.send_message("\n".join(lines)[:1900])
 
 @bot.tree.command(name="upcomingceremonies", description="See upcoming ceremonies for the next 3 moons")
 @app_commands.describe(clan="Select clan")
@@ -5496,20 +5816,25 @@ async def bothelp(interaction: discord.Interaction):
     message = (
         "📘 **ECHOSTONE MOUNTAIN BOT HELP** 📘\n\n"
 
-        "🐾 **General Member Commands**\n"
-        "`/moon` — Check the current moon, season, and Clan status.\n"
-        "`/clan [ClanName]` — View the roster and ranks for one Clan.\n"
-        "`/cats [clan]` — View cats by Clan, or view all cats.\n"
-        "`/catinfo [Name]` — Look up a specific cat’s full information.\n"
-        "`/cattinder [Name] [Clan]` — Find age-appropriate romance options for a cat.\n"
-        "`/question` — Posts a silly OC question for the server. This can be used in any channel, but only twice per calendar day.\n\n"
+                "🐾 **General Member Commands**\n"
+        "`/catinfo [Name]` — View full details about a cat, including hunger status\n"
+        "`/cats [Clan]` — View all cats by clan or all clans\n"
+        "`/clan [ClanName]` — View one clan roster\n"
+        "`/cattinder [Name] [Clan]` — Find age-appropriate romance options\n"
+        "`/question` — Random OC question prompt system\n\n"
+
+        "🍽️ **Feeding / Hunger Commands**\n"
+        "`/feed cat [Name]` — Feed an OC normal prey and raise their hunger level by 1\n"
+        "`/feed cat [Name] [Large Prey]` — Feed an OC large prey and raise their hunger level by 2\n"
+        "`/feed hunger [Clan]` — Check which cats in a Clan are Starving, Hungry, or Satisfied\n"
+        "Hunger affects hunting rolls: Starving -2, Hungry -1, Satisfied/Fed no change, Well-fed +1, Thriving +2, Stuffed -1.\n\n"
 
         "🌦️ **Weather / World Commands**\n"
         "`/weather` or `/weatherreport` — View the current weekly weather report, if available.\n\n"
 
         "📜 **Quest / Story Commands**\n"
         "`/gatheringreport [ClanName]` — View recent story updates, quest results, injuries, rank changes, and major events for a specific Clan.\n"
-        "`/rollhelp` — Helps calculate whether an OC caught their prey by adding the roll, prey modifier, specialty prey bonus, weather modifier, quest modifier, and any other modifier against the OC’s required hunting number.\n\n"
+        "`/rollhelp` — Helps calculate whether an OC caught their prey by adding the roll, prey modifier, specialty prey bonus, weather modifier, quest modifier, hunger modifier, and any other modifier against the OC’s required hunting number.\n\n"
 
         "💭 **About /question**\n"
         "The `/question` command randomly pulls from the OC question list. Questions can be silly personality questions, modern AU-style questions, or “most likely to” prompts.\n"
@@ -5545,5 +5870,6 @@ bot.tree.add_command(mentor_group)
 bot.tree.add_command(relationship_group)
 bot.tree.add_command(medical_group)
 bot.tree.add_command(hiatus_group)
+bot.tree.add_command(feed_group)
 keep_alive()
 bot.run(TOKEN)
