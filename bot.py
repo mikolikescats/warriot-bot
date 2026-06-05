@@ -5505,145 +5505,15 @@ async def catinfo(interaction: discord.Interaction, name: str):
         if process_injury_recovery(cat):
             save_data(data)
 
-        # ─────────────────────────────
-        # CLEAN HISTORY DISPLAY
-        # ─────────────────────────────
-        history = [
-            entry for entry in cat.get("history", [])
-            if is_story_history(entry)
-        ]
-
-        formatted_history = []
-
-        for entry in history[-10:]:
-
-            # Recovery history
-            if "Recovered from injury/illness:" in entry:
-                try:
-                    moon_part, injury_part = entry.split(": ", 1)
-
-                    injury_name = injury_part.replace(
-                        "Recovered from injury/illness:",
-                        ""
-                    ).strip()
-
-                    formatted_history.append(
-                        f"**{moon_part}**: Recovered from {injury_name}"
-                    )
-
-                except Exception:
-                    formatted_history.append(format_history_entry(entry))
-
-            # Medical treatment history
-            elif "Received medical care for" in entry:
-                try:
-                    moon_part, treatment_part = entry.split(": ", 1)
-
-                    treatment_text = treatment_part.replace(
-                        "Received medical care for",
-                        ""
-                    ).strip()
-
-                    formatted_history.append(
-                        f"**{moon_part}**: Received care for {treatment_text}"
-                    )
-
-                except Exception:
-                    formatted_history.append(format_history_entry(entry))
-
-            # Older generic recovery entries
-            elif "Recovered from injury/illness" in entry:
-                formatted_history.append(format_history_entry(entry))
-
-            else:
-                formatted_history.append(format_history_entry(entry))
-
-        history_text = (
-            "\n".join(formatted_history)
-            if formatted_history else "No major history yet."
-        )
-
+        status = cat.get("status", "Alive")
         afterlife = cat.get("afterlife") or "None"
+        mentor = cat.get("mentor") or "None"
 
-        # ─────────────────────────────
-        # MENTOR DISPLAY
-        # ─────────────────────────────
-        current_mentor = cat.get("mentor")
-        previous_mentors = cat.get("previous_mentors", [])
+        apprentices = cat.get("apprentices", [])
+        apprentices_text = ", ".join(apprentices) if apprentices else "None"
 
-        mentor_parts = []
-
-        if current_mentor:
-            mentor_parts.append(current_mentor)
-
-        for mentor_name in previous_mentors:
-            mentor_parts.append(f"{mentor_name} (PAST)")
-
-        mentor = ", ".join(mentor_parts) if mentor_parts else "None"
-
-        # ─────────────────────────────
-        # APPRENTICE DISPLAY
-        # ─────────────────────────────
-        current_apps = cat.get("apprentices", [])
-        past_apps = [
-            f"{app} (PAST)"
-            for app in cat.get("past_apprentices", [])
-        ]
-
-        all_apps = current_apps + past_apps
-        apprentices = ", ".join(all_apps) if all_apps else "None"
-
-        # ─────────────────────────────
-        # HEALTH DISPLAY
-        # ─────────────────────────────
         injury_text = format_injury(cat)
 
-        # ─────────────────────────────
-        # CLEAN RELATIONSHIP DISPLAY
-        # ─────────────────────────────
-        mates = cat.get("mates", [])
-        ex_mates = cat.get("ex_mates", [])
-        family = cat.get("family", {})
-
-        relationship_lines = []
-
-        if mates:
-            relationship_lines.append(
-                f"**Mates**: {', '.join(mates)}"
-            )
-
-        if ex_mates:
-            relationship_lines.append(
-                f"**Ex-Mates**: {', '.join(ex_mates)}"
-            )
-
-        for relation, relatives in family.items():
-            if relatives:
-                relationship_lines.append(
-                    f"**{relation}**: {', '.join(relatives)}"
-                )
-
-        if relationship_lines:
-            relationships_text = (
-                "👪 **Relationships:**\n"
-                + "\n".join(relationship_lines)
-            )
-        else:
-            relationships_text = "👪 **Relationships:** None"
-
-        # ─────────────────────────────
-        # CLEAN STATUS
-        # ─────────────────────────────
-        raw_status = str(cat.get("status", "Alive")).lower()
-
-        if raw_status == "dead":
-            status = "Dead"
-        else:
-            status = "Alive"
-
-                # ─────────────────────────────
-        # FINAL DISPLAY
-        # ─────────────────────────────
         hunger_text = format_hunger_status(cat)
 
         age_text = f"{cat.get('age', 0)} moons"
@@ -5660,13 +5530,31 @@ async def catinfo(interaction: discord.Interaction, name: str):
             else:
                 hunger_text += f" (frozen {hunger_freeze_text})"
 
+        family = cat.get("family", {})
+        relationship_lines = []
+
+        if family:
+            for relation, relatives in family.items():
+                if relatives:
+                    relationship_lines.append(
+                        f"**{relation}:** {', '.join(relatives)}"
+                    )
+
+        relationships_text = (
+            "👪 **Relationships:**\n" + "\n".join(relationship_lines)
+            if relationship_lines
+            else "👪 **Relationships:** None"
+        )
+
+        history = cat.get("history", [])[-8:]
+        history_text = "\n".join(format_history_entry(entry) for entry in history) if history else "No recent history."
+
         message = (
             f"🐾 **{name}**\n"
             f"**Clan**: {cat.get('clan')}\n"
             f"**Rank**: {cat.get('rank')}\n"
         )
 
-        # Outsider faction
         if cat.get("clan") == "Outsider":
             faction = cat.get("faction") or "None"
             message += f"**Faction**: {faction}\n"
@@ -5677,13 +5565,121 @@ async def catinfo(interaction: discord.Interaction, name: str):
             f"**Current Health**: {injury_text}\n"
             f"**Hunger**: {hunger_text}\n"
             f"**Mentor**: {mentor}\n"
-            f"**Apprentices**: {apprentices}\n"
+            f"**Apprentices**: {apprentices_text}\n"
             f"**Afterlife**: {afterlife}\n\n"
             f"{relationships_text}\n\n"
             f"📜 **Recent History:**\n"
             f"{history_text}"
         )
 
+    await safe_respond(interaction, message[:1900])
+
+    feed_group = app_commands.Group(
+    name="feed",
+    description="Feed cats and check Clan hunger"
+)
+
+
+@feed_group.command(name="cat", description="Feed an OC")
+@app_commands.describe(
+    name="The cat you want to feed",
+    prey_size="Normal prey raises hunger by 1 level. Large prey raises hunger by 2 levels."
+)
+@app_commands.choices(prey_size=PREY_SIZE_CHOICES)
+async def feed_cat_command(
+    interaction: discord.Interaction,
+    name: str,
+    prey_size: app_commands.Choice[str] = None
+):
+    selected_prey_size = prey_size.value if prey_size else "normal"
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if name not in cats:
+            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            return
+
+        cat = cats[name]
+        prepare_cat_record(name, cat)
+
+        if str(cat.get("status", "Alive")).lower() == "dead":
+            await interaction.response.send_message(
+                "Dead cats cannot be fed.",
+                ephemeral=True
+            )
+            return
+
+        old_hunger, new_hunger = feed_cat(cat, selected_prey_size)
+
+        prey_text = "large prey" if selected_prey_size == "large" else "prey"
+        new_status_text = format_hunger_status(cat)
+
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🍽️ **{name}** ate some {prey_text}!\n"
+        f"**Hunger:** {old_hunger} → **{new_hunger}**\n"
+        f"**Current Status:** {new_status_text}"
+    )
+
+
+@feed_group.command(name="hunger", description="Check which cats in a Clan need to eat")
+@app_commands.describe(
+    clan="The Clan or Outsider group you want to check"
+)
+@app_commands.choices(clan=CLAN_CHOICES)
+async def feed_hunger_command(
+    interaction: discord.Interaction,
+    clan: app_commands.Choice[str]
+):
+    selected_clan = clan.value
+
+    async with data_lock:
+        cats = data.get("cats", {})
+        hungry_cats = []
+
+        for name, cat in cats.items():
+            prepare_cat_record(name, cat)
+
+            if cat.get("clan") != selected_clan:
+                continue
+
+            if str(cat.get("status", "Alive")).lower() == "dead":
+                continue
+
+            hunger = get_hunger_status(cat)
+
+            if hunger in ["Starving", "Hungry", "Satisfied"]:
+                hungry_cats.append((name, hunger, cat))
+
+        save_data(data)
+
+    if not hungry_cats:
+        await interaction.response.send_message(
+            f"🍽️ **{selected_clan} Hunger Check**\n\n"
+            f"Everyone in **{selected_clan}** is currently Fed or better."
+        )
+        return
+
+    hungry_cats.sort(key=lambda item: HUNGER_LEVELS.index(item[1]))
+
+    lines = [
+        f"🍽️ **{selected_clan} Hunger Check**",
+        "",
+        "These cats should eat soon:"
+    ]
+
+    for name, hunger, cat in hungry_cats:
+        status_text = format_hunger_status(cat)
+        lines.append(f"• **{name}** — {status_text}")
+
+    await interaction.response.send_message("\n".join(lines)[:1900])
+
+        # ─────────────────────────────
+        # MENTOR DISPLAY
+        # ─────────────────────────────
+       
 @bot.tree.command(name="mentorlist", description="View apprentices, mentors, and eligible mentors")
 @app_commands.choices(clan=CLAN_ONLY_CHOICES)
 async def mentorlist(interaction: discord.Interaction, clan: app_commands.Choice[str]):
