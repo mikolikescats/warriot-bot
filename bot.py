@@ -427,6 +427,8 @@ def prepare_cat_record(name, cat):
     cat.setdefault("hunger_level", "Satisfied")
     cat.setdefault("last_fed", None)
     cat.setdefault("last_hunger_update", None)
+    cat.setdefault("freeze_age", False)
+    cat.setdefault("freeze_hunger", False)
 
 
 def format_history_entry(entry):
@@ -686,6 +688,10 @@ def update_hunger_decay(cat):
     Starving does not decay lower.
     """
     now = datetime.now(TZ)
+    if cat.get("freeze_hunger", False):
+    return normalize_hunger_level(
+        cat.get("hunger_level", "Satisfied")
+    )
 
     hunger = normalize_hunger_level(cat.get("hunger_level", "Satisfied"))
     last_hunger_update = cat.get("last_hunger_update") or cat.get("last_fed")
@@ -1350,7 +1356,8 @@ async def run_moon_update():
             if str(cat.get("status", "Alive")).lower() == "dead":
                 continue
 
-            cat["age"] = cat.get("age", 0) + 1
+            if not cat.get("freeze_age", False):
+               cat["age"] = cat.get("age", 0) + 1
 
         # ─────────────────────────────
         # THINGS TO LOOK FORWARD TO IN THE NEW MOON
@@ -1741,6 +1748,70 @@ async def moontest(interaction: discord.Interaction, target_moon: int):
     else:
         await interaction.response.send_message(
             "Command channel not found.",
+            ephemeral=True
+        )
+
+FREEZE_TYPE_CHOICES = [
+    app_commands.Choice(name="All", value="all"),
+    app_commands.Choice(name="Hunger Only", value="hunger")
+]
+
+
+@bot.tree.command(
+    name="freezecat",
+    description="Freeze or unfreeze a cat's aging and/or hunger."
+)
+@app_commands.describe(
+    cat_name="Name of the cat",
+    freeze_type="Choose whether to freeze all or only hunger",
+    frozen="True = frozen, False = unfrozen"
+)
+@app_commands.choices(
+    freeze_type=FREEZE_TYPE_CHOICES
+)
+async def freezecat(
+    interaction: discord.Interaction,
+    cat_name: str,
+    freeze_type: app_commands.Choice[str],
+    frozen: bool
+):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        cat = data.get("cats", {}).get(cat_name)
+
+        if not cat:
+            await interaction.response.send_message(
+                f"❌ Cat '{cat_name}' was not found.",
+                ephemeral=True
+            )
+            return
+
+        if freeze_type.value == "all":
+            cat["freeze_age"] = frozen
+            cat["freeze_hunger"] = frozen
+
+        elif freeze_type.value == "hunger":
+            cat["freeze_hunger"] = frozen
+
+        save_data(data)
+
+    state = "frozen" if frozen else "unfrozen"
+
+    if freeze_type.value == "all":
+        await interaction.response.send_message(
+            f"❄️ {cat_name} is now {state} for **all freeze settings**.\n"
+            f"Age progression: {'Off' if cat.get('freeze_age') else 'On'}\n"
+            f"Hunger decay: {'Off' if cat.get('freeze_hunger') else 'On'}",
+            ephemeral=True
+        )
+
+    else:
+        await interaction.response.send_message(
+            f"❄️ {cat_name}'s hunger is now {state}.\n"
+            f"Age progression: {'Off' if cat.get('freeze_age') else 'On'}\n"
+            f"Hunger decay: {'Off' if cat.get('freeze_hunger') else 'On'}",
             ephemeral=True
         )
 
