@@ -5578,6 +5578,14 @@ async def catinfo(interaction: discord.Interaction, name: str):
     name="feed",
     description="Feed cats and check Clan hunger"
 )
+# ─────────────────────────────
+# FEED COMMANDS
+# ─────────────────────────────
+
+feed_group = app_commands.Group(
+    name="feed",
+    description="Feed cats and check Clan hunger"
+)
 
 
 @feed_group.command(name="cat", description="Feed an OC")
