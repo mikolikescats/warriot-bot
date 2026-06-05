@@ -680,20 +680,14 @@ def normalize_hunger_level(level):
 
 
 def update_hunger_decay(cat):
-    """
-    Applies hunger decay based on real-life time.
-
-    Stuffed lasts 1 week before dropping to Thriving.
-    Every other level lasts 2 weeks before dropping by 1 level.
-    Starving does not decay lower.
-    """
     now = datetime.now(TZ)
-    if cat.get("freeze_hunger", False):
-    return normalize_hunger_level(
-        cat.get("hunger_level", "Satisfied")
-    )
 
     hunger = normalize_hunger_level(cat.get("hunger_level", "Satisfied"))
+
+    if cat.get("freeze_hunger", False):
+        cat["hunger_level"] = hunger
+        return hunger
+
     last_hunger_update = cat.get("last_hunger_update") or cat.get("last_fed")
 
     if not last_hunger_update:
@@ -738,15 +732,13 @@ def get_hunger_modifier(cat):
     return HUNGER_MODIFIERS.get(hunger, 0)
 
 
-def days_until_starving(cat):
-    """
-    Returns how many days until the cat reaches Starving.
-
-    Only shown for Satisfied and Hungry because those are the warning levels.
-    """
+def days_until_next_hunger_drop(cat):
     hunger = get_hunger_status(cat)
 
-    if hunger not in ["Satisfied", "Hungry"]:
+    if hunger == "Starving":
+        return None
+
+    if cat.get("freeze_hunger", False):
         return None
 
     last_hunger_update = cat.get("last_hunger_update") or cat.get("last_fed")
@@ -759,31 +751,48 @@ def days_until_starving(cat):
     except Exception:
         return None
 
-    now = datetime.now(TZ)
+    decay_days = HUNGER_DECAY_DAYS.get(hunger)
 
-    if hunger == "Satisfied":
-        starving_time = last_update_time + timedelta(days=28)
-    else:
-        starving_time = last_update_time + timedelta(days=14)
+    if decay_days is None:
+        return None
 
-    days_left = (starving_time - now).days
+    next_drop_time = last_update_time + timedelta(days=decay_days)
+    days_left = (next_drop_time - datetime.now(TZ)).days
 
     return max(0, days_left)
+
+
+def next_hunger_level(hunger):
+    hunger = normalize_hunger_level(hunger)
+
+    if hunger == "Starving":
+        return None
+
+    current_index = HUNGER_LEVELS.index(hunger)
+    next_index = max(0, current_index - 1)
+
+    return HUNGER_LEVELS[next_index]
 
 
 def format_hunger_status(cat):
     hunger = get_hunger_status(cat)
     modifier = HUNGER_MODIFIERS.get(hunger, 0)
-    days_left = days_until_starving(cat)
 
     modifier_text = ""
     if modifier != 0:
         modifier_text = f"{format_modifier(modifier)} hunting"
 
+    if cat.get("freeze_hunger", False):
+        details = [text for text in [modifier_text, "frozen"] if text]
+        return f"{hunger} ({', '.join(details)})" if details else f"{hunger} (frozen)"
+
+    days_left = days_until_next_hunger_drop(cat)
+    next_level = next_hunger_level(hunger)
+
     countdown_text = ""
-    if days_left is not None:
+    if days_left is not None and next_level:
         day_word = "day" if days_left == 1 else "days"
-        countdown_text = f"{days_left} {day_word} til starving"
+        countdown_text = f"{days_left} {day_word} until {next_level}"
 
     details = [text for text in [modifier_text, countdown_text] if text]
 
@@ -1357,7 +1366,7 @@ async def run_moon_update():
                 continue
 
             if not cat.get("freeze_age", False):
-               cat["age"] = cat.get("age", 0) + 1
+                cat["age"] = cat.get("age", 0) + 1
 
         # ─────────────────────────────
         # THINGS TO LOOK FORWARD TO IN THE NEW MOON
@@ -5551,6 +5560,10 @@ async def catinfo(interaction: discord.Interaction, name: str):
         # ─────────────────────────────
         hunger_text = format_hunger_status(cat)
 
+        age_text = f"{cat.get('age', 0)} moons"
+        if cat.get("freeze_age", False):
+            age_text += " (frozen)"
+
         message = (
             f"🐾 **{name}**\n"
             f"**Clan**: {cat.get('clan')}\n"
@@ -5563,7 +5576,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
             message += f"**Faction**: {faction}\n"
 
         message += (
-            f"**Age**: {cat.get('age', 0)} moons\n"
+            f"**Age**: {age_text}\n"
             f"**Status**: {status}\n"
             f"**Current Health**: {injury_text}\n"
             f"**Hunger**: {hunger_text}\n"
