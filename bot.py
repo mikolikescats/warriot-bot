@@ -1862,6 +1862,8 @@ async def freezecat(
             )
             return
 
+        prepare_cat_record(cat_name, cat)
+
         now = datetime.now(TZ)
         freeze_until = None
 
@@ -1905,9 +1907,8 @@ async def freezecat(
 
     await interaction.response.send_message(
         f"❄️ **{cat_name} freeze settings updated.**\n"
-        f"Age: {'Frozen ' + age_freeze_text if age_freeze_text else 'Not frozen'}\n"
-        f"Hunger: {'Frozen ' + hunger_freeze_text if hunger_freeze_text else 'Not frozen'}",
-        ephemeral=True
+        f"**Age:** {'Frozen ' + age_freeze_text if age_freeze_text else 'Not frozen'}\n"
+        f"**Hunger:** {'Frozen ' + hunger_freeze_text if hunger_freeze_text else 'Not frozen'}"
     )
 # ─────────────────────────────
 # WEATHER SYSTEM
@@ -5640,14 +5641,24 @@ async def catinfo(interaction: discord.Interaction, name: str):
         else:
             status = "Alive"
 
-        # ─────────────────────────────
+                # ─────────────────────────────
         # FINAL DISPLAY
         # ─────────────────────────────
         hunger_text = format_hunger_status(cat)
 
         age_text = f"{cat.get('age', 0)} moons"
-        if cat.get("freeze_age", False):
-            age_text += " (frozen)"
+        age_freeze_text = freeze_remaining_text(cat, "freeze_age", "freeze_age_until")
+
+        if age_freeze_text:
+            age_text += f" (frozen {age_freeze_text})"
+
+        hunger_freeze_text = freeze_remaining_text(cat, "freeze_hunger", "freeze_hunger_until")
+
+        if hunger_freeze_text and "frozen" not in hunger_text.lower():
+            if "(" in hunger_text and hunger_text.endswith(")"):
+                hunger_text = hunger_text[:-1] + f", frozen {hunger_freeze_text})"
+            else:
+                hunger_text += f" (frozen {hunger_freeze_text})"
 
         message = (
             f"🐾 **{name}**\n"
@@ -5672,160 +5683,6 @@ async def catinfo(interaction: discord.Interaction, name: str):
             f"📜 **Recent History:**\n"
             f"{history_text}"
         )
-
-    await safe_respond(interaction, message[:1900])
-
-feed_group = app_commands.Group(
-    name="feed",
-    description="Feed cats and check Clan hunger"
-)
-
-
-@feed_group.command(name="cat", description="Feed an OC")
-@app_commands.describe(
-    name="The cat you want to feed",
-    prey_size="Normal prey raises hunger by 1 level. Large prey raises hunger by 2 levels."
-)
-@app_commands.choices(prey_size=PREY_SIZE_CHOICES)
-async def feed_cat_command(
-    interaction: discord.Interaction,
-    name: str,
-    prey_size: app_commands.Choice[str] = None
-):
-    selected_prey_size = prey_size.value if prey_size else "normal"
-
-    async with data_lock:
-        cats = data.get("cats", {})
-
-        if name not in cats:
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
-            return
-
-        cat = cats[name]
-        prepare_cat_record(name, cat)
-
-        if str(cat.get("status", "Alive")).lower() == "dead":
-            await interaction.response.send_message(
-                "Dead cats cannot be fed.",
-                ephemeral=True
-            )
-            return
-
-        old_hunger, new_hunger = feed_cat(cat, selected_prey_size)
-
-        prey_text = "large prey" if selected_prey_size == "large" else "prey"
-        new_status_text = format_hunger_status(cat)
-
-        save_data(data)
-
-    await interaction.response.send_message(
-        f"🍽️ **{name}** ate some {prey_text}!\n"
-        f"**Hunger:** {old_hunger} → **{new_hunger}**\n"
-        f"**Current Status:** {new_status_text}"
-    )
-
-
-@feed_group.command(name="hunger", description="Check which cats in a Clan need to eat")
-@app_commands.describe(
-    clan="The Clan or Outsider group you want to check"
-)
-@app_commands.choices(clan=CLAN_CHOICES)
-async def feed_hunger_command(
-    interaction: discord.Interaction,
-    clan: app_commands.Choice[str]
-):
-    selected_clan = clan.value
-
-    async with data_lock:
-        cats = data.get("cats", {})
-        hungry_cats = []
-
-        for name, cat in cats.items():
-            prepare_cat_record(name, cat)
-
-            if cat.get("clan") != selected_clan:
-                continue
-
-            if str(cat.get("status", "Alive")).lower() == "dead":
-                continue
-
-            hunger = get_hunger_status(cat)
-
-            if hunger in ["Starving", "Hungry", "Satisfied"]:
-                hungry_cats.append((name, hunger, cat))
-
-        save_data(data)
-
-    if not hungry_cats:
-        await interaction.response.send_message(
-            f"🍽️ **{selected_clan} Hunger Check**\n\n"
-            f"Everyone in **{selected_clan}** is currently Fed or better."
-        )
-        return
-
-    hungry_cats.sort(key=lambda item: HUNGER_LEVELS.index(item[1]))
-
-    lines = [
-        f"🍽️ **{selected_clan} Hunger Check**",
-        "",
-        "These cats should eat soon:"
-    ]
-
-    for name, hunger, cat in hungry_cats:
-        status_text = format_hunger_status(cat)
-        lines.append(f"• **{name}** — {status_text}")
-
-    await interaction.response.send_message("\n".join(lines)[:1900])
-
-@bot.tree.command(name="upcomingceremonies", description="See upcoming ceremonies for the next 3 moons")
-@app_commands.describe(clan="Select clan")
-@app_commands.choices(clan=CLAN_ONLY_CHOICES)
-async def upcomingceremonies(interaction: discord.Interaction, clan: app_commands.Choice[str]):
-    selected_clan = clan.value
-
-    upcoming = {
-        1: [],
-        2: [],
-        3: []
-    }
-
-    for name, cat in data.get("cats", {}).items():
-        if cat.get("clan") != selected_clan:
-            continue
-
-        if str(cat.get("status", "Alive")).lower() == "dead":
-            continue
-
-        age = cat.get("age", 0)
-        rank = cat.get("rank")
-
-        for moons_ahead in range(1, 4):
-            future_age = age + moons_ahead
-
-            if rank == "Kit" and future_age >= 6:
-                upcoming[moons_ahead].append(f"🐾 **{name}** will become an Apprentice")
-                break
-
-            if rank == "Apprentice" and future_age >= 12:
-                upcoming[moons_ahead].append(f"⚔️ **{name}** will become a Warrior")
-                break
-
-            if rank in AGING_TO_ELDER_RANKS and future_age >= 95:
-                upcoming[moons_ahead].append(f"🍂 **{name}** will become an Elder")
-                break
-
-    lines = [f"🌙 Upcoming Ceremonies for **{selected_clan}**"]
-
-    for moons_ahead in range(1, 4):
-        moon_number = data.get("moon", 0) + moons_ahead
-        lines.append(f"\n**Moon {moon_number}**")
-
-        if upcoming[moons_ahead]:
-            lines.extend(upcoming[moons_ahead])
-        else:
-            lines.append("No ceremonies expected.")
-
-    await interaction.response.send_message("\n".join(lines)[:1900])
 
 @bot.tree.command(name="mentorlist", description="View apprentices, mentors, and eligible mentors")
 @app_commands.choices(clan=CLAN_ONLY_CHOICES)
