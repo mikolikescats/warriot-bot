@@ -429,6 +429,8 @@ def prepare_cat_record(name, cat):
     cat.setdefault("last_hunger_update", None)
     cat.setdefault("freeze_age", False)
     cat.setdefault("freeze_hunger", False)
+    cat.setdefault("freeze_age_until", None)
+    cat.setdefault("freeze_hunger_until", None)
 
 
 def format_history_entry(entry):
@@ -684,7 +686,7 @@ def update_hunger_decay(cat):
 
     hunger = normalize_hunger_level(cat.get("hunger_level", "Satisfied"))
 
-    if cat.get("freeze_hunger", False):
+    if is_hunger_frozen(cat):
         cat["hunger_level"] = hunger
         return hunger
 
@@ -1365,7 +1367,7 @@ async def run_moon_update():
             if str(cat.get("status", "Alive")).lower() == "dead":
                 continue
 
-            if not cat.get("freeze_age", False):
+            if not is_age_frozen(cat):
                 cat["age"] = cat.get("age", 0) + 1
 
         # ─────────────────────────────
@@ -1760,6 +1762,60 @@ async def moontest(interaction: discord.Interaction, target_moon: int):
             ephemeral=True
         )
 
+def freeze_is_active(cat, freeze_key, until_key):
+    if cat.get(freeze_key, False):
+        return True
+
+    freeze_until = cat.get(until_key)
+
+    if not freeze_until:
+        return False
+
+    try:
+        until_time = datetime.fromisoformat(freeze_until)
+    except Exception:
+        return False
+
+    if datetime.now(TZ) <= until_time:
+        return True
+
+    cat[until_key] = None
+    return False
+
+
+def is_age_frozen(cat):
+    return freeze_is_active(cat, "freeze_age", "freeze_age_until")
+
+
+def is_hunger_frozen(cat):
+    return freeze_is_active(cat, "freeze_hunger", "freeze_hunger_until")
+
+
+def freeze_remaining_text(cat, freeze_key, until_key):
+    if cat.get(freeze_key, False):
+        return "indefinitely"
+
+    freeze_until = cat.get(until_key)
+
+    if not freeze_until:
+        return None
+
+    try:
+        until_time = datetime.fromisoformat(freeze_until)
+    except Exception:
+        return None
+
+    remaining = until_time - datetime.now(TZ)
+
+    if remaining.total_seconds() <= 0:
+        cat[until_key] = None
+        return None
+
+    days = remaining.days + 1
+    day_word = "day" if days == 1 else "days"
+
+    return f"{days} {day_word}"
+
 FREEZE_TYPE_CHOICES = [
     app_commands.Choice(name="All", value="all"),
     app_commands.Choice(name="Hunger Only", value="hunger")
@@ -1773,7 +1829,8 @@ FREEZE_TYPE_CHOICES = [
 @app_commands.describe(
     cat_name="Name of the cat",
     freeze_type="Choose whether to freeze all or only hunger",
-    frozen="True = frozen, False = unfrozen"
+    frozen="True = freeze, False = unfreeze",
+    days="Optional number of days. Leave blank for indefinite freeze."
 )
 @app_commands.choices(
     freeze_type=FREEZE_TYPE_CHOICES
@@ -1782,9 +1839,17 @@ async def freezecat(
     interaction: discord.Interaction,
     cat_name: str,
     freeze_type: app_commands.Choice[str],
-    frozen: bool
+    frozen: bool,
+    days: int = None
 ):
     if not await staff_command_check(interaction):
+        return
+
+    if days is not None and days <= 0:
+        await interaction.response.send_message(
+            "❌ Days must be 1 or higher. Leave days blank for an indefinite freeze.",
+            ephemeral=True
+        )
         return
 
     async with data_lock:
@@ -1797,33 +1862,53 @@ async def freezecat(
             )
             return
 
+        now = datetime.now(TZ)
+        freeze_until = None
+
+        if frozen and days is not None:
+            freeze_until = (now + timedelta(days=days)).isoformat()
+
         if freeze_type.value == "all":
-            cat["freeze_age"] = frozen
-            cat["freeze_hunger"] = frozen
+            if frozen:
+                if days is None:
+                    cat["freeze_age"] = True
+                    cat["freeze_hunger"] = True
+                    cat["freeze_age_until"] = None
+                    cat["freeze_hunger_until"] = None
+                else:
+                    cat["freeze_age"] = False
+                    cat["freeze_hunger"] = False
+                    cat["freeze_age_until"] = freeze_until
+                    cat["freeze_hunger_until"] = freeze_until
+            else:
+                cat["freeze_age"] = False
+                cat["freeze_hunger"] = False
+                cat["freeze_age_until"] = None
+                cat["freeze_hunger_until"] = None
 
         elif freeze_type.value == "hunger":
-            cat["freeze_hunger"] = frozen
+            if frozen:
+                if days is None:
+                    cat["freeze_hunger"] = True
+                    cat["freeze_hunger_until"] = None
+                else:
+                    cat["freeze_hunger"] = False
+                    cat["freeze_hunger_until"] = freeze_until
+            else:
+                cat["freeze_hunger"] = False
+                cat["freeze_hunger_until"] = None
+
+        age_freeze_text = freeze_remaining_text(cat, "freeze_age", "freeze_age_until")
+        hunger_freeze_text = freeze_remaining_text(cat, "freeze_hunger", "freeze_hunger_until")
 
         save_data(data)
 
-    state = "frozen" if frozen else "unfrozen"
-
-    if freeze_type.value == "all":
-        await interaction.response.send_message(
-            f"❄️ {cat_name} is now {state} for **all freeze settings**.\n"
-            f"Age progression: {'Off' if cat.get('freeze_age') else 'On'}\n"
-            f"Hunger decay: {'Off' if cat.get('freeze_hunger') else 'On'}",
-            ephemeral=True
-        )
-
-    else:
-        await interaction.response.send_message(
-            f"❄️ {cat_name}'s hunger is now {state}.\n"
-            f"Age progression: {'Off' if cat.get('freeze_age') else 'On'}\n"
-            f"Hunger decay: {'Off' if cat.get('freeze_hunger') else 'On'}",
-            ephemeral=True
-        )
-
+    await interaction.response.send_message(
+        f"❄️ **{cat_name} freeze settings updated.**\n"
+        f"Age: {'Frozen ' + age_freeze_text if age_freeze_text else 'Not frozen'}\n"
+        f"Hunger: {'Frozen ' + hunger_freeze_text if hunger_freeze_text else 'Not frozen'}",
+        ephemeral=True
+    )
 # ─────────────────────────────
 # WEATHER SYSTEM
 # ─────────────────────────────
