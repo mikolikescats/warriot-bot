@@ -81,6 +81,7 @@ MEDICAL_COMMAND_CHANNEL_ID = 1503486789900570784
 WEATHER_CHANNEL_ID = 1441502516591202394
 WEATHER_REPORT_ROLE_ID = 1500967820194877490
 HIATUS_CHANNEL_ID = 1441505660905984120
+DEATH_ANNOUNCEMENT_CHANNEL_ID = 1441498271842304183
 
 HELPER_ROLE_ID = 1484027097784516668
 MODERATOR_ROLE_ID = 1441506626371715103
@@ -740,7 +741,7 @@ def days_until_next_hunger_drop(cat):
     if hunger == "Starving":
         return None
 
-    if cat.get("freeze_hunger", False):
+    if is_hunger_frozen(cat):
         return None
 
     last_hunger_update = cat.get("last_hunger_update") or cat.get("last_fed")
@@ -784,9 +785,16 @@ def format_hunger_status(cat):
     if modifier != 0:
         modifier_text = f"{format_modifier(modifier)} hunting"
 
-    if cat.get("freeze_hunger", False):
-        details = [text for text in [modifier_text, "frozen"] if text]
-        return f"{hunger} ({', '.join(details)})" if details else f"{hunger} (frozen)"
+    hunger_freeze_text = freeze_remaining_text(
+        cat,
+        "freeze_hunger",
+        "freeze_hunger_until"
+    )
+
+    if hunger_freeze_text:
+        frozen_text = f"frozen {hunger_freeze_text}"
+        details = [text for text in [modifier_text, frozen_text] if text]
+        return f"{hunger} ({', '.join(details)})"
 
     days_left = days_until_next_hunger_drop(cat)
     next_level = next_hunger_level(hunger)
@@ -1371,10 +1379,35 @@ async def run_moon_update():
                 cat["age"] = cat.get("age", 0) + 1
 
         # ─────────────────────────────
+        # AUTOMATIC KIT → APPRENTICE
+        # ─────────────────────────────
+
+        for name, cat in data.get("cats", {}).items():
+            prepare_cat_record(name, cat)
+
+            if str(cat.get("status", "Alive")).lower() == "dead":
+                continue
+
+            if cat.get("clan") == "Outsider":
+                continue
+
+            if cat.get("rank") == "Kit" and cat.get("age", 0) >= 6:
+                cat["rank"] = "Apprentice"
+                cat["mentor"] = None
+
+                add_history(cat, "Rank changed to Apprentice")
+
+                report["apprentice_news"].append(
+                    f"🐾 {name} became an Apprentice."
+                )
+
+        # ─────────────────────────────
         # THINGS TO LOOK FORWARD TO IN THE NEW MOON
         # ─────────────────────────────
 
         for name, cat in data.get("cats", {}).items():
+            prepare_cat_record(name, cat)
+
             if str(cat.get("status", "Alive")).lower() == "dead":
                 continue
 
@@ -1424,11 +1457,6 @@ async def run_moon_update():
         save_data(data)
 
         return report
-
-# ─────────────────────────────
-# CLAN REPORT BUILDER
-# ─────────────────────────────
-
 
 # ─────────────────────────────
 # CLAN REPORT BUILDER
@@ -2511,6 +2539,7 @@ async def botinfo(interaction: discord.Interaction):
 
         "🌙 **Moon / System Commands**\n"
         "`/moon` — View the current moon, season, and clan status\n"
+        "`/moontest [Moon Number]` — Staff only. Preview what a future moon report would look like without saving changes\n"
         "`/advancemoon` — Staff only. Manually advances one moon and posts the report\n"
         "`/resetmoon` — Staff only. Resets moon count and adjusts living cat ages\n"
         "`/weatherreport` — Manually post or view this week's weather report\n"
@@ -2521,14 +2550,17 @@ async def botinfo(interaction: discord.Interaction):
         "📜 **Quest / Gathering Commands**\n"
         "`/quests` — Staff only. Manually post new biweekly quests\n"
         "`/questresult` — Staff only. Mark a Clan or Outsider quest as passed or failed\n"
-        "`/gatheringreport [ClanName]` — Generate a Clan-specific report including recent promotions, deaths, injuries, quest results, and major story changes\n\n"
+        "`/gatheringreport [ClanName]` — Generate a Clan-specific report including recent promotions, deaths, injuries, quest results, and major story changes\n"
+        "`/rollhelp` — Helps calculate whether an OC caught their prey using their roll, modifiers, and required hunting number\n\n"
 
         "🐾 **General Member Commands**\n"
         "`/catinfo [Name]` — View full details about a cat\n"
         "`/cats [Clan]` — View all cats by clan or all clans\n"
         "`/clan [ClanName]` — View one clan roster\n"
         "`/cattinder [Name] [Clan]` — Find age-appropriate romance options\n"
-        "`/question` — Random OC question prompt system\n\n"
+        "`/question` — Random OC question prompt system\n"
+        "`/needsmentor` — View apprentices and medicine cat apprentices who do not currently have mentors\n"
+        "`/upcomingceremonies` — View cats eligible for apprentice ceremonies, warrior assessments, or elder retirement\n\n"
         
         "🍽️ **Feeding / Hunger Commands**\n"
         "`/feed cat [Name]` — Feed an OC normal prey and raise their hunger level by 1\n"
@@ -2546,7 +2578,9 @@ async def botinfo(interaction: discord.Interaction):
         "`/cat age` — Set exact age\n"
         "`/cat markdead` — Mark a living cat as dead\n"
         "`/cat delayceremony` — Delay automatic rank-up ceremonies\n"
-        "`/cat tinderhide` — Hide/unhide a cat from Cat Tinder\n\n"
+        "`/cat tinderhide` — Hide/unhide a cat from Cat Tinder\n"
+        "`/freezecat` — Staff only. Freeze or unfreeze a cat's age and/or hunger, either indefinitely or for a set number of days\n"
+        "`/frozenlist` — Staff only. View all cats with active age or hunger freezes\n\n"
         "`/cat clearhistorymoon` — Delete cat history entries from a specific moon\n"
 
         "🩹 **Staff Injury Commands**\n"
@@ -2966,9 +3000,18 @@ async def cat_rename(interaction: discord.Interaction, old_name: str, new_name: 
 
 
 @cat_group.command(name="markdead", description="Mark a cat as dead")
-@app_commands.describe(name="Cat name", afterlife="Afterlife destination")
+@app_commands.describe(
+    name="Cat name",
+    afterlife="Afterlife destination",
+    cause="Optional cause of death"
+)
 @app_commands.choices(afterlife=AFTERLIFE_CHOICES)
-async def cat_markdead(interaction: discord.Interaction, name: str, afterlife: app_commands.Choice[str]):
+async def cat_markdead(
+    interaction: discord.Interaction,
+    name: str,
+    afterlife: app_commands.Choice[str],
+    cause: str = None
+):
     if not await staff_command_check(interaction):
         return
 
@@ -2981,17 +3024,30 @@ async def cat_markdead(interaction: discord.Interaction, name: str, afterlife: a
         cat["status"] = "Dead"
         cat["afterlife"] = afterlife.value
         cat["death_moon"] = data["moon"]
-        add_history(cat, f"Died and went to {afterlife.value}")
+        cat["cause_of_death"] = cause
+
+        if cause:
+            add_history(cat, f"Died from {cause} and went to {afterlife.value}")
+        else:
+            add_history(cat, f"Died and went to {afterlife.value}")
+
         save_data(data)
 
-    await interaction.response.send_message(f"💀 **{name}** has been sent to **{afterlife.value}**.")
+    await interaction.response.send_message(
+        f"💀 **{name}** has been sent to **{afterlife.value}**."
+    )
 
-    channel = bot.get_channel(REPORT_CHANNEL_ID)
+    channel = bot.get_channel(DEATH_ANNOUNCEMENT_CHANNEL_ID)
     if channel:
-        await channel.send(
+        death_message = (
             f"💀 **Death Announcement**\n"
             f"**{name}** has died and now walks in **{afterlife.value}**."
         )
+
+        if cause:
+            death_message += f"\n**Cause of Death:** {cause}"
+
+        await channel.send(death_message)
 
 
 @cat_group.command(name="adddead", description="Add a cat who is already dead")
@@ -5574,10 +5630,60 @@ async def catinfo(interaction: discord.Interaction, name: str):
 
     await safe_respond(interaction, message[:1900])
 
-    feed_group = app_commands.Group(
-    name="feed",
-    description="Feed cats and check Clan hunger"
+# ─────────────────────────────
+# NEEDS MENTOR COMMAND
+# ─────────────────────────────
+
+@bot.tree.command(
+    name="needsmentor",
+    description="View apprentices who do not currently have mentors"
 )
+async def needsmentor(interaction: discord.Interaction):
+    async with data_lock:
+        needs_mentor = []
+
+        for name, cat in data.get("cats", {}).items():
+            prepare_cat_record(name, cat)
+
+            if str(cat.get("status", "Alive")).lower() == "dead":
+                continue
+
+            clan = cat.get("clan", "Unknown Clan")
+            rank = cat.get("rank")
+            age = cat.get("age", 0)
+            mentor = cat.get("mentor")
+
+            if rank in ["Apprentice", "Medicine Cat Apprentice"] and not mentor:
+                needs_mentor.append((clan, rank, name, age))
+
+    if not needs_mentor:
+        await interaction.response.send_message(
+            "🐾 **Apprentices Needing Mentors**\n\nEvery apprentice currently has a mentor assigned."
+        )
+        return
+
+    needs_mentor.sort(key=lambda item: (item[0], item[1], item[2]))
+
+    lines = [
+        "🐾 **Apprentices Needing Mentors**",
+        ""
+    ]
+
+    current_clan = None
+
+    for clan, rank, name, age in needs_mentor:
+        if clan != current_clan:
+            current_clan = clan
+            lines.append(f"### **{clan}**")
+
+        icon = "🌿" if rank == "Medicine Cat Apprentice" else "🐾"
+
+        lines.append(
+            f"{icon} **{name}** — {rank}, {age} moons"
+        )
+
+    await interaction.response.send_message("\n".join(lines)[:1900])
+    
 # ─────────────────────────────
 # FEED COMMANDS
 # ─────────────────────────────
@@ -5683,6 +5789,179 @@ async def feed_hunger_command(
         lines.append(f"• **{name}** — {status_text}")
 
     await interaction.response.send_message("\n".join(lines)[:1900])
+
+# ─────────────────────────────
+# UPCOMING CEREMONIES PUBLIC COMMAND
+# ─────────────────────────────
+
+@bot.tree.command(
+    name="upcomingceremonies",
+    description="View cats eligible for apprentice, warrior, or elder ceremonies"
+)
+async def upcomingceremonies(interaction: discord.Interaction):
+    async with data_lock:
+        apprentice_ready = []
+        warrior_ready = []
+        elder_ready = []
+
+        for name, cat in data.get("cats", {}).items():
+            prepare_cat_record(name, cat)
+
+            if str(cat.get("status", "Alive")).lower() == "dead":
+                continue
+
+            clan = cat.get("clan", "Unknown Clan")
+            rank = cat.get("rank")
+            age = cat.get("age", 0)
+
+            if rank == "Kit" and age >= 6:
+                apprentice_ready.append((clan, name, age))
+
+            elif rank == "Apprentice" and age >= 11:
+                warrior_ready.append((clan, name, age))
+
+            elif rank in AGING_TO_ELDER_RANKS and age >= 95:
+                elder_ready.append((clan, name, age, rank))
+
+    def sort_key(item):
+        return (item[0], item[1])
+
+    apprentice_ready.sort(key=sort_key)
+    warrior_ready.sort(key=sort_key)
+    elder_ready.sort(key=sort_key)
+
+    lines = [
+        "🌙 **Upcoming Ceremonies**",
+        "",
+        "This shows cats who are currently eligible for rank-related ceremonies.",
+        ""
+    ]
+
+    lines.append("### 🐾 Kits Eligible to Become Apprentices")
+    if apprentice_ready:
+        current_clan = None
+
+        for clan, name, age in apprentice_ready:
+            if clan != current_clan:
+                current_clan = clan
+                lines.append(f"\n**{clan}**")
+
+            lines.append(f"🐾 **{name}** — {age} moons")
+    else:
+        lines.append("No kits are currently eligible to become apprentices.")
+
+    lines.append("")
+    lines.append("### ⚔ Apprentices Eligible for Warrior Assessments")
+    if warrior_ready:
+        current_clan = None
+
+        for clan, name, age in warrior_ready:
+            if clan != current_clan:
+                current_clan = clan
+                lines.append(f"\n**{clan}**")
+
+            lines.append(f"⚔ **{name}** — {age} moons")
+    else:
+        lines.append("No apprentices are currently eligible for warrior assessments.")
+
+    lines.append("")
+    lines.append("### 🍂 Warriors Eligible to Retire as Elders")
+    if elder_ready:
+        current_clan = None
+
+        for clan, name, age, rank in elder_ready:
+            if clan != current_clan:
+                current_clan = clan
+                lines.append(f"\n**{clan}**")
+
+            lines.append(f"🍂 **{name}** — {age} moons | Current Rank: {rank}")
+    else:
+        lines.append("No warriors are currently eligible to retire as elders.")
+
+    await interaction.response.send_message("\n".join(lines)[:1900])
+
+# ─────────────────────────────
+# FROZEN LIST COMMAND
+# ─────────────────────────────
+
+@bot.tree.command(
+    name="frozenlist",
+    description="View all cats with age or hunger freezes"
+)
+async def frozenlist(interaction: discord.Interaction):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        frozen_cats = []
+
+        for name, cat in data.get("cats", {}).items():
+            prepare_cat_record(name, cat)
+
+            if str(cat.get("status", "Alive")).lower() == "dead":
+                continue
+
+            age_freeze_text = freeze_remaining_text(
+                cat,
+                "freeze_age",
+                "freeze_age_until"
+            )
+
+            hunger_freeze_text = freeze_remaining_text(
+                cat,
+                "freeze_hunger",
+                "freeze_hunger_until"
+            )
+
+            if age_freeze_text or hunger_freeze_text:
+                clan = cat.get("clan", "Unknown Clan")
+                rank = cat.get("rank", "Unknown Rank")
+
+                frozen_cats.append(
+                    (
+                        clan,
+                        name,
+                        rank,
+                        age_freeze_text,
+                        hunger_freeze_text
+                    )
+                )
+
+        save_data(data)
+
+    if not frozen_cats:
+        await interaction.response.send_message(
+            "❄️ **Frozen Cats**\n\nNo cats are currently frozen.",
+            ephemeral=True
+        )
+        return
+
+    frozen_cats.sort(key=lambda item: (item[0], item[1]))
+
+    lines = [
+        "❄️ **Frozen Cats**",
+        ""
+    ]
+
+    current_clan = None
+
+    for clan, name, rank, age_freeze_text, hunger_freeze_text in frozen_cats:
+        if clan != current_clan:
+            current_clan = clan
+            lines.append(f"### **{clan}**")
+
+        age_status = f"Frozen {age_freeze_text}" if age_freeze_text else "Not frozen"
+        hunger_status = f"Frozen {hunger_freeze_text}" if hunger_freeze_text else "Not frozen"
+
+        lines.append(
+            f"• **{name}** — {rank}\n"
+            f"  Age: {age_status}\n"
+            f"  Hunger: {hunger_status}"
+        )
+
+    await interaction.response.send_message("\n".join(lines)[:1900])
+
+
 
         # ─────────────────────────────
         # MENTOR DISPLAY
@@ -5851,7 +6130,9 @@ async def bothelp(interaction: discord.Interaction):
         "`/cats [Clan]` — View all cats by clan or all clans\n"
         "`/clan [ClanName]` — View one clan roster\n"
         "`/cattinder [Name] [Clan]` — Find age-appropriate romance options\n"
-        "`/question` — Random OC question prompt system\n\n"
+        "`/question` — Random OC question prompt system\n"
+        "`/needsmentor` — View apprentices and medicine cat apprentices who do not currently have mentors\n"
+        "`/upcomingceremonies` — View kits, apprentices, and older warriors eligible for ceremonies or assessments\n\n"
 
         "🍽️ **Feeding / Hunger Commands**\n"
         "`/feed cat [Name]` — Feed an OC normal prey and raise their hunger level by 1\n"
