@@ -2577,6 +2577,7 @@ async def botinfo(interaction: discord.Interaction):
         "`/cat rank` — Change rank manually\n"
         "`/cat age` — Set exact age\n"
         "`/cat markdead` — Mark a living cat as dead\n"
+        "`/changeclan` — Staff only. Move a cat to a different Clan or to/from Outsider\n"
         "`/cat delayceremony` — Delay automatic rank-up ceremonies\n"
         "`/cat tinderhide` — Hide/unhide a cat from Cat Tinder\n"
         "`/freezecat` — Staff only. Freeze or unfreeze a cat's age and/or hunger, either indefinitely or for a set number of days\n"
@@ -2960,6 +2961,115 @@ async def cat_rank(interaction: discord.Interaction, name: str, rank: app_comman
         save_data(data)
 
     await interaction.response.send_message(f"⚔ **{name}** is now **{rank.value}**.")
+
+
+@bot.tree.command(
+    name="changeclan",
+    description="Change a cat's Clan or move them to/from Outsider."
+)
+@app_commands.describe(
+    cat_name="Name of the cat",
+    new_clan="The new Clan or Outsider",
+    new_rank="Optional new rank. If left blank, the bot will keep or safely adjust the rank."
+)
+@app_commands.choices(
+    new_clan=CLAN_CHOICES,
+    new_rank=RANK_CHOICES
+)
+async def changeclan(
+    interaction: discord.Interaction,
+    cat_name: str,
+    new_clan: app_commands.Choice[str],
+    new_rank: app_commands.Choice[str] = None
+):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if cat_name not in cats:
+            await interaction.response.send_message(
+                f"❌ Cat '{cat_name}' was not found.",
+                ephemeral=True
+            )
+            return
+
+        cat = cats[cat_name]
+        prepare_cat_record(cat_name, cat)
+
+        old_clan = cat.get("clan", "Unknown Clan")
+        old_rank = cat.get("rank", "Unknown Rank")
+        selected_clan = new_clan.value
+
+        selected_rank = new_rank.value if new_rank else old_rank
+        rank_note = None
+
+        # If no rank is provided, keep the current rank when possible.
+        # If the current rank does not work in the new Clan type, choose a safe default.
+        if new_rank is None:
+            if selected_clan == "Outsider" and selected_rank in CLAN_RANKS:
+                selected_rank = "Loner"
+                rank_note = "Rank was automatically changed to Loner because Outsiders cannot use Clan ranks."
+
+            elif selected_clan != "Outsider" and selected_rank in OUTSIDER_RANKS:
+                selected_rank = "Warrior"
+                rank_note = "Rank was automatically changed to Warrior because Clan cats cannot use Outsider ranks."
+
+        validation_error = validate_cat_rank(selected_clan, selected_rank, cat.get("faction"))
+
+        # Moving into a Clan clears faction first, then validates again.
+        if validation_error and selected_clan != "Outsider":
+            cat["faction"] = None
+            validation_error = validate_cat_rank(selected_clan, selected_rank, cat.get("faction"))
+
+        if validation_error:
+            await interaction.response.send_message(validation_error, ephemeral=True)
+            return
+
+        old_mentor = cat.get("mentor")
+
+        # If the cat changes Clan or stops being an apprentice, clear mentor links cleanly.
+        if old_mentor and (old_clan != selected_clan or selected_rank not in ["Apprentice", "Medicine Cat Apprentice"]):
+            if old_mentor in cats:
+                mentor_cat = cats[old_mentor]
+
+                if cat_name in mentor_cat.get("apprentices", []):
+                    mentor_cat["apprentices"].remove(cat_name)
+
+                add_history(mentor_cat, f"No longer mentoring {cat_name} after Clan/rank change")
+
+            cat["mentor"] = None
+
+        # If the cat is no longer in a Clan, clear Clan-specific apprentice lists.
+        if selected_clan == "Outsider":
+            cat["apprentices"] = []
+
+        # Clan cats cannot keep outsider factions.
+        if selected_clan != "Outsider":
+            cat["faction"] = None
+
+        cat["clan"] = selected_clan
+        cat["rank"] = selected_rank
+
+        add_history(cat, f"Clan changed from {old_clan} to {selected_clan}")
+
+        if old_rank != selected_rank:
+            add_history(cat, f"Rank changed to {selected_rank}")
+
+        save_data(data)
+
+    response_lines = [
+        f"⛺ **{cat_name}** has been moved.",
+        f"**Old Clan:** {old_clan}",
+        f"**New Clan:** {selected_clan}",
+        f"**Rank:** {old_rank} → {selected_rank}"
+    ]
+
+    if rank_note:
+        response_lines.append(f"-# {rank_note}")
+
+    await interaction.response.send_message("\n".join(response_lines))
 
 @cat_group.command(name="rename", description="Rename a cat")
 @app_commands.describe(old_name="Current name", new_name="New name")
