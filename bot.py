@@ -636,6 +636,13 @@ async def send_long_message(channel, text):
         if chunk.strip():
             await channel.send(chunk)
 
+
+def format_modifier(value):
+    if value > 0:
+        return f"+{value}"
+
+    return str(value)
+
 # ─────────────────────────────
 # HUNGER / FEEDING SYSTEM
 # ─────────────────────────────
@@ -2343,6 +2350,9 @@ async def on_ready():
     if not biweekly_quest_report.is_running():
         biweekly_quest_report.start()
 
+    if not quest_reminders.is_running():
+        quest_reminders.start()
+
     if not check_hiatuses.is_running():
         check_hiatuses.start()
 
@@ -2548,8 +2558,8 @@ async def botinfo(interaction: discord.Interaction):
         "`/revertmoon` — Staff only. Reverts to the saved state before the last moon advance\n\n"
 
         "📜 **Quest / Gathering Commands**\n"
-        "`/quests` — Staff only. Manually post new biweekly quests\n"
-        "`/questresult` — Staff only. Mark a Clan or Outsider quest as passed or failed\n"
+        "`/quest force` — Quest manager only. Force-post a new 2-week quest cycle and apply consequences for unfinished quests\n"
+        "`/quest complete [Clan]` — Staff only. Mark a Clan or Outsider quest as complete and post the reward\n"
         "`/gatheringreport [ClanName]` — Generate a Clan-specific report including recent promotions, deaths, injuries, quest results, and major story changes\n"
         "`/rollhelp` — Helps calculate whether an OC caught their prey using their roll, modifiers, and required hunting number\n\n"
 
@@ -4401,10 +4411,10 @@ async def weekly_weather_report():
 # QUEST SYSTEM
 # ─────────────────────────────
 
-ROLEPLAY_ANNOUNCEMENTS_ROLE_ID = 1442996267470033026
 QUEST_CHANNEL_ID = 1441502516591202394
-ROLEPLAY_ANNOUNCEMENTS_ROLE_ID = 1442996267470033026
-QUEST_CHANNEL_ID = 1441502516591202394
+QUEST_FORCE_ROLE_ID = 1441507932369063957
+QUEST_DURATION_DAYS = 14
+QUEST_SYSTEM_VERSION = "v2_fun_categories"
 
 CLAN_ROLE_IDS = {
     "BlizzardClan": 1445529729309605978,
@@ -4414,546 +4424,25 @@ CLAN_ROLE_IDS = {
     "Outsider": 1445530928083505294
 }
 
-def clan_mention(group):
-    role_id = CLAN_ROLE_IDS.get(group)
-
-    if not role_id:
-        return group
-
-    return f"<@&{role_id}>"
-
-# ─────────────────────────────
-# QUEST DATABASE
-# ─────────────────────────────
-
-QUEST_TEXT = """
-BLIZZARDCLAN
-
-**Whitecough Outbreak**
-A brutal mountain chill has swept through the Hollow of Teeth, and harsh coughs are beginning to echo beneath the Frozen Teeth. Roll a D4 for each BlizzardClan cat: 1-2 = sick, 3-4 = healthy. If sick, roll a D6 for severity. If your initial D4 roll was a 1, add +1 to severity. Severity: 1 = Very Minor, 2-3 = Mild, 4-5 = Moderate, 6-7 = Serious. Medicine cats must treat the sick before whitecough tightens its icy grip. Remember: no OC will ever be killed without your permission.
-
-**Catch 5 Snowshoe Hares**
-Fresh tracks streak across Cloud Plateau! BlizzardClan has 2 real-life weeks to catch 5 snowshoe hares before they vanish deeper into the snowfields.
-
-**Catch 10 Frost Tunnel Mice**
-The tunnels are practically squeaking with prey. Hunt 10 mice from Frost Tunnels before they scatter through the ice cracks.
-
-**Ptarmigan Patrol**
-A sharp-eyed patrol has spotted a hardy flock of ptarmigan scratching through the snowdrifts near Glacier’s Edge. BlizzardClan must catch 4 before the next mountain storm sends them skyward.
-
-**Young Cats Demand Storytime**
-BlizzardClan’s kits and Apprentices are bouncing off icy den walls. A warrior or elder must gather them for a night of snowy legends and mountain myths before camp descends into adorable chaos.
-
-**Frozen Falls Reflection**
-The sacred Frozen Falls are glowing strangely beneath the moonlight, their icy spray shimmering like StarClan itself. At least 3 cats must journey there for a spiritual vigil and seek wisdom from the mountain.
-
-**Catch 3 Marmots**
-Chunky marmots have been spotted basking on rare sun-warmed stones near Glacier’s Edge. Catch 3 before they retreat into deep burrows and deny the Clan a hearty feast.
-
-**Lost in the Whiteout**
-A sudden snow squall has separated a young apprentice from their patrol! BlizzardClan must organize a rescue mission and brave blinding winds to guide them safely home.
-
-**Avalanche Scare (Rare Event)**
-The mountain groans ominously, and heavy snow shifts dangerously above Glacier’s Edge. Any cat traveling there must roll D20. Roll 1 = caught in a minor avalanche and injured.
-
-**Catch 6 Pikas**
-The warriors are craving the fresh meat of Pikas. Catch 6 pikas before they vanish deeper into BlizzardClan’s icy terrain and boost Blizzardclan’s Morale!
-**Snow Shelter Night**
-The wind is merciless this moon, and every BlizzardClan cat must prove their resilience. Spend one roleplay setting up a temporary camp and sleeping beyond camp’s icy shelter to honour your Clan’s strength.
-
-**Catch 5 Voles**
-Fresh burrows beneath powdery snow have revealed a surge of vole activity. Hunt 5 before the prey disappears beneath the frost.
-
-**Frost Tunnel Herb Patrol**
-Rumours of hardy winter herbs hidden in the frozen dark have reached camp. Lead a brave herb patrol into Frost Tunnels and return before the cave’s dangers close in.
-
-**Catch 10 Shrews**
-The snowbanks are rustling with tiny prey. BlizzardClan must catch 10 shrews to keep the fresh-kill pile strong through bitter nights.
-**Cloud Plateau Bonding Night**
-For one peaceful evening, BlizzardClan cats are encouraged to set aside duty and gather beneath the stars of Cloud Plateau. Friendships, confessions, and snowy bonds await.
-
-**Catch 4 Ptarmigan**
-Another flock has landed high among BlizzardClan’s peaks. Catch 4 before they blend once more into the endless white.
-**Frostbite Check**
-The frost bites hard this moon. Roll D4 for each elder: 1 = frostbite scare, requiring warmth and care from Clanmates. (this one only do if the season is Leaf-Bare)
-
-**Night Hunting Patrol**
-Under silver moonlight, prey moves differently across snow and ice. Lead a patrol into the darkness and prove BlizzardClan’s senses are as sharp as winter itself. No matter what, this patrol’s rolls will have a -3 to every roll.
-
-**Catch 2 Snowshoe Hares Without Injury**
-These hares are swift, clever, and desperate. Catch 2 cleanly without any patrol injuries to prove true hunting precision.
-
-**Frozen Stream Crossing**
-A vital ice crossing has become dangerously slick. BlizzardClan cats must roleplay safely navigating the frozen stream before prey routes are lost. (Roll D4, 1-2 means a -1 on your hunting rolls at Glacier's edge, 3 means no modifier and 4 means +1 to your rolls)
-
-**Catch 5 Mice**
-The Frost Tunnels are bustling once more. Hunt 5 mice before tunnel predators claim them first.
-
-**Campwide Story Night**
-The storm howls outside, but BlizzardClan gathers beneath the Frozen Teeth for warmth, stories, and shared history. A Clan that survives together stays together.
-
-**Tunnel Echo Investigation**
-Strange whispers and unnatural echoes have been reported deep in Frost Tunnels. Is it only shifting ice... or something more? Investigate carefully.
-
-**Catch 3 Red Squirrels**
-Rare flashes of fiery red have been spotted against BlizzardClan’s snowy terrain. Catch 3 red squirrels before they flee to lower forests.
-
-**Blizzard Endurance Race**
-Who is truly BlizzardClan’s swiftest warrior? Race across Cloud Plateau’s icy stretches and prove your stamina. (Roll a D8, the highest roll wins, in case of a tie, roll again!)
-
-**Sacred Dream Visit**
-StarClan’s whispers seem louder near Frozen Falls this moon. Spend one roleplay night seeking visions, omens, or ancient guidance.
-
-**Catch 8 Pikas**
-The mountain cracks are alive with movement. BlizzardClan must catch 8 pikas before prey grows scarce again.
-
-**Apprentice Blizzard Test**
-Every apprentice must one day prove they can survive where others freeze. Complete a BlizzardClan endurance or hunting trial. (Roll a D8, the highest roll wins, in case of a tie, roll again!)
-
-**Snow Den Building**
-Heavy storms are forecasted. BlizzardClan must work together to reinforce shelters for safety beyond camp.
-
-**Great Blizzard Feast**
-The mountain offers prey, but only for the prepared. BlizzardClan has 2 real-life weeks to catch 20 total prey and prove they are the true rulers of ice and stone.
-
-TORRENTCLAN
-**Flood on the Island**
-Relentless rain and swelling tides have begun to swallow parts of TorrentClan’s island home. Water creeps dangerously close to dens, and every paw is needed. At least 3 cats must roleplay helping move kits, elders, and supplies to safety before the tide rises further.
-
-**Catch 10 Catfish**
-The muddy depths of Reedmarsh are stirring with whiskered giants! TorrentClan has 2 real-life weeks to catch 10 catfish before shifting currents send them into deeper, murkier waters.
-
-**Catch 8 Minnows**
-Glistening Pools are flashing silver beneath the sun, packed with darting schools of minnows. Catch 8 before they scatter into reeds and roots.
-
-**Kits Demand Beach Storytime**
-TorrentClan’s kits are absolutely refusing to settle down unless someone takes them to Sunspirit Sands for a proper beachside story. A warrior or elder must answer the call before sleepy chaos turns into sandy rebellion.
-
-**Lead a Marsh Herb Patrol**
-Recent rains have caused Reedmarsh to bloom with medicinal opportunity. The medicine cat needs brave escorts willing to brave mud, reeds, and hidden water channels to gather what the marsh offers.
-
-**Otter Scare**
-Something sleek and mischievous has been slipping through TorrentClan waters! During fishing patrols, roll a D8. Roll 1-2 = an otter steals your hard-earned prey and vanishes downstream.
-
-**Catch 5 Walleye**
-Deep shadows move beneath Reedmarsh’s murkier waters. Catch 5 walleye before they retreat to the hidden depths.
-
-**Duckling Rescue**
-A sudden shift in tide has separated several ducklings from their mother near Trout Run. Will TorrentClan guide the little fluffballs back to safety... or let nature take its course?
-
-**Mud Fever Check**
-Too much time in soggy marshland may come with consequences... Roll a D4 for your cat. 1-2 = Mud Fever symptoms, 3-4 = healthy and muddy.
-
-**Catch 4 Ducks**
-A flock of plump ducks has been paddling a little too boldly near camp. TorrentClan must remind them whose waters these are.
-
-**Sunspirit Sands Celebration**
-Golden sand, warm breezes, and sparkling waves call to TorrentClan! Gather for a celebration of stories, sunning, and seaside joy.
-
-**Catch 6 Perch**
-Trout Run is alive with darting silver prey this moon. Catch 6 perch before stronger currents carry them away.
-
-**Stormy Swim Challenge**
-Dark clouds gather overhead, but TorrentClan does not fear rough water. Brave cats may challenge themselves to a storm swim and prove their river-born strength.
-
-**Medicine Willow Escort**
-The sacred willow roots must be reached, and the medicine cat cannot travel alone. Escort them safely through rising tides and slick crossings. Travel to the Glistening Pools, roll a d8 for success. 1-2 means you slip and get injured, 3+ = safe travels. Roll a D4 for severity.
-
-**Catch 3 Catfish in One Patrol**
-The marsh is thick with prey, but only skilled teamwork will secure victory. One patrol must catch 3 catfish in a single outing.
-
-**Flood Debris Cleanup**
-High waters have scattered branches, reeds, shells, and driftwood across camp. TorrentClan must work together to restore their island sanctuary before the next tide.
-
-**Catch 5 Frogs Without Injury**
-The frogs are practically croaking insults from every muddy bank. Catch 5 cleanly without slips, bites, or embarrassing failures. (Rolling a 1 or lower due to current hunting modifier will result in an injury)
-
-**Reedmarsh Wrestling Day**
-Mud, reeds, and total chaos await! Apprentices and warriors alike are invited to prove that if you can fight in marsh mud, you can fight anywhere. (Roll a D8, the highest roll wins, in case of a tie, roll again!)
-
-**Catch 2 Loons**
-Their haunting calls have echoed over the waters for nights. Catch 2 elusive loons before they vanish into mist and moonlight.
-
-**Island Root Safety Check**
-The tides have been rough, and TorrentClan’s island roots must remain strong. Patrol camp thoroughly and ensure no den is at risk.
-
-**Catch 12 Minnows**
-Minnows are everywhere this moon, flashing through clear shallows and weaving between roots. A Clanwide frenzy is on.
-
-**Fishing Tournament**
-Who is TorrentClan’s greatest fisher? Compete with your Clanmates to catch the most prey before moonhigh.
-
-**Low Tide Adventure**
-The waters have receded farther than usual, revealing hidden stones, forgotten paths, and mysterious shoreline treasures. Explore while the tide allows.
-
-**Goose Avoidance Patrol**
-A furious goose has claimed part of TorrentClan’s shoreline and is absolutely not in the mood for visitors. Patrol carefully... or prepare for feathery violence. On hunting patrols, at the start each cat will roll a D10. Rolling a 1-3 will result in a modifier for your OC for this patrol. A 1 = -3, a 2 =-2 and 3 =-1
-
-**Catch 4 Crayfish**
-Sharp claws, snapping pincers, and slippery shells await. Catch 4 crayfish from beneath river stones for a crunchy challenge.
-
-**Beach Feast Prep**
-Sunspirit Sands calls for a proper feast beneath open skies. Gather prey, friends, and celebration-worthy vibes.
-
-**Storm Flood Warning**
-Dark clouds gather, winds howl, and the tides are rising fast. TorrentClan must prepare camp before floodwaters claim vulnerable ground.
-
-**Catch 5 Fish Any Type**
-The waters are rich this moon, and TorrentClan must take advantage. Catch any 5 fish before prey patterns shift.
-
-**Duck Nest Watch**
-A duck nest near camp may offer prey... or trouble. Observe carefully and decide whether to guard, hunt, or avoid.
-
-**River Crossing Trial**
-Only TorrentClan’s strongest swimmers can conquer Trout Run’s roughest currents. Cross successfully and prove your place among the tideborn. (Roll a d20, if you roll a 12 or higher, you win bragging rights at the next gathering, if you roll a 3 or lower, risk being injured. River Guardians get a +5 to their roll)
-
-**Catch 8 Frogs**
-The marsh chorus is out of control this moon. TorrentClan must thin the croaking crowd before sleep becomes impossible.
-
-**Loon Song Night**
-The loons are singing beneath silver moonlight, their haunting voices drifting across still waters. Gather for stories, songs, and perhaps mysterious warnings.
-
-**Speedy Marsh Patrol**
-Mud, reeds, water, and speed! Compete a fast-paced patrol challenge through Reedmarsh’s thickest terrain. (Roll a D8, the highest roll wins, in case of a tie, roll again!)
-
-**Catch 3 Duck**
-Tiny, fluffy, and deceptively difficult. Catch 3 ducks before they paddle out of reach.
-
-**Water Safety Lesson**
-Young paws must learn quickly in TorrentClan. Lead a lesson for kits or apprentices about tides, currents, and river dangers.
-
-**Catch 6 Perch**
-Another school has arrived in Trout Run! Don’t waste this second wave of bounty.
-
-**Flood Escape Drill**
-If the island flooded tonight, would TorrentClan be ready? Practise emergency flood response before disaster strikes for real.
-
-**Island Camp Bonding Night**
-A peaceful evening beneath sheltering branches, surrounded by soft waves and moonlit tides. Groom, laugh, and strengthen Clan bonds.
-
-**Catch 10 Minnows Clanwide**
-Every paw counts this moon! Work together to catch 10 minnows for an easy but important prey boost.
-
-**Young Cats Swimming Lesson**
-The next generation must swim like true TorrentClan cats. Lead a lesson and teach survival through water.
-
-**Catch 2 Catfish**
-Whiskered prey lurks below. Catch 2 before they disappear beneath muddy depths.
-
-**Mudslide RP Event**
-Heavy rain has shifted Reedmarsh terrain dangerously. Cats must navigate unstable mud and changing waters. (Roll a D10, rolling a 1-2 will result in an injury)
-
-**Catch 4 Water Voles**
-Quick little marsh runners are thriving among reeds and roots. Catch 4 before they vanish.
-
-**Sunspirit Race**
-Race from camp to Sunspirit Sands and back! The winner earns shoreline bragging rights until next moon.
-
-**Storm Story Night**
-Rain pounds leaves, thunder shakes roots, and TorrentClan gathers for dramatic tales of water, bravery, and survival.
-
-**Catch 5 Frogs**
-Simple, slimy, and satisfying. Reedmarsh is croaking with opportunity.
-
-**Medicine Patrol**
-The medicine cat requires another brave escort through TorrentClan’s shifting wetlands.
-
-**Catch 3 Walleye**
-Three sleek river hunters await skilled paws in the deeper waters.
-
-**TorrentClan Whitecough Outbreak**
-Cold river mist and relentless damp winds have settled over TorrentClan’s island, and coughs now ripple through reeds, roots, and shoreline dens. Roll a D4 for each TorrentClan cat: 1-2 = sick, 3-4 = healthy. If sick, roll a D6 for severity. If your initial D4 roll was a 1, add +1 to severity. Severity: 1 = Very Minor, 2-3 = Mild, 4-5 = Moderate, 6-7 = Serious. Medicine cats must act quickly before damp-chill sickness spreads deeper through camp. Remember: no OC will ever be killed without your permission.
-
-FOSSILCLAN
-
-**Western Terrestrial Garter Snake in Camp**
-A sleek garter snake has slithered into FossilClan territory, weaving dangerously between warm stones and unsuspecting paws. Any cat may attempt to catch it without using the hunting bot. Roll a D20, 15+ = successful catch, 3 or lower = snakebite injury. No hunting modifiers apply.
-
-**Catch 10 Mice at Dustwind Flats**
-The tumbleweeds are rustling, and Dustwind Flats are teeming with tiny paws. FossilClan has 2 real-life weeks to catch 10 mice before shifting sands bury their trails.
-
-**Catch 5 Snowshoe Hares**
-Fast white shapes have been spotted darting between red stone and dry brush. Catch 5 snowshoe hares before they flee FossilClan’s hunting grounds.
-
-**Sandstorm Warning**
-The wind has begun to howl across Dustwind Flats, carrying red dust and stinging grit. FossilClan must roleplay protecting kits, elders, and prey stores before the storm swallows camp.
-
-**Kits Demand Dinosaur Stories**
-FossilClan’s youngest are demanding tales of mighty Dinosaur Spirits, ancient claws, and legendary ancestors. A warrior or elder must host storytime before restless kits become total cave-chaos.
-
-**Lead a Dinosaur Spine Herb Patrol**
-The sacred ridge is blooming with precious medicinal opportunity. Escort the medicine cat safely through FossilClan’s spiritual heart while ancient stones whisper beneath your paws.
-
-**Catch 6 Blue Grouse**
-Blue grouse have been scratching through dry brush and root tangles near camp. Catch 6 before they scatter beyond FossilClan’s reach.
-
-**Raptorfang Race Day**
-The towering spires are calling, and FossilClan apprentices are eager to prove themselves. Race, climb, and leap through Raptorfang Spires for glory... or embarrassment. (Roll a D8, the highest roll wins, in case of a tie, roll again!)
-
-**Catch 8 Voles**
-Dustwind Flats are alive with burrowing movement. Catch 8 voles before the dry earth swallows them whole.
-
-**Rockslide Scare**
-Loose stone has begun shifting near the cliffs and spires. FossilClan must roleplay securing vulnerable paths and protecting younger cats from falling rock.
-
-**Catch 4 Chipmunks**
-Quick little prey is darting through cracks and roots. Catch 4 chipmunks before they vanish into FossilClan’s ancient stone maze.
-
-**Spiritual Fossil Night**
-The moon is bright over Dinosaur Spine, and the ancient bones seem to hum with old power. Gather beneath the stars to honour the Dinosaur Spirits.
-
-**Catch 2 Snakes**
-More snakes have been spotted basking on warm red rocks. Roll carefully, hunt bravely, and prove FossilClan fears no slithering threat.
-
-**Cliff Safety Lesson**
-The Red Rock’s edge is no place for foolish paws. Warriors must guide kits or apprentices through an important safety lesson before disaster strikes.
-
-**Catch 3 Pikas**
-Tiny paws skitter through stone cracks and fossil ridges. Catch 3 pikas before they disappear beneath ancient earth.
-
-**Dustwind Sprint**
-The dry flats stretch wide and dangerous. FossilClan cats are challenged to a speed trial across open terrain. (Roll a D8, the highest roll wins, in case of a tie, roll again!)
-
-**Sandstorm Illness Check**
-Too much dust can choke even the strongest hunter. Roll a D4: 1-2 = dust sickness symptoms, 3-4 = healthy.
-
-**Catch 5 Mice**
-Simple prey, but necessary. Dustwind’s small runners are abundant this moon.
-
-**Rexhead Strength Trial**
-The mighty pillars of Rexhead call for bold leaps and fearless displays. FossilClan warriors must prove their power atop the stone heights.
-
-**Catch 3 Squirrels**
-Quick prey has been spotted weaving between fossil ridges and brush. Catch 3 before they vanish.
-
-**Medicine Cat Vision Escort**
-The medicine cat has received troubling dreams from the Dinosaur Spirits. Escort them safely to Dinosaur Spine for answers.
-
-**Catch 4 Grouse**
-Feathers and dust fill the air as grouse surge through FossilClan lands. Hunt 4 before they scatter beyond the stone ridges.
-
-**Camp Story Circle**
-As warm winds hum through red stone, FossilClan gathers to share stories of ancestors, spirits, and victories.
-
-**Snakebite Emergency**
-A FossilClan cat has been bitten! Medicine cats must act quickly, and Clanmates must respond before panic spreads.
-
-**Catch 8 Rodents**
-Dustwind Flats are overflowing with small prey. Catch any 8 rodents before prey patterns shift.
-
-**Spire Climbing Challenge**
-Raptorfang Spires test balance, agility, and courage. Complete a climbing challenge and prove your worth.
-
-**Catch 2 Hares**
-Swift prey has crossed FossilClan’s path. Catch 2 before they outrun you through the flats.
-
-**Sand Den Repair**
-Strong winds and shifting dust have damaged camp walls. FossilClan must roleplay restoring safety to their warm stone home.
-
-**Ancestor Night**
-The moon rises over Dinosaur Spine, and FossilClan is called to honour those who came before through prayer, storytelling, or silent reflection.
-
-**FossilClan Great Hunt**
-The Dinosaur Spirits demand strength this moon. FossilClan has 2 real-life weeks to catch 20 total prey and prove their might beneath red stone and ancient bone.
-
-**FossilClan Whitecough Outbreak**
-A bitter dust storm and sudden cold snap have swept across the Red Rock, leaving FossilClan’s air dry, sharp, and filled with dangerous coughing fits. Roll a D4 for each FossilClan cat: 1-2 = sick, 3-4 = healthy. If sick, roll a D6 for severity. If your initial D4 roll was a 1, add +1 to severity. Severity: 1 = Very Minor, 2-3 = Mild, 4-5 = Moderate, 6-7 = Serious. Medicine cats must treat the sick before dry coughs become something far worse. Remember: no OC will ever be killed without your permission.
-
-SPRUCECLAN 
-
-**Fungal Outbreak in Toadstool Glade**
-A strange bloom of aggressive spores has spread through Toadstool Glade, and sneezes, coughs, and irritated paws are beginning to surface throughout SpruceClan. Roll a D4 for each SpruceClan cat: 1-2 = infected, 3-4 = healthy. Medicine cats must lead a herb patrol before the spores worsen.
-
-**Catch 8 Squirrels**
-Whispering Branches are alive with rustling tails and chattering prey! SpruceClan has 2 real-life weeks to catch 8 squirrels before they retreat deeper into the evergreen canopy.
-
-**Catch 10 Nestlings**
-Greenleaf has filled the lower branches with vulnerable nests. Catch 10 nestlings before stronger winds or rival predators claim them first.
-
-**Kits Demand Mossy Storytime**
-SpruceClan’s kits are refusing to settle unless someone fills the nursery with tales of ancient forests, owls, and brave warriors. A warrior or elder must step up before bedtime becomes a riot.
-
-**Lead a Toadstool Herb Patrol**
-The damp glade is rich with medicinal opportunity... if you know which fungi to avoid. Escort the medicine cat safely through spores and shadows. (Roll a d10, 1-2 means an infection, 3+ means safe passage. Sporekeepers get a +2 on this.)
-
-**Catch 5 Frogs**
-Sundance Pond is croaking with opportunity. Catch 5 frogs before they vanish beneath lily pads and roots.
-
-**Owl Alert**
-Silent wings have been spotted gliding through Whispering Branches after dusk. During hunting patrols, roll D8 every 3 hunting attempts. Roll 1-2 = owl encounter. Retreat immediately.
-
-**Catch 6 Blue Jays**
-Bright flashes of blue have been taunting SpruceClan from above. Catch 6 before they vanish into the canopy.
-
-**Root Maze Rescue**
-A young apprentice has become tangled or lost in Deeproot Tangle’s twisting maze. Lead a rescue patrol and guide them safely home.
-
-**Catch 4 Chipmunks**
-Tiny striped prey are darting through roots and brush. Catch 4 before they disappear underground.
-
-**Sundance Bonding Night**
-Moonlight glimmers across still pond water, and SpruceClan is invited to gather, groom, and bond beneath the stars.
-
-**Catch 3 Ducks**
-Sundance Pond’s calm waters have drawn feathered visitors. Catch 3 before they paddle away.
-
-**Spore Safety Check**
-Toadstool Glade’s fungal bloom is worsening. Roll a D4: 1-2 = minor spore irritation, 3-4 = safe.
-
-**Catch 5 Minnows**
-The shallows are silver with life. Catch 5 minnows from Sundance Pond.
-
-**Great Spruce Vigil**
-The oldest tree in the camp seems especially restless this moon. Gather beneath its roots to honour it’s strength.
-
-**Catch 4 Water Voles**
-The roots are crawling with movement. Catch 4 water voles before they retreat deeper into the tangle.
-
-**Tree Climbing Trial**
-SpruceClan’s apprentices must prove they are worthy of the forest heights. Complete a climbing challenge in Whispering Branches. (Roll a d10, a 5 or higher is a pass and bragging rights at the next gathering, a 4 or lower is a fail and a 1 is a minor injury)
-
-**Catch 2 Herons**
-Tall shadows stalk Sundance Pond’s edge. Catch 2 herons... if your patrol is brave enough.
-
-**Toadstool Hide-and-Seek**
-Toadstool Glade’s giant mushrooms make for perfect hiding spots. Kits, apprentices, and playful warriors are invited to a fun roleplay challenge.
-
-**Catch 5 Songbirds**
-The branches are alive with chirping prey. Catch any 5 songbirds before predators from above intervene.
-
-**Root Tangle Patrol**
-Deeproot Tangle’s winding paths require sharp minds and sharper paws. Patrol and ensure no dangers lurk beneath roots.
-
-**Catch 8 Frogs**
-The frogs are loud, plentiful, and impossible to ignore. Thin their chorus.
-
-**Elder Moss Night**
-SpruceClan’s elders deserve fresh bedding and warm company. Spend a night caring for camp’s wisest paws.
-
-**Fungal Bloom Warning**
-Spores have become dangerously thick in parts of Toadstool Glade. Cats must roleplay navigating or avoiding hazardous growth. Roll a D4: 1-2 = minor spore irritation, 3-4 = safe.
-
-**Catch 3 Turtles**
-Slow, sturdy prey has been spotted sunning by the pond. Catch 3... if you can crack the challenge.
-
-**Sundance Fishing Day**
-A peaceful day of fishing and bonding at Sundance Pond has been declared. Relaxation and prey await.
-
-**Branch Sprint Race**
-Who is SpruceClan’s swiftest through roots, trunks, and branches? Race through forest terrain for bragging rights. (Roll a D8, the highest roll wins, in case of a tie, roll again!)
-
-**Catch 10 Mixed Prey**
-The forest is thriving! Catch any 10 prey from SpruceClan territory before prey patterns shift.
-
-**Medicine Cat Mushroom Watch**
-Some fungi heal. Others harm. Assist the medicine cat in identifying dangerous growth before accidents happen.
-
-**SpruceClan Forest Feast**
-The evergreen forest has provided, but only if SpruceClan is worthy. Catch 20 total prey Clanwide before the 2 weeks end and celebrate beneath the Great Spruce.
-
-**SpruceClan Whitecough Outbreak**
-Freezing rain and damp evergreen winds have soaked Shadow Hearth, and now coughs are rustling through mossy dens beneath the spruce boughs. Roll a D4 for each SpruceClan cat: 1-2 = sick, 3-4 = healthy. If sick, roll a D6 for severity. If your initial D4 roll was a 1, add +1 to severity. Severity: 1 = Very Minor, 2-3 = Mild, 4-5 = Moderate, 6-7 = Serious. Medicine cats must move swiftly before the illness spreads through the forest’s shadows. Remember: no OC will ever be killed without your permission.
-
-OUTSIDER
-
-**Donkey Escape at the Sanctuary**
-One of the Sanctuary’s donkeys has slipped free from its pasture and is trotting far too confidently into unfamiliar territory! Barn cats, rogues, loners, or even visiting Clan cats must work together to safely guide the stubborn runaway back home before twolegs panic.
-
-**Catch 15 Barn Mice**
-The haylofts are practically rustling with fat, careless mice. Outsiders have 2 real-life weeks to catch 15 barn mice before the Sanctuary’s well-fed prey learns caution.
-
-**Neon Path Dumpster Dive**
-The dumpsters are overflowing after a busy twoleg night, and the Neon Path is bursting with rats and scraps. Catch 8 rats... if rival rogues don’t beat you to it first.
-
-**Frostbite Ridge Wind Check**
-The cliffside gusts are especially brutal this moon. Any cat spying or hunting on Frostbite Ridge must roll a D6. Roll 1 = dangerous gust, retreat immediately.
-
-**Kittypet Catmint Mission**
-Rumours are spreading of lush catmint patches hidden deep in Twoleg Town gardens. Sneak through fences, avoid dogs, and return with your dignity intact.
-
-**Sanctuary Story Circle**
-The hay is warm, the night is calm, and the barn cats are gathering for stories beneath lantern light. Share tales, wisdom, or outsider gossip.
-
-**Catch 4 Barn Rats**
-Bigger, bolder, and nastier than mice, barn rats are becoming a nuisance near feed stores. Catch 4 before they grow too confident.
-
-**Rogue Turf Tension**
-Tensions are rising on Neon Path as rival rogue groups eye the same food sources. Roleplay negotiations, alliances, or dramatic confrontations.
-
-**Catch 3 Pigeons**
-Twoleg Town rooftops are bustling with plump city birds. Catch 3 before they take flight.
-
-**Frostbite Ridge Bird Hunt**
-Cliffside winds carry gulls, sparrows, and starlings high above dangerous ledges. Brave the ridge and catch 5 birds.
-
-**Dog Escape Drill**
-A loud, overly enthusiastic dog has broken free in Twoleg Town! Outsiders must roleplay dodging, escaping, or warning others before disaster strikes.
-
-**Catch 8 Village Mice**
-The alleyways and gardens are full of skittish prey. Catch 8 mice from Twoleg Town before they disappear into stone cracks.
-
-**Sanctuary Hayloft Sleepover**
-For once, survival takes a back seat to comfort. Spend a peaceful roleplay night among warm hay, moonlit rafters, and friendly farm scents.
-
-**Catch 5 Gulls**
-Frostbite Ridge is alive with shrieking gulls riding dangerous air currents. Catch 5 before winds grow too fierce.
-
-**Rogue Alliance Night**
-Not every Neon Path gathering has to end in claws. Form alliances, trade stories, or negotiate territory under flickering neon signs.
-
-**Catch 2 Raccoons (Group Hunt)**
-Trash bandits have become bold near Neon Path dumpsters. A hunting party may attempt to catch 2, but teamwork is strongly advised. (To catch a raccoon, no matter the hunting factor, you must roll a 16 or higher).
-
-**Twoleg Monster Dodge**
-Twoleg roads are especially dangerous this moon. Any cat crossing major roads must roleplay carefully avoiding monsters.
-
-**Catch 10 Dumpster Mice**
-Neon Path’s alleys are teeming with prey beneath scraps and garbage. Catch 10 before rival scavengers take over.
-
-**Frostbite Spy Mission**
-The ridge offers a perfect view of nearby Clan movement... if you can handle the cold. Spy carefully and report what you see.
-
-**Sanctuary Peace Patrol**
-Not every patrol is about danger. Check fences, greet familiar animals, and ensure the Sanctuary remains safe and calm.
-
-**Catch 4 Sparrows**
-Twoleg Town gardens and rooftops are alive with tiny fluttering prey. Catch 4 before they scatter.
-
-**Dog Warning Patrol**
-Dogs have been unusually active near key outsider paths. Patrol and warn vulnerable cats.
-
-**Barn Cat Advice Night**
-The Sanctuary’s barn cats have seen everything from foxes to floods. Spend a night hearing wisdom from cats who know survival differently.
-
-**Catch 6 Rats**
-The Neon Path’s shadows are crawling with whiskers. Catch 6 rats before they overrun your scavenging grounds.
-
-**Lost Kittypet Escort**
-A pampered housecat has wandered too far from home and clearly regrets every life choice. Guide them back... or let them learn.
-
-**Sanctuary Feast Prep**
-A rare peaceful feast is being planned among barns and pastures. Gather prey and prepare for a night of safety and shared food.
-
-**Catch 5 Mice**
-Simple, reliable, and always useful. Catch 5 mice from any outsider territory.
-
-**Frostbite Storm Survival**
-A brutal windstorm has swept Frostbite Ridge. Any cats there must roleplay surviving the dangerous cold.
-
-**Neon Path Rivalry**
-Territory disputes are heating up beneath glowing signs. Will you defend, negotiate, or challenge?
-
-**Outsider Survival Challenge**
-From barns to cliffs to alleyways, outsider life demands adaptability. Catch 25 total prey across outsider territories before the 2 weeks end and prove that survival beyond Clan borders requires just as much strength.
-"""
-
-CLAN_ROLE_IDS = {
-    "BlizzardClan": 1445529729309605978,
-    "TorrentClan": 1445529635780563034,
-    "SpruceClan": 1445530840170758225,
-    "FossilClan": 1445529918518591559,
-    "Outsider": 1445530928083505294
+QUEST_CATEGORY_LABELS = {
+    "hunting": "Hunting Quest",
+    "social": "Social Quest",
+    "resource": "Resource Quest"
 }
+
+QUEST_CATEGORY_ICONS = {
+    "hunting": "🎯",
+    "social": "💬",
+    "resource": "🛠️"
+}
+
+QUEST_GROUP_ORDER = [
+    "BlizzardClan",
+    "TorrentClan",
+    "FossilClan",
+    "SpruceClan",
+    "Outsider"
+]
 
 
 def clan_mention(group):
@@ -4965,361 +4454,582 @@ def clan_mention(group):
     return f"<@&{role_id}>"
 
 
-def parse_quests():
-    quest_data = {}
-    current_group = None
-    current_title = None
-    current_description = []
+def has_role_id(interaction: discord.Interaction, role_id: int):
+    if not hasattr(interaction.user, "roles"):
+        return False
 
-    valid_groups = {
-        "BLIZZARDCLAN": "BlizzardClan",
-        "TORRENTCLAN": "TorrentClan",
-        "FOSSILCLAN": "FossilClan",
-        "SPRUCECLAN": "SpruceClan",
-        "OUTSIDER": "Outsider"
-    }
-
-    for raw_line in QUEST_TEXT.splitlines():
-        line = raw_line.strip()
-
-        if not line:
-            continue
-
-        upper_line = line.upper()
-
-        if upper_line in valid_groups:
-            if current_group and current_title:
-                quest_data.setdefault(current_group, []).append({
-                    "title": current_title,
-                    "description": " ".join(current_description).strip()
-                })
-
-            current_group = valid_groups[upper_line]
-            current_title = None
-            current_description = []
-            quest_data.setdefault(current_group, [])
-            continue
-
-        if line.startswith("**") and line.endswith("**"):
-            if current_group and current_title:
-                quest_data.setdefault(current_group, []).append({
-                    "title": current_title,
-                    "description": " ".join(current_description).strip()
-                })
-
-            current_title = line.replace("**", "").strip()
-            current_description = []
-            continue
-
-        if current_group and current_title:
-            current_description.append(line)
-
-    if current_group and current_title:
-        quest_data.setdefault(current_group, []).append({
-            "title": current_title,
-            "description": " ".join(current_description).strip()
-        })
-
-    cleaned = {}
-
-    for group, quests in quest_data.items():
-        seen = set()
-        cleaned[group] = []
-
-        for quest in quests:
-            key = f"{quest['title']}|{quest['description']}"
-            if key not in seen:
-                cleaned[group].append(quest)
-                seen.add(key)
-
-    return cleaned
+    return any(role.id == role_id for role in interaction.user.roles)
 
 
-def quest_is_allowed(quest):
-    season = data.get("season", get_current_season())
-    text = f"{quest['title']} {quest['description']}".lower()
-
-    if (
-        "leaf-bare only" in text
-        or "leafbare only" in text
-        or "only do if the season is leaf-bare" in text
-        or "only do if the season is leafbare" in text
-    ):
-        return season.lower().replace("-", "") == "leafbare"
+async def quest_force_check(interaction: discord.Interaction):
+    if not has_role_id(interaction, QUEST_FORCE_ROLE_ID):
+        await interaction.response.send_message(
+            "You do not have permission to force new quests.",
+            ephemeral=True
+        )
+        return False
 
     return True
 
 
-def choose_quest_for_group(group, quests):
-    data.setdefault("used_quests", {})
-    data["used_quests"].setdefault(group, [])
+def reset_legacy_quest_data_if_needed():
+    if data.get("quest_system_version") == QUEST_SYSTEM_VERSION:
+        data.setdefault("active_quests_v2", {})
+        data.setdefault("used_quests_v2", {})
+        data.setdefault("quest_effects_v2", {})
+        data.setdefault("quest_history_v2", [])
+        data.setdefault("quest_reminders_sent_v2", {})
+        return
 
-    allowed_quests = [quest for quest in quests if quest_is_allowed(quest)]
+    for old_key in [
+        "active_quests",
+        "quest_results",
+        "quest_modifiers",
+        "used_quests",
+        "quest_reminders_sent",
+        "last_quest_period"
+    ]:
+        data.pop(old_key, None)
 
-    if not allowed_quests:
-        allowed_quests = quests
-
-    used_keys = set(data["used_quests"].get(group, []))
-
-    available = [
-        quest for quest in allowed_quests
-        if f"{quest['title']}|{quest['description']}" not in used_keys
-    ]
-
-    if not available:
-        data["used_quests"][group] = []
-        available = allowed_quests
-
-    chosen = random.choice(available)
-
-    quest_key = f"{chosen['title']}|{chosen['description']}"
-    data["used_quests"][group].append(quest_key)
-
-    return chosen
-
-
-def is_hunting_quest(quest):
-    title = quest.get("title", "").lower()
-    description = quest.get("description", "").lower()
-
-    hunting_words = [
-        "catch ",
-        "hunt ",
-        "hunting",
-        "prey",
-        "mice",
-        "mouse",
-        "hare",
-        "hares",
-        "pika",
-        "pikas",
-        "marmot",
-        "marmots",
-        "vole",
-        "voles",
-        "frog",
-        "frogs",
-        "duck",
-        "ducks",
-        "perch",
-        "minnow",
-        "minnows",
-        "walleye",
-        "catfish",
-        "fish",
-        "loon",
-        "loons",
-        "bird",
-        "birds",
-        "squirrel",
-        "squirrels",
-        "rabbit",
-        "rabbits"
-    ]
-
-    return any(word in title or word in description for word in hunting_words)
+    data["quest_system_version"] = QUEST_SYSTEM_VERSION
+    data["active_quests_v2"] = {}
+    data["used_quests_v2"] = {}
+    data["quest_effects_v2"] = {}
+    data["quest_history_v2"] = []
+    data["quest_reminders_sent_v2"] = {}
+    data["last_quest_period_v2"] = None
 
 
-def format_modifier(value):
-    value = int(value)
-    return f"+{value}" if value > 0 else str(value)
-
-
-def record_active_quest(group, quest):
-    data.setdefault("active_quests", {})
-    data["active_quests"].setdefault(group, [])
-
-    now = datetime.now(TZ)
-
-    quest_record = {
-        "title": quest["title"],
-        "description": quest["description"],
-        "moon": data.get("moon", 0),
-        "result": "Pending",
-        "issued_at": now.isoformat(),
-        "is_hunting": is_hunting_quest(quest),
-        "quest_modifier": 0
+QUEST_LORE = {
+    "BlizzardClan": {
+        "camp": "the Hollow of Teeth",
+        "home_detail": "beneath the Frozen Teeth",
+        "sites": [
+            {"name": "Glacier's Edge", "channel": "❄️-glaciers-edge", "prey": "pika", "amount": 8, "bonus": "small prey", "danger": "slick cliffs and the distant roar of Frozen Falls"},
+            {"name": "Frost Tunnels", "channel": "❄️-frost-tunnels", "prey": "mice", "amount": 12, "bonus": "tunnel prey", "danger": "black ice, twisting tunnels, and echoes that sound almost alive"},
+            {"name": "Cloud Plateau", "channel": "❄️-cloud-plateau", "prey": "snowshoe hares", "amount": 5, "bonus": "hares", "danger": "open wind, biting snow, and nowhere to hide"},
+            {"name": "Glacier's Edge", "channel": "❄️-glaciers-edge", "prey": "ptarmigan", "amount": 6, "bonus": "birds", "danger": "camouflaged feathers and treacherous ice shelves"},
+            {"name": "Frost Tunnels", "channel": "❄️-frost-tunnels", "prey": "bats", "amount": 4, "bonus": "tunnel prey", "danger": "silent wings flashing through the frozen dark"},
+            {"name": "Cloud Plateau", "channel": "❄️-cloud-plateau", "prey": "magpies", "amount": 5, "bonus": "birds", "danger": "wary eyes and open sky"},
+            {"name": "Frost Tunnels", "channel": "❄️-frost-tunnels", "prey": "rats", "amount": 3, "bonus": "tunnel prey", "danger": "sharp teeth in cramped tunnels"},
+            {"name": "Cloud Plateau", "channel": "❄️-cloud-plateau", "prey": "shrews", "amount": 10, "bonus": "small prey", "danger": "tiny tracks vanishing under fresh powder"},
+            {"name": "Glacier's Edge", "channel": "❄️-glaciers-edge", "prey": "marmots", "amount": 3, "bonus": "mountain rodents", "danger": "heavy bodies wedged near dangerous rocks"},
+            {"name": "Cloud Plateau", "channel": "❄️-cloud-plateau", "prey": "voles", "amount": 10, "bonus": "small prey", "danger": "burrows hidden beneath icy crust"}
+        ],
+        "social_places": ["Frozen Falls", "Cloud Plateau", "the warrior shelf", "the apprentice den", "the nursery crevice"],
+        "resources": ["mountain herbs", "ice-sheltered moss", "emergency snow shelters", "Frozen Teeth safety checks", "fresh bedding", "tunnel markers", "windbreaks", "medicine cat stores", "camp warmth", "ridge patrol paths"]
+    },
+    "TorrentClan": {
+        "camp": "the Island",
+        "home_detail": "where the tide guards the camp",
+        "sites": [
+            {"name": "Trout Run", "channel": "🌊-trout-run", "prey": "trout", "amount": 12, "bonus": "fish", "danger": "fast rapids and slick stepping stones"},
+            {"name": "Trout Run", "channel": "🌊-trout-run", "prey": "perch", "amount": 10, "bonus": "fish", "danger": "silver flashes beneath rushing water"},
+            {"name": "Reedmarsh", "channel": "🌊-reed-marsh", "prey": "frogs", "amount": 15, "bonus": "amphibians", "danger": "mud that grabs at every paw"},
+            {"name": "Reedmarsh", "channel": "🌊-reed-marsh", "prey": "water voles", "amount": 8, "bonus": "marsh prey", "danger": "reed tunnels and slippery banks"},
+            {"name": "Glistening Pools", "channel": "🌊-glistening-pools", "prey": "minnows", "amount": 20, "bonus": "small fish", "danger": "glare on the water and darting schools"},
+            {"name": "Glistening Pools", "channel": "🌊-glistening-pools", "prey": "ducks", "amount": 5, "bonus": "water birds", "danger": "splashing wings and loud alarm calls"},
+            {"name": "Reedmarsh", "channel": "🌊-reed-marsh", "prey": "catfish", "amount": 4, "bonus": "fish", "danger": "muddy depths and stubborn prey"},
+            {"name": "Trout Run", "channel": "🌊-trout-run", "prey": "arctic char", "amount": 8, "bonus": "fish", "danger": "cold currents and narrow timing"},
+            {"name": "Reedmarsh", "channel": "🌊-reed-marsh", "prey": "loons", "amount": 3, "bonus": "water birds", "danger": "watchful eyes and sudden dives"},
+            {"name": "Glistening Pools", "channel": "🌊-glistening-pools", "prey": "coots", "amount": 6, "bonus": "water birds", "danger": "splashy panic and muddy reeds"}
+        ],
+        "social_places": ["Sunspirit Sands", "the Island", "Trout Run", "Glistening Pools", "Reedmarsh"],
+        "resources": ["willow herbs", "dry bedding", "island root repairs", "tide markers", "emergency reed shelters", "fish-drying stones", "medicine stores", "warm sand nests", "training paths", "storm drainage channels"]
+    },
+    "FossilClan": {
+        "camp": "the Red Rock",
+        "home_detail": "among warm stone, fossils, and crystal-lit walls",
+        "sites": [
+            {"name": "Dustwind Flats", "channel": "🦴-dustwind-flats", "prey": "mice", "amount": 20, "bonus": "small prey", "danger": "open stone, tumbleweeds, and shifting dust"},
+            {"name": "Dustwind Flats", "channel": "🦴-dustwind-flats", "prey": "voles", "amount": 14, "bonus": "small prey", "danger": "flatland trails and sudden gusts"},
+            {"name": "Raptorfang Spires", "channel": "🦴-raptorfang-spires", "prey": "pika", "amount": 8, "bonus": "rock prey", "danger": "thin pillars and dizzying drops"},
+            {"name": "Rexhead Pillars", "channel": "🦴-rexhead-pillars", "prey": "rock pigeons", "amount": 8, "bonus": "birds", "danger": "wide ledges and bold leaps"},
+            {"name": "Dustwind Flats", "channel": "🦴-dustwind-flats", "prey": "common shrews", "amount": 12, "bonus": "small prey", "danger": "tiny pawprints vanishing through dust"},
+            {"name": "Rexhead Pillars", "channel": "🦴-rexhead-pillars", "prey": "blue jays", "amount": 6, "bonus": "birds", "danger": "noisy warnings echoing off the stone"},
+            {"name": "Raptorfang Spires", "channel": "🦴-raptorfang-spires", "prey": "chipmunks", "amount": 8, "bonus": "rock prey", "danger": "quick paws over narrow ledges"},
+            {"name": "Dustwind Flats", "channel": "🦴-dustwind-flats", "prey": "garter snakes", "amount": 6, "bonus": "reptiles", "danger": "sun-warmed coils beneath brush"},
+            {"name": "Rexhead Pillars", "channel": "🦴-rexhead-pillars", "prey": "ptarmigan", "amount": 5, "bonus": "birds", "danger": "camouflage against pale stone"},
+            {"name": "Dustwind Flats", "channel": "🦴-dustwind-flats", "prey": "snowshoe hares", "amount": 4, "bonus": "hares", "danger": "long chases across exposed flats"}
+        ],
+        "social_places": ["Dinosaur Spine", "the Red Rock", "Raptorfang Spires", "Rexhead Pillars", "Dustwind Flats"],
+        "resources": ["fossils", "crystals", "dry herbs", "cliff-edge safety stones", "nursery barriers", "fossil catalogues", "water-source checks", "warm bedding", "ancestor offerings", "emergency cave stores"]
+    },
+    "SpruceClan": {
+        "camp": "the Shadow Hearth",
+        "home_detail": "beneath interlocked spruce branches and silent pine needles",
+        "sites": [
+            {"name": "Whispering Branches", "channel": "🌲-whispering-branches", "prey": "squirrels", "amount": 10, "bonus": "tree prey", "danger": "high branches and chattering warnings"},
+            {"name": "Whispering Branches", "channel": "🌲-whispering-branches", "prey": "sparrows", "amount": 12, "bonus": "birds", "danger": "dense canopy and fluttering panic"},
+            {"name": "Deeproot Tangle", "channel": "🌲-deeproot-tangle", "prey": "water voles", "amount": 8, "bonus": "root prey", "danger": "twisting roots and hidden pockets of water"},
+            {"name": "Sundance Pond", "channel": "🌲-sundance-pond", "prey": "frogs", "amount": 12, "bonus": "amphibians", "danger": "sun-dappled banks and slippery stones"},
+            {"name": "Sundance Pond", "channel": "🌲-sundance-pond", "prey": "minnows", "amount": 18, "bonus": "small water prey", "danger": "clear water that reveals every shadow"},
+            {"name": "Whispering Branches", "channel": "🌲-whispering-branches", "prey": "blue jays", "amount": 6, "bonus": "birds", "danger": "loud calls betraying every hunter"},
+            {"name": "Deeproot Tangle", "channel": "🌲-deeproot-tangle", "prey": "garter snakes", "amount": 6, "bonus": "reptiles", "danger": "sunlit roots and sudden movement"},
+            {"name": "Sundance Pond", "channel": "🌲-sundance-pond", "prey": "ducks", "amount": 5, "bonus": "water birds", "danger": "open banks and loud splashes"},
+            {"name": "Whispering Branches", "channel": "🌲-whispering-branches", "prey": "chipmunks", "amount": 10, "bonus": "tree prey", "danger": "pine needles hiding tiny tracks"},
+            {"name": "Deeproot Tangle", "channel": "🌲-deeproot-tangle", "prey": "red-winged blackbirds", "amount": 6, "bonus": "birds", "danger": "exposed roots and warning cries"}
+        ],
+        "social_places": ["the Shadow Hearth", "Whispering Branches", "Sundance Pond", "Toadstool Glade", "Deeproot Tangle"],
+        "resources": ["safe mushrooms", "medicinal moss", "root den repairs", "dry pine bedding", "spore warnings", "pond water stores", "canopy patrol routes", "hidden emergency shelters", "herb bundles", "nursery branch weaving"]
+    },
+    "Outsider": {
+        "camp": "the borderlands beyond Clan rule",
+        "home_detail": "between barns, cliffs, neon signs, and twoleg streets",
+        "sites": [
+            {"name": "The Sanctuary", "channel": "🐖-the-sanctuary", "prey": "mice", "amount": 20, "bonus": "barn prey", "danger": "careless prey and curious barn animals"},
+            {"name": "The Sanctuary", "channel": "🐖-the-sanctuary", "prey": "barn rats", "amount": 10, "bonus": "barn prey", "danger": "bold rats near feed stores"},
+            {"name": "Frostbite Ridge", "channel": "🧊-frostbite-ridge", "prey": "gulls", "amount": 8, "bonus": "cliff birds", "danger": "sheer drops and brutal wind"},
+            {"name": "Frostbite Ridge", "channel": "🧊-frostbite-ridge", "prey": "pigeons", "amount": 10, "bonus": "cliff birds", "danger": "narrow ledges above freezing water"},
+            {"name": "The Neon Path", "channel": "🥡-neon-path", "prey": "rats", "amount": 14, "bonus": "city prey", "danger": "hard stone, dogs, and rival rogues"},
+            {"name": "The Neon Path", "channel": "🥡-neon-path", "prey": "mice", "amount": 15, "bonus": "city prey", "danger": "dumpster scents and sudden twoleg noise"},
+            {"name": "The Twoleg Town", "channel": "🏡-twoleg-town", "prey": "sparrows", "amount": 6, "bonus": "town birds", "danger": "fences, gardens, and watching kittypets"},
+            {"name": "The Twoleg Town", "channel": "🏡-twoleg-town", "prey": "pigeons", "amount": 6, "bonus": "town birds", "danger": "rooftops and road noise"},
+            {"name": "Frostbite Ridge", "channel": "🧊-frostbite-ridge", "prey": "starlings", "amount": 8, "bonus": "cliff birds", "danger": "gusts strong enough to shove a cat sideways"},
+            {"name": "The Neon Path", "channel": "🥡-neon-path", "prey": "skunks", "amount": 3, "bonus": "city prey", "danger": "one startled tail could ruin the whole patrol"}
+        ],
+        "social_places": ["The Sanctuary", "The Neon Path", "The Twoleg Town", "Frostbite Ridge", "the neutral borders"],
+        "resources": ["catmint", "safe barn bedding", "discarded food caches", "twoleg scent maps", "neutral meeting spots", "ridge lookout markers", "alley shelters", "sanctuary supplies", "fence routes", "emergency hiding places"]
     }
-
-    data["active_quests"][group].append(quest_record)
-
-    # Keep only the most recent 2 quests for this group
-    data["active_quests"][group] = data["active_quests"][group][-2:]
+}
 
 
-def mark_pending_previous_quests_failed():
-    data.setdefault("active_quests", {})
+HUNTING_STYLES = [
+    ("Fresh Trail Rush", "A brand-new trail has appeared, and the first patrol to follow it may feed the whole group."),
+    ("Apprentice Hunting Challenge", "Apprentices are encouraged to join, learn, and make a little chaos while experienced hunters supervise."),
+    ("Dawn Patrol Catch", "The prey is moving at first light, and sleepy paws will have to become sharp paws quickly."),
+    ("Dusk Ambush", "The shadows are long, the scents are strange, and the patrol must work quietly before the prey scatters."),
+    ("Two-Patrol Team Hunt", "Split into two patrols, compare tactics, and see which group brings back the better catch."),
+    ("Silent Steps Challenge", "Every hunter must roleplay using patience, stealth, or teamwork before the final catches count."),
+    ("Fresh-Kill Pile Rescue", "The fresh-kill pile is looking pathetic. Someone has to save dinner before the elders start judging everyone."),
+    ("Weather Window", "The conditions briefly turn favourable, but the patrol must move before the territory changes its mind."),
+    ("Danger Close Hunt", "Prey is plentiful, but the territory feels wrong. Keep watch for threats while hunting."),
+    ("Mentor-Led Hunt", "Mentors are asked to bring apprentices or younger warriors and turn the patrol into a practical lesson."),
+    ("Big Appetite Patrol", "The Clan is hungry enough that ordinary effort will not cut it. Bring back enough to impress the dens."),
+    ("Tracking Test", "The prey signs are subtle. Hunters must roleplay tracking before rolling their catches."),
+    ("Fast Paws Trial", "This hunt favours speed, quick decisions, and cats willing to throw themselves into the chase."),
+    ("Patient Hunter Trial", "This hunt rewards waiting, listening, and not leaping at the first twitch of movement."),
+    ("Borderline Bounty", "Prey is moving near an awkward edge of the territory. Stay alert and keep the patrol together."),
+    ("Young Warrior Proving Hunt", "Newer warriors can show what they know while older cats try very hard not to look smug."),
+    ("Odd Scent Investigation", "The prey trail smells strange. Hunt carefully and figure out what disturbed the area."),
+    ("Moonlit Hunt", "The night is bright enough to hunt, but every sound carries farther than expected."),
+    ("Last Chance Catch", "Prey will not stay in this place for long. The group has one short window to make it count."),
+    ("Full-Belly Goal", "The goal is simple: fill bellies, lift spirits, and prove the group can still provide."),
+]
 
-    failed_lines = []
+SOCIAL_STYLES = [
+    ("Story Circle", "Gather for stories, teasing, memories, and the kind of dramatic retelling that definitely gets exaggerated by the third speaker."),
+    ("Apprentice Group Training", "Apprentices train together under watchful eyes, competing, bonding, and probably getting a little too proud of themselves."),
+    ("Elder Appreciation Night", "The elders are invited to share wisdom, complain lovingly, and remind everyone they survived worse with better manners."),
+    ("Tension Cooling Meeting", "Small arguments have been building. Hold a group scene where cats talk, argue, apologize, or make everything messier in a fun way."),
+    ("Camp Bonding Evening", "Share tongues, trade gossip, bring food, and give quieter cats a reason to step into the centre of camp."),
+    ("Young Cats Ask Questions", "Kits and apprentices are full of questions. Older cats must answer them, even the embarrassing ones."),
+    ("Leadership Trust Exercise", "Leaders, deputies, senior cats, or respected outsiders are asked to guide a scene about trust and responsibility."),
+    ("Festival of Small Victories", "Celebrate recent successes, even tiny ones, before the mountain finds a new problem to throw at everyone."),
+    ("Sickness Scare Check-In", "A few coughs, aches, or worries have everyone uneasy. Hold a check-in scene before rumours grow teeth."),
+    ("Newcomer Welcome", "Cats who feel overlooked, new, or disconnected are encouraged into a scene meant to build belonging."),
+    ("Shared Meal Scene", "Bring prey, share food, and let conversations wander from heartfelt to ridiculous."),
+    ("Training Debate", "Cats debate the best way to handle a territory challenge, with apprentices encouraged to offer bold and questionable ideas."),
+    ("Quiet Confessions", "A calm night gives cats room to admit fears, hopes, secrets, or opinions they usually bury."),
+    ("Rivalry Reset", "Cats with tension are encouraged to work together, compete fairly, or at least stop glaring long enough to finish the scene."),
+    ("Moonlit Gathering", "Under moonlight, the group gathers for reflection, bonding, and a reminder that nobody survives alone."),
+]
 
-    group_order = [
-        "BlizzardClan",
-        "TorrentClan",
-        "FossilClan",
-        "SpruceClan",
-        "Outsider"
-    ]
+RESOURCE_STYLES = [
+    ("Medicine Stores Patrol", "Gather useful supplies for healers and medicine cats before the next emergency arrives with terrible timing."),
+    ("Den Reinforcement", "Repair weak spots, patch leaks, and make the dens safer before weather or clumsy apprentices test them."),
+    ("Emergency Shelter Work", "Build or mark temporary shelters so patrols have somewhere to flee if danger strikes."),
+    ("Bedding Refresh", "Collect fresh bedding and make camp more comfortable. Morale matters when everyone sleeps in a pile of misery."),
+    ("Safety Route Marking", "Mark safer paths through dangerous territory so cats can travel without guessing where the ground wants to betray them."),
+    ("Water Source Check", "Inspect water sources, clear debris, and make sure nobody is about to discover a problem by drinking it."),
+    ("Prey Route Survey", "Study prey movement and report what changed, giving hunters better chances for the next two weeks."),
+    ("Camp Repair Day", "Everyone helps with practical repairs. Even proud warriors can drag moss when the camp needs them."),
+    ("Medicine Cat Errand", "The healers need specific supplies, and the group must retrieve them without turning it into a disaster."),
+    ("Sacred Site Care", "Clean, protect, or honour an important place so the group remembers what it is fighting to preserve."),
+]
 
-    for group in group_order:
-        active_quests = data["active_quests"].get(group, [])
 
-        if not active_quests:
-            continue
+def make_quest_id(group, category, number):
+    return f"{group.lower().replace(' ', '-')}-{category}-{number:02d}"
 
-        latest_quest = active_quests[-1]
 
-        if latest_quest.get("result") == "Pending":
-            latest_quest["result"] = "Failed"
+def build_quest_database():
+    quest_db = {}
 
-            failed_lines.append(
-                f"{clan_mention(group)}, previous quest failed! Please redo the entire quest thing.\n"
-                f"Previous Quest: **{latest_quest.get('title', 'Unknown Quest')}**"
+    for group, lore in QUEST_LORE.items():
+        quest_db[group] = {"hunting": [], "social": [], "resource": []}
+
+        for index in range(20):
+            site = lore["sites"][index % len(lore["sites"])]
+            style_title, style_description = HUNTING_STYLES[index]
+            amount = site["amount"] + (index % 3)
+            quest_db[group]["hunting"].append({
+                "id": make_quest_id(group, "hunting", index + 1),
+                "category": "hunting",
+                "title": f"{style_title}: Catch {amount} {site['prey'].title()}",
+                "objective": f"Catch **{amount} {site['prey']}** at **{site['name']}**.",
+                "description": (
+                    f"{style_description} Travel to **{site['name']}** ({site['channel']}) where {site['danger']} make the hunt feel alive. "
+                    f"Use this quest as a group patrol, mentor lesson, rivalry scene, or fresh-kill pile rescue."
+                ),
+                "reward_text": f"If completed, {group} earns **+2 to {site['bonus']} hunting rolls** for the next 2 real-life weeks.",
+                "failure_text": f"If failed, there is a chance {group} suffers **-1 to {site['bonus']} hunting rolls** for the next 2 real-life weeks as prey becomes harder to track.",
+                "effect": {"kind": "hunting", "target": site["bonus"], "modifier": 2},
+                "penalty": {"kind": "hunting", "target": site["bonus"], "modifier": -1, "chance": 0.5}
+            })
+
+        for index in range(15):
+            place = lore["social_places"][index % len(lore["social_places"])]
+            style_title, style_description = SOCIAL_STYLES[index]
+            quest_db[group]["social"].append({
+                "id": make_quest_id(group, "social", index + 1),
+                "category": "social",
+                "title": f"{place} {style_title}",
+                "objective": f"Complete a group roleplay scene focused on **{style_title.lower()}** at or around **{place}**.",
+                "description": (
+                    f"{style_description} This is meant to create character moments, bonds, conflict, apologies, mentorship, or funny camp chaos. "
+                    f"The scene should include at least a few different characters interacting meaningfully."
+                ),
+                "reward_text": f"If completed, {group} gains a **morale boost** for the next 2 real-life weeks. Training, teamwork, and tense conversations should feel a little easier.",
+                "failure_text": f"If failed, {group}'s tensions rise. Awkward silences, short tempers, and social friction may colour scenes for the next 2 real-life weeks.",
+                "effect": {"kind": "morale", "modifier": 1, "target": "group morale"},
+                "penalty": {"kind": "morale", "modifier": -1, "target": "group morale"}
+            })
+
+        for index in range(10):
+            resource = lore["resources"][index % len(lore["resources"])]
+            style_title, style_description = RESOURCE_STYLES[index]
+
+            if group == "FossilClan" and index in [0, 4, 9]:
+                resource = "fossils and sacred stone records"
+                style_title = "Fossil Record Care"
+                style_description = "Search Dinosaur Spine and the Red Rock for important fossils, crystals, or ancient signs, then bring them back without damaging them."
+
+            resource_kind = "herbs" if any(word in resource for word in ["herb", "medicine", "catmint"]) else "resources"
+            success_message = (
+                f"If completed, {group}'s supplies improve for the next 2 real-life weeks. "
+                f"Medicine cats, patrols, or camp scenes may treat the group as better prepared."
+            )
+            failure_message = (
+                f"If failed, {group}'s resources are strained for the next 2 real-life weeks. "
+                f"If this involved herbs or medicine supplies, new injury or illness severity may receive **+1** at staff discretion."
             )
 
-    return failed_lines
+            if resource_kind == "herbs":
+                success_message = f"If completed, {group}'s medicine supplies are strong. Staff may apply **-1 severity** to one fitting new illness/injury treatment scene during the next 2 real-life weeks."
+                failure_message = f"If failed, medicine supplies are stressed. New injury or illness severity may receive **+1** at staff discretion for the next 2 real-life weeks."
+
+            quest_db[group]["resource"].append({
+                "id": make_quest_id(group, "resource", index + 1),
+                "category": "resource",
+                "title": f"{style_title}: {resource.title()}",
+                "objective": f"Complete a patrol or camp scene focused on **{resource}**.",
+                "description": (
+                    f"{style_description} Tie the scene into **{lore['camp']}**, {lore['home_detail']}, or the surrounding territory so it feels specific to {group}."
+                ),
+                "reward_text": success_message,
+                "failure_text": failure_message,
+                "effect": {"kind": resource_kind, "modifier": 1, "target": resource},
+                "penalty": {"kind": "resource strain", "modifier": -1, "target": resource}
+            })
+
+    return quest_db
+
+
+QUEST_DATABASE = build_quest_database()
+
+
+def validate_quest_database():
+    for group, categories in QUEST_DATABASE.items():
+        expected_counts = {"hunting": 20, "social": 15, "resource": 10}
+        for category, expected in expected_counts.items():
+            actual = len(categories.get(category, []))
+            if actual != expected:
+                raise RuntimeError(f"{group} {category} quest count is {actual}, expected {expected}.")
+
+
+validate_quest_database()
+
+
+def get_quest_expiry_iso():
+    return (datetime.now(TZ) + timedelta(days=QUEST_DURATION_DAYS)).isoformat()
+
+
+def clean_expired_quest_effects():
+    data.setdefault("quest_effects_v2", {})
+    now = datetime.now(TZ)
+
+    for group, effects in list(data["quest_effects_v2"].items()):
+        active_effects = []
+
+        for effect in effects:
+            expires_at = effect.get("expires_at")
+
+            if not expires_at:
+                active_effects.append(effect)
+                continue
+
+            try:
+                expiry = datetime.fromisoformat(expires_at)
+            except Exception:
+                continue
+
+            if expiry > now:
+                active_effects.append(effect)
+
+        if active_effects:
+            data["quest_effects_v2"][group] = active_effects
+        else:
+            data["quest_effects_v2"].pop(group, None)
+
+
+def select_new_quest(group):
+    data.setdefault("used_quests_v2", {})
+    data["used_quests_v2"].setdefault(group, {})
+
+    category = random.choice(["hunting", "social", "resource"])
+    data["used_quests_v2"][group].setdefault(category, [])
+
+    used_ids = data["used_quests_v2"][group][category]
+    quest_pool = QUEST_DATABASE[group][category]
+
+    available = [quest for quest in quest_pool if quest["id"] not in used_ids]
+
+    if not available:
+        used_ids.clear()
+        available = quest_pool.copy()
+
+    quest = copy.deepcopy(random.choice(available))
+    used_ids.append(quest["id"])
+
+    issued_at = datetime.now(TZ)
+    due_at = issued_at + timedelta(days=QUEST_DURATION_DAYS)
+
+    quest["group"] = group
+    quest["status"] = "Pending"
+    quest["issued_at"] = issued_at.isoformat()
+    quest["due_at"] = due_at.isoformat()
+
+    return quest
+
+
+def add_quest_effect(group, effect, source_title, result_text):
+    data.setdefault("quest_effects_v2", {})
+    data["quest_effects_v2"].setdefault(group, [])
+
+    saved_effect = copy.deepcopy(effect)
+    saved_effect["source"] = source_title
+    saved_effect["summary"] = result_text
+    saved_effect["expires_at"] = get_quest_expiry_iso()
+
+    data["quest_effects_v2"][group].append(saved_effect)
+
+
+def apply_quest_success(group, quest):
+    effect = quest.get("effect", {})
+    category = quest.get("category")
+    title = quest.get("title", "Quest")
+
+    if category == "hunting":
+        target = effect.get("target", "fitting prey")
+        modifier = effect.get("modifier", 2)
+        result_text = f"For the next **2 real-life weeks**, {group} gets **{format_modifier(modifier)} to {target} hunting rolls**."
+
+    elif category == "social":
+        result_text = f"For the next **2 real-life weeks**, {group} has a **morale boost**. Teamwork, training, bonding, and tense conversations may go a little smoother."
+
+    else:
+        target = effect.get("target", "resources")
+        if effect.get("kind") == "herbs":
+            result_text = f"For the next **2 real-life weeks**, {group}'s medicine supplies are strong. Staff may apply **-1 severity** to one fitting new illness/injury treatment scene."
+        else:
+            result_text = f"For the next **2 real-life weeks**, {group} is better prepared thanks to stronger **{target}**. Staff may use this as a small scene advantage when it fits."
+
+    add_quest_effect(group, effect, title, result_text)
+    return result_text
+
+
+def apply_quest_failure(group, quest):
+    penalty = quest.get("penalty", {})
+    category = quest.get("category")
+    title = quest.get("title", "Quest")
+
+    if category == "hunting":
+        chance = penalty.get("chance", 0.5)
+
+        if random.random() > chance:
+            return "No lasting penalty this time. The hunt failed, but the prey routes have not shifted badly enough to affect future rolls."
+
+        target = penalty.get("target", "fitting prey")
+        modifier = penalty.get("modifier", -1)
+        result_text = f"For the next **2 real-life weeks**, {group} has **{format_modifier(modifier)} to {target} hunting rolls** because the failed hunt scattered prey and muddled the trails."
+        add_quest_effect(group, penalty, title, result_text)
+        return result_text
+
+    if category == "social":
+        result_text = f"For the next **2 real-life weeks**, {group}'s morale is strained. Tension, gossip, stubbornness, or awkward silence may colour group scenes."
+        add_quest_effect(group, penalty, title, result_text)
+        return result_text
+
+    target = penalty.get("target", "resources")
+    result_text = f"For the next **2 real-life weeks**, {group}'s **{target}** are strained. If herbs or medicine supplies were involved, staff may apply **+1 severity** to fitting new injury/illness situations."
+    add_quest_effect(group, penalty, title, result_text)
+    return result_text
+
+
+def complete_pending_failures():
+    data.setdefault("active_quests_v2", {})
+    data.setdefault("quest_history_v2", [])
+
+    failed_results = []
+
+    for group, quest in list(data["active_quests_v2"].items()):
+        if not quest or quest.get("status") != "Pending":
+            continue
+
+        penalty_text = apply_quest_failure(group, quest)
+        quest["status"] = "Failed"
+        quest["failed_at"] = datetime.now(TZ).isoformat()
+        quest["failure_result"] = penalty_text
+
+        data["quest_history_v2"].append(copy.deepcopy(quest))
+
+        failed_results.append({
+            "group": group,
+            "title": quest.get("title", "Unknown Quest"),
+            "category": quest.get("category", "quest"),
+            "penalty": penalty_text
+        })
+
+    return failed_results
+
+
+def format_quest_block(group, quest):
+    category = quest.get("category", "quest")
+    icon = QUEST_CATEGORY_ICONS.get(category, "📜")
+    category_label = QUEST_CATEGORY_LABELS.get(category, "Quest")
+
+    lines = [
+        "━━━━━━━━━━━━━━━",
+        clan_mention(group),
+        f"**{group.upper()} QUEST**",
+        f"{icon} **{category_label}: {quest['title']}**",
+        "",
+        quest["objective"],
+        quest["description"],
+        "",
+        f"✅ **If Completed:** {quest['reward_text']}",
+        f"⚠️ **If Failed:** {quest['failure_text']}"
+    ]
+
+    return "\n".join(lines)
 
 
 def build_quest_announcement():
-    quest_data = parse_quests()
+    reset_legacy_quest_data_if_needed()
+    clean_expired_quest_effects()
 
-    failed_lines = mark_pending_previous_quests_failed()
+    failed_results = complete_pending_failures()
+
+    data["active_quests_v2"] = {}
+    issued_at = datetime.now(TZ)
+    due_at = issued_at + timedelta(days=QUEST_DURATION_DAYS)
 
     lines = [
         "🌙 **A half moon has passed...**",
         "",
         "New quests are now available for every Clan and the Outsiders! Complete them within the next **2 real-life weeks** before the next quest cycle begins.",
+        f"These quests are due by **{due_at.strftime('%B %d, %Y')}**.",
         ""
     ]
 
-    if failed_lines:
-        lines.append("━━━━━━━━━━━━━━━")
-        lines.append("⚠️ **PREVIOUS QUEST RESULTS**")
-        lines.extend(failed_lines)
-        lines.append("")
+    if failed_results:
+        lines.extend([
+            "━━━━━━━━━━━━━━━",
+            "⚠️ **PREVIOUS QUEST CONSEQUENCES**"
+        ])
 
-    group_order = [
-        "BlizzardClan",
-        "TorrentClan",
-        "FossilClan",
-        "SpruceClan",
-        "Outsider"
+        for result in failed_results:
+            lines.extend([
+                f"{clan_mention(result['group'])}",
+                f"Previous Quest Failed: **{result['title']}**",
+                f"Consequence: {result['penalty']}",
+                ""
+            ])
+
+    for group in QUEST_GROUP_ORDER:
+        quest = select_new_quest(group)
+        data["active_quests_v2"][group] = quest
+        lines.append(format_quest_block(group, quest))
+
+    return "\n".join(lines)
+
+
+def build_quest_reminder(days_remaining):
+    reset_legacy_quest_data_if_needed()
+
+    lines = [
+        f"⏳ **Quest Reminder: {days_remaining} days remaining!**",
+        "",
+        "The current quest cycle is still active. Complete your group's quest before the next cycle begins to earn the reward and avoid possible consequences.",
+        ""
     ]
 
-    for group in group_order:
-        quests = quest_data.get(group, [])
+    for group in QUEST_GROUP_ORDER:
+        quest = data.get("active_quests_v2", {}).get(group)
 
-        if not quests:
+        if not quest or quest.get("status") != "Pending":
             continue
 
-        chosen = choose_quest_for_group(group, quests)
-        record_active_quest(group, chosen)
-
-        group_label = "OUTSIDER" if group == "Outsider" else group.upper()
-
-        lines.append("━━━━━━━━━━━━━━━")
-        lines.append(clan_mention(group))
-        lines.append(f"**{group_label} QUEST**")
-        lines.append(f"**{chosen['title']}**")
-        lines.append(chosen["description"])
-
-        if is_hunting_quest(chosen):
-            lines.append("")
-            lines.append("🎯 **Hunting Quest Perk:** If this quest is passed, this group may earn a temporary hunting bonus until the end of the moon.")
-
-        lines.append("")
+        lines.extend([
+            "━━━━━━━━━━━━━━━",
+            clan_mention(group),
+            f"**{quest.get('title', 'Current Quest')}**",
+            f"Category: **{QUEST_CATEGORY_LABELS.get(quest.get('category'), 'Quest')}**",
+            quest.get("objective", "Complete the current quest."),
+            ""
+        ])
 
     return "\n".join(lines)
 
 
 async def send_quest_announcement(channel, message):
-    await channel.send(f"<@&{ROLEPLAY_ANNOUNCEMENTS_ROLE_ID}>")
     await send_long_message(channel, message)
 
 
-def build_quest_reminder(days_remaining):
-    group_order = [
-        "BlizzardClan",
-        "TorrentClan",
-        "FossilClan",
-        "SpruceClan",
-        "Outsider"
-    ]
-
-    lines = [
-        f"🌙 **Quest Reminder: {days_remaining} days remaining!**",
-        "",
-        f"You only have **{days_remaining} days** left to complete your current quests before the next quest cycle begins.",
-        ""
-    ]
-
-    for group in group_order:
-        active_quests = data.get("active_quests", {}).get(group, [])
-
-        if not active_quests:
-            continue
-
-        latest_quest = active_quests[-1]
-
-        if latest_quest.get("result") != "Pending":
-            continue
-
-        group_label = "Outsiders" if group == "Outsider" else group
-
-        lines.append("━━━━━━━━━━━━━━━")
-        lines.append(clan_mention(group))
-        lines.append(f"**{group_label}: {latest_quest.get('title', 'Unknown Quest')}**")
-        lines.append(latest_quest.get("description", "No description found."))
-        lines.append("")
-
-    return "\n".join(lines)
-
-
 @tasks.loop(minutes=30)
-async def quest_reminder_report():
+async def quest_reminders():
     now = datetime.now(TZ)
 
-    # Reminders go out at 10 AM only.
     if now.hour != 10:
         return
 
     async with data_lock:
-        data.setdefault("active_quests", {})
-        data.setdefault("quest_reminders_sent", {})
+        reset_legacy_quest_data_if_needed()
 
-        pending_quests = []
+        active = data.get("active_quests_v2", {})
+        pending = [quest for quest in active.values() if quest and quest.get("status") == "Pending"]
 
-        for group, quests in data["active_quests"].items():
-            if quests and quests[-1].get("result") == "Pending":
-                pending_quests.append(quests[-1])
-
-        if not pending_quests:
+        if not pending:
             return
 
-        issued_dates = [
-            datetime.fromisoformat(quest["issued_at"])
-            for quest in pending_quests
-            if quest.get("issued_at")
-        ]
-
-        if not issued_dates:
+        try:
+            first_due = min(datetime.fromisoformat(quest["due_at"]) for quest in pending if quest.get("due_at"))
+        except Exception:
             return
 
-        first_issued = min(issued_dates)
-        days_passed = (now.date() - first_issued.date()).days
+        days_remaining = (first_due.date() - now.date()).days
 
-        if days_passed == 7:
-            days_remaining = 7
-        elif days_passed == 11:
-            days_remaining = 3
-        else:
+        if days_remaining not in [7, 3]:
             return
 
-        reminder_key = f"{first_issued.date().isoformat()}-{days_remaining}"
+        reminder_key = f"{first_due.date().isoformat()}-{days_remaining}"
+        data.setdefault("quest_reminders_sent_v2", {})
 
-        if data["quest_reminders_sent"].get(reminder_key):
+        if data["quest_reminders_sent_v2"].get(reminder_key):
             return
 
-        data["quest_reminders_sent"][reminder_key] = True
+        data["quest_reminders_sent_v2"][reminder_key] = True
         message = build_quest_reminder(days_remaining)
         save_data(data)
 
@@ -5333,12 +5043,10 @@ async def quest_reminder_report():
 async def biweekly_quest_report():
     now = datetime.now(TZ)
 
-    # Monday at 10 AM
     if now.weekday() != 0 or now.hour != 10:
         return
 
-    # Every other week, starting from your chosen launch week
-    START_QUEST_WEEK = 20  # May 11, 2026 launch week
+    START_QUEST_WEEK = 20
 
     if (now.isocalendar().week - START_QUEST_WEEK) % 2 != 0:
         return
@@ -5346,10 +5054,12 @@ async def biweekly_quest_report():
     quest_period = f"{now.year}-W{now.isocalendar().week}"
 
     async with data_lock:
-        if data.get("last_quest_period") == quest_period:
+        reset_legacy_quest_data_if_needed()
+
+        if data.get("last_quest_period_v2") == quest_period:
             return
 
-        data["last_quest_period"] = quest_period
+        data["last_quest_period_v2"] = quest_period
         message = build_quest_announcement()
         save_data(data)
 
@@ -5359,12 +5069,19 @@ async def biweekly_quest_report():
         await send_quest_announcement(channel, message)
 
 
-@bot.tree.command(name="quests", description="Manually post new biweekly quests")
-async def quests(interaction: discord.Interaction):
-    if not await staff_command_check(interaction):
+quest_group = app_commands.Group(
+    name="quest",
+    description="Quest commands"
+)
+
+
+@quest_group.command(name="force", description="Force-post a new quest cycle")
+async def quest_force(interaction: discord.Interaction):
+    if not await quest_force_check(interaction):
         return
 
     async with data_lock:
+        reset_legacy_quest_data_if_needed()
         message = build_quest_announcement()
         save_data(data)
 
@@ -5372,183 +5089,78 @@ async def quests(interaction: discord.Interaction):
 
     if channel:
         await send_quest_announcement(channel, message)
-        await interaction.response.send_message("🌙 New quests posted.", ephemeral=True)
+        await interaction.response.send_message("🌙 New quests forced and posted.", ephemeral=True)
     else:
         await interaction.response.send_message("Quest channel not found. Check QUEST_CHANNEL_ID.", ephemeral=True)
 
 
-@bot.tree.command(name="questresult", description="Mark a Clan or Outsider quest as passed or failed")
+@quest_group.command(name="complete", description="Mark a Clan or Outsider quest as complete")
 @app_commands.describe(
-    group="Select the Clan or Outsider group",
-    result="Did the most recent quest pass or fail?",
-    hunting_bonus="Optional hunting bonus if this was a hunting quest. Use 0, 1, or 2."
+    group="Select the Clan or Outsider group"
 )
 @app_commands.choices(
-    group=CLAN_CHOICES,
-    result=[
-        app_commands.Choice(name="Pass", value="Passed"),
-        app_commands.Choice(name="Fail", value="Failed")
-    ],
-    hunting_bonus=[
-        app_commands.Choice(name="No Bonus", value=0),
-        app_commands.Choice(name="+1 Hunting Bonus", value=1),
-        app_commands.Choice(name="+2 Hunting Bonus", value=2)
-    ]
+    group=CLAN_CHOICES
 )
-async def questresult(
+async def quest_complete(
     interaction: discord.Interaction,
-    group: app_commands.Choice[str],
-    result: app_commands.Choice[str],
-    hunting_bonus: app_commands.Choice[int] = None
+    group: app_commands.Choice[str]
 ):
     if not await staff_command_check(interaction):
         return
 
     selected_group = group.value
-    selected_bonus = hunting_bonus.value if hunting_bonus else 0
 
     async with data_lock:
-        data.setdefault("active_quests", {})
-        data.setdefault("quest_modifiers", {})
+        reset_legacy_quest_data_if_needed()
 
-        active_quests = data["active_quests"].get(selected_group, [])
+        quest = data.get("active_quests_v2", {}).get(selected_group)
 
-        if not active_quests:
+        if not quest:
             await interaction.response.send_message(
-                f"No recent quests found for **{selected_group}**. Use `/quests` first.",
+                f"No active quest found for **{selected_group}**. Use `/quest force` to start a new cycle.",
                 ephemeral=True
             )
             return
 
-        active_quests[-1]["result"] = result.value
-        latest_quest = active_quests[-1]
-
-        perk_message = ""
-
-        if result.value == "Passed" and latest_quest.get("is_hunting") and selected_bonus > 0:
-            latest_quest["quest_modifier"] = selected_bonus
-
-            data["quest_modifiers"][selected_group] = {
-                "modifier": selected_bonus,
-                "moon": data.get("moon", 0),
-                "quest_title": latest_quest["title"]
-            }
-
-            perk_message = (
-                f"\n🎯 Hunting perk activated: **{selected_group} gets {format_modifier(selected_bonus)} "
-                f"on hunting rolls until the end of Moon {data.get('moon', '?')}**."
+        if quest.get("status") == "Completed":
+            await interaction.response.send_message(
+                f"**{selected_group}** has already completed **{quest.get('title', 'their quest')}**.",
+                ephemeral=True
             )
-
-        if result.value == "Failed":
-            data["quest_modifiers"].pop(selected_group, None)
-
-        save_data(data)
-
-    emoji = "✅" if result.value == "Passed" else "❌"
-
-    await interaction.response.send_message(
-        f"{emoji} **{selected_group}**'s latest quest was marked as **{result.value}**.\n"
-        f"Quest: **{latest_quest['title']}**"
-        f"{perk_message}",
-        ephemeral=True
-    )
-
-
-@bot.tree.command(name="rollhelp", description="Calculate whether a hunting roll caught the prey")
-@app_commands.describe(
-    name="The OC who is hunting",
-    base_hunting_stat="The number your OC needs to meet or beat to catch the prey",
-    current_roll="The number you rolled",
-    prey_modifier="The prey modifier, example: -2, 0, 1",
-    specialty_prey="Is this your OC's specialty prey?",
-    weather_modifier="Current weather hunting modifier",
-    quest_modifier="Current quest modifier, if any",
-    other_modifier="Any other modifier"
-)
-async def rollhelp(
-    interaction: discord.Interaction,
-    name: str,
-    base_hunting_stat: int,
-    current_roll: int,
-    prey_modifier: int,
-    specialty_prey: bool,
-    weather_modifier: int,
-    quest_modifier: int = 0,
-    other_modifier: int = 0
-):
-    async with data_lock:
-        cats = data.get("cats", {})
-
-        if name not in cats:
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
             return
 
-        cat = cats[name]
-        prepare_cat_record(name, cat)
+        reward_text = apply_quest_success(selected_group, quest)
+        quest["status"] = "Completed"
+        quest["completed_at"] = datetime.now(TZ).isoformat()
+        quest["reward_result"] = reward_text
 
-        hunger = get_hunger_status(cat)
-        hunger_modifier = HUNGER_MODIFIERS.get(hunger, 0)
+        data.setdefault("quest_history_v2", [])
+        data["quest_history_v2"].append(copy.deepcopy(quest))
+        data["active_quests_v2"][selected_group] = quest
 
         save_data(data)
 
-    specialty_bonus = 2 if specialty_prey else 0
-
-    final_roll = (
-        current_roll
-        + prey_modifier
-        + specialty_bonus
-        + weather_modifier
-        + quest_modifier
-        + hunger_modifier
-        + other_modifier
+    announcement = (
+        f"✅ **Quest Complete!**\n"
+        f"{clan_mention(selected_group)}\n\n"
+        f"**{selected_group}: {quest.get('title', 'Quest')}**\n"
+        f"Category: **{QUEST_CATEGORY_LABELS.get(quest.get('category'), 'Quest')}**\n\n"
+        f"🎁 **Reward:** {reward_text}"
     )
 
-    result = "✅ **Caught!**" if final_roll >= base_hunting_stat else "❌ **Missed!**"
+    channel = bot.get_channel(QUEST_CHANNEL_ID)
 
-    await interaction.response.send_message(
-        f"🎯 **Hunting Roll Helper**\n\n"
-        f"Cat: **{name}**\n"
-        f"Number Needed: **{base_hunting_stat}**\n"
-        f"Current Roll: **{current_roll}**\n"
-        f"Prey Modifier: **{format_modifier(prey_modifier)}**\n"
-        f"Specialty Prey Bonus: **{format_modifier(specialty_bonus)}**\n"
-        f"Weather Modifier: **{format_modifier(weather_modifier)}**\n"
-        f"Quest Modifier: **{format_modifier(quest_modifier)}**\n"
-        f"Hunger: **{hunger}** ({format_modifier(hunger_modifier)})\n"
-        f"Other Modifier: **{format_modifier(other_modifier)}**\n\n"
-        f"Final Roll: **{final_roll}**\n"
-        f"{result}"
-    )
-
-@bot.tree.command(name="setweather", description="Manually set this week's weather report")
-@app_commands.describe(
-    weather="Weather name, example: Heavy rain",
-    modifier="Hunting modifier, example: -2, 0, 1, 2",
-    reason="Why this weather affects hunting"
-)
-async def setweather(interaction: discord.Interaction, weather: str, modifier: int, reason: str):
-    if not await staff_command_check(interaction):
-        return
-
-    modifier_text = f"+{modifier}" if modifier > 0 else str(modifier)
-
-    report = (
-        f"☁️ Weather: {weather}\n"
-        f"🎯 Hunting Modifier: {modifier_text}\n"
-        f"📖 Effect: {reason}"
-    )
-
-    channel = bot.get_channel(WEATHER_CHANNEL_ID)
     if channel:
-        await channel.send(
-            content=f"<@&{WEATHER_REPORT_ROLE_ID}>",
-            embed=discord.Embed(
-                description=report,
-                color=discord.Color.blue()
-            )
+        await send_long_message(channel, announcement)
+        await interaction.response.send_message(
+            f"✅ {selected_group}'s quest was marked complete and the reward was posted.",
+            ephemeral=True
         )
-
-    await interaction.response.send_message("🌦️ Weather report sent.", ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            "Quest channel not found. The quest was saved as complete, but no announcement was posted.",
+            ephemeral=True
+        )
 
 # ─────────────────────────────
 # HIATUS
@@ -6254,6 +5866,7 @@ async def bothelp(interaction: discord.Interaction):
         "`/weather` or `/weatherreport` — View the current weekly weather report, if available.\n\n"
 
         "📜 **Quest / Story Commands**\n"
+        "Current quests are posted every 2 real-life weeks. Hunting, social, and resource quests can earn temporary group rewards or consequences.\n"
         "`/gatheringreport [ClanName]` — View recent story updates, quest results, injuries, rank changes, and major events for a specific Clan.\n"
         "`/rollhelp` — Helps calculate whether an OC caught their prey by adding the roll, prey modifier, specialty prey bonus, weather modifier, quest modifier, hunger modifier, and any other modifier against the OC’s required hunting number.\n\n"
 
@@ -6292,5 +5905,6 @@ bot.tree.add_command(relationship_group)
 bot.tree.add_command(medical_group)
 bot.tree.add_command(hiatus_group)
 bot.tree.add_command(feed_group)
+bot.tree.add_command(quest_group)
 keep_alive()
 bot.run(TOKEN)
