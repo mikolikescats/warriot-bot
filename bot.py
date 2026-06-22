@@ -432,6 +432,8 @@ def prepare_cat_record(name, cat):
     cat.setdefault("freeze_hunger", False)
     cat.setdefault("freeze_age_until", None)
     cat.setdefault("freeze_hunger_until", None)
+    cat.setdefault("previous_mentors", [])
+    cat.setdefault("past_apprentices", [])
 
 
 def format_history_entry(entry):
@@ -609,6 +611,122 @@ def reciprocal_family_relation(relation):
 def remove_from_list(cat, key, value):
     if key in cat:
         cat[key] = [item for item in cat[key] if item != value]
+
+
+def clean_name_value(value):
+    return str(value).replace(" (PAST)", "").replace(" (Past)", "").strip()
+
+
+def name_matches(value, target):
+    return clean_name_value(value).lower() == clean_name_value(target).lower()
+
+
+def list_has_name(values, target):
+    return any(name_matches(value, target) for value in values)
+
+
+def add_unique_name(cat, key, value):
+    cat.setdefault(key, [])
+
+    if not list_has_name(cat[key], value):
+        cat[key].append(value)
+        return True
+
+    return False
+
+
+def dedupe_name_list(values):
+    clean_values = []
+    seen = set()
+
+    for value in values or []:
+        clean_value = clean_name_value(value)
+
+        if not clean_value:
+            continue
+
+        key = clean_value.lower()
+
+        if key not in seen:
+            seen.add(key)
+            clean_values.append(clean_value)
+
+    return clean_values
+
+
+def format_past_names(values):
+    return [f"{name} (Past)" for name in dedupe_name_list(values)]
+
+
+def format_mentor_display(cat):
+    current_mentor = cat.get("mentor")
+    previous_mentors = dedupe_name_list(cat.get("previous_mentors", []))
+
+    if current_mentor:
+        clean_current = clean_name_value(current_mentor)
+        past_text = format_past_names(
+            name for name in previous_mentors
+            if not name_matches(name, clean_current)
+        )
+
+        if past_text:
+            return ", ".join([clean_current] + past_text)
+
+        return clean_current
+
+    past_text = format_past_names(previous_mentors)
+
+    if past_text:
+        return ", ".join(past_text)
+
+    return "None"
+
+
+def format_apprentices_display(cat):
+    current_apprentices = dedupe_name_list(cat.get("apprentices", []))
+    past_apprentices = [
+        name for name in dedupe_name_list(cat.get("past_apprentices", []))
+        if not list_has_name(current_apprentices, name)
+    ]
+
+    apprentice_text = current_apprentices + format_past_names(past_apprentices)
+
+    if apprentice_text:
+        return ", ".join(apprentice_text)
+
+    return "None"
+
+
+def dedupe_recent_history_for_display(history):
+    deduped = []
+    seen_previous_mentor_links = set()
+
+    for entry in history or []:
+        normalized = entry.lower()
+
+        if " added as a previous mentor" in normalized:
+            parts = entry.split(": ", 1)
+            text_part = parts[1] if len(parts) == 2 else entry
+            mentor_name = text_part.split(" added as a previous mentor", 1)[0].strip().lower()
+
+            if mentor_name in seen_previous_mentor_links:
+                continue
+
+            seen_previous_mentor_links.add(mentor_name)
+
+        if " added as a previous apprentice" in normalized:
+            parts = entry.split(": ", 1)
+            text_part = parts[1] if len(parts) == 2 else entry
+            apprentice_name = text_part.split(" added as a previous apprentice", 1)[0].strip().lower()
+
+            if apprentice_name in seen_previous_mentor_links:
+                continue
+
+            seen_previous_mentor_links.add(apprentice_name)
+
+        deduped.append(entry)
+
+    return deduped
 
 
 async def safe_respond(interaction, message, ephemeral=False):
@@ -3787,19 +3905,22 @@ async def mentor_assign(interaction: discord.Interaction, apprentice: str, mento
 
                 remove_from_list(old_mentor_cat, "apprentices", apprentice)
 
-                old_mentor_cat.setdefault("past_apprentices", [])
-                if apprentice not in old_mentor_cat["past_apprentices"]:
-                    old_mentor_cat["past_apprentices"].append(apprentice)
-
-                app_cat.setdefault("previous_mentors", [])
-                if clean_old_mentor not in app_cat["previous_mentors"]:
-                    app_cat["previous_mentors"].append(clean_old_mentor)
+                add_unique_name(old_mentor_cat, "past_apprentices", apprentice)
+                add_unique_name(app_cat, "previous_mentors", clean_old_mentor)
 
         app_cat["mentor"] = mentor
 
+        remove_from_list(app_cat, "previous_mentors", mentor)
+        remove_from_list(app_cat, "previous_mentors", f"{mentor} (PAST)")
+        remove_from_list(app_cat, "previous_mentors", f"{mentor} (Past)")
+
         mentor_cat.setdefault("apprentices", [])
-        if apprentice not in mentor_cat["apprentices"]:
+        if not list_has_name(mentor_cat["apprentices"], apprentice):
             mentor_cat["apprentices"].append(apprentice)
+
+        remove_from_list(mentor_cat, "past_apprentices", apprentice)
+        remove_from_list(mentor_cat, "past_apprentices", f"{apprentice} (PAST)")
+        remove_from_list(mentor_cat, "past_apprentices", f"{apprentice} (Past)")
 
         add_history(app_cat, f"Assigned {mentor} as mentor")
         add_history(mentor_cat, f"Became mentor to {apprentice}")
@@ -3828,13 +3949,29 @@ async def mentor_previous(interaction: discord.Interaction, name: str, mentor: s
         cat = cats[name]
         mentor_cat = cats[mentor]
 
-        cat.setdefault("previous_mentors", [])
-        if mentor not in cat["previous_mentors"]:
-            cat["previous_mentors"].append(mentor)
+        prepare_cat_record(name, cat)
+        prepare_cat_record(mentor, mentor_cat)
 
-        mentor_cat.setdefault("past_apprentices", [])
-        if name not in mentor_cat["past_apprentices"]:
-            mentor_cat["past_apprentices"].append(name)
+        current_mentor = cat.get("mentor")
+        if current_mentor and name_matches(current_mentor, mentor):
+            await interaction.response.send_message(
+                f"🐾 **{mentor}** is already **{name}**'s current mentor.",
+                ephemeral=True
+            )
+            return
+
+        added_previous_mentor = add_unique_name(cat, "previous_mentors", mentor)
+        added_past_apprentice = add_unique_name(mentor_cat, "past_apprentices", name)
+
+        if not added_previous_mentor and not added_past_apprentice:
+            await interaction.response.send_message(
+                f"🐾 **{mentor}** is already listed as **{name}**'s previous mentor.",
+                ephemeral=True
+            )
+            return
+
+        cat["previous_mentors"] = dedupe_name_list(cat.get("previous_mentors", []))
+        mentor_cat["past_apprentices"] = dedupe_name_list(mentor_cat.get("past_apprentices", []))
 
         add_history(cat, f"{mentor} added as a previous mentor")
         add_history(mentor_cat, f"{name} added as a previous apprentice")
@@ -3877,10 +4014,13 @@ async def mentor_remove(interaction: discord.Interaction, apprentice: str, mento
 
         # Also clean exact PAST version if it exists in list by mistake
         remove_from_list(app_cat, "previous_mentors", f"{mentor} (PAST)")
+        remove_from_list(app_cat, "previous_mentors", f"{mentor} (Past)")
 
         # Remove apprentice from mentor's lists
         remove_from_list(mentor_cat, "apprentices", apprentice)
         remove_from_list(mentor_cat, "past_apprentices", apprentice)
+        remove_from_list(mentor_cat, "past_apprentices", f"{apprentice} (PAST)")
+        remove_from_list(mentor_cat, "past_apprentices", f"{apprentice} (Past)")
 
         # Remove old mentor history from both cats
         remove_mentor_history_between(app_cat, mentor)
@@ -5285,10 +5425,8 @@ async def catinfo(interaction: discord.Interaction, name: str):
 
         status = cat.get("status", "Alive")
         afterlife = cat.get("afterlife") or "None"
-        mentor = cat.get("mentor") or "None"
-
-        apprentices = cat.get("apprentices", [])
-        apprentices_text = ", ".join(apprentices) if apprentices else "None"
+        mentor = format_mentor_display(cat)
+        apprentices_text = format_apprentices_display(cat)
 
         injury_text = format_injury(cat)
 
@@ -5324,7 +5462,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
             else "👪 **Relationships:** None"
         )
 
-        history = cat.get("history", [])[-8:]
+        history = dedupe_recent_history_for_display(cat.get("history", []))[-8:]
         history_text = "\n".join(format_history_entry(entry) for entry in history) if history else "No recent history."
 
         message = (
