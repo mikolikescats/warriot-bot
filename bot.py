@@ -786,12 +786,16 @@ HUNGER_MODIFIERS = {
 }
 
 HUNGER_DECAY_DAYS = {
-    "Stuffed": 7,
+    # Hunger levels above Satisfied drop after 2 real-life weeks.
+    "Stuffed": 14,
     "Thriving": 14,
     "Well-fed": 14,
     "Fed": 14,
-    "Satisfied": 14,
-    "Hungry": 14,
+
+    # Once a cat reaches Satisfied, they have 1 month before becoming Hungry.
+    # Hungry cats then have another month before becoming Starving.
+    "Satisfied": 30,
+    "Hungry": 30,
     "Starving": None
 }
 
@@ -959,6 +963,21 @@ def feed_cat(cat, prey_size="normal"):
     cat["last_hunger_update"] = now
 
     return current_hunger, new_hunger
+
+
+def reset_cat_hunger(cat):
+    """
+    Resets a cat's hunger back to Satisfied and restarts their hunger decay timer.
+    This does not change age/hunger freeze settings and does not add to Recent History.
+    """
+    current_hunger = get_hunger_status(cat)
+    now = datetime.now(TZ).isoformat()
+
+    cat["hunger_level"] = "Satisfied"
+    cat["last_fed"] = now
+    cat["last_hunger_update"] = now
+
+    return current_hunger, "Satisfied"
 
 
 # ─────────────────────────────
@@ -2693,8 +2712,11 @@ async def botinfo(interaction: discord.Interaction):
         "🍽️ **Feeding / Hunger Commands**\n"
         "`/feed cat [Name]` — Feed an OC normal prey and raise their hunger level by 1\n"
         "`/feed cat [Name] [Large Prey]` — Feed an OC large prey and raise their hunger level by 2\n"
+        "`/feed reset [Name]` — Staff only. Reset one OC's hunger back to Satisfied with a fresh timer\n"
+        "`/feed resetclan [Clan]` — Staff only. Reset every living cat in a Clan or Outsider group back to Satisfied with a fresh timer\n"
         "`/feed hunger [Clan]` — Check which cats in a Clan are Starving, Hungry, or Satisfied\n"
-        "Stuffed lasts 1 week. Every other hunger level lasts 2 weeks before dropping down by 1 level.\n"
+        "Fed, Well-fed, Thriving, and Stuffed each last 2 weeks before dropping down by 1 level.\n"
+        "Satisfied lasts 1 month before becoming Hungry. Hungry lasts another month before becoming Starving.\n"
         "Hunger affects hunting rolls: Starving -2, Hungry -1, Satisfied/Fed no change, Well-fed +1, Thriving +2, Stuffed -1.\n\n"
 
         "🛠️ **Staff Cat Management**\n"
@@ -5598,6 +5620,116 @@ async def feed_cat_command(
     )
 
 
+@feed_group.command(name="reset", description="Staff only. Reset an OC's hunger to Satisfied")
+@app_commands.describe(
+    name="The cat whose hunger should be reset"
+)
+async def feed_reset_command(
+    interaction: discord.Interaction,
+    name: str
+):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if name not in cats:
+            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            return
+
+        cat = cats[name]
+        prepare_cat_record(name, cat)
+
+        if str(cat.get("status", "Alive")).lower() == "dead":
+            await interaction.response.send_message(
+                "Dead cats cannot have their hunger reset.",
+                ephemeral=True
+            )
+            return
+
+        old_hunger, new_hunger = reset_cat_hunger(cat)
+        new_status_text = format_hunger_status(cat)
+
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🔄 **{name}**'s hunger has been reset.\n"
+        f"**Hunger:** {old_hunger} → **{new_hunger}**\n"
+        f"**Current Status:** {new_status_text}"
+    )
+
+
+@feed_group.command(name="resetclan", description="Staff only. Reset a full Clan's hunger to Satisfied")
+@app_commands.describe(
+    clan="The Clan or Outsider group whose hunger should be reset"
+)
+@app_commands.choices(clan=CLAN_CHOICES)
+async def feed_resetclan_command(
+    interaction: discord.Interaction,
+    clan: app_commands.Choice[str]
+):
+    if not await staff_command_check(interaction):
+        return
+
+    selected_clan = clan.value
+
+    async with data_lock:
+        cats = data.get("cats", {})
+        reset_cats = []
+
+        for name, cat in cats.items():
+            prepare_cat_record(name, cat)
+
+            if cat.get("clan") != selected_clan:
+                continue
+
+            if str(cat.get("status", "Alive")).lower() == "dead":
+                continue
+
+            old_hunger, new_hunger = reset_cat_hunger(cat)
+            reset_cats.append((name, old_hunger, new_hunger))
+
+        if not reset_cats:
+            await interaction.response.send_message(
+                f"No living cats found in **{selected_clan}**.",
+                ephemeral=True
+            )
+            return
+
+        reset_cats.sort(key=lambda item: item[0].lower())
+        save_data(data)
+
+    lines = [
+        f"🔄 **{selected_clan} hunger has been reset.**",
+        f"Reset **{len(reset_cats)}** living cat{'s' if len(reset_cats) != 1 else ''} to **Satisfied**.",
+        "",
+        "Updated cats:"
+    ]
+
+    for name, old_hunger, new_hunger in reset_cats:
+        lines.append(f"• **{name}** — {old_hunger} → {new_hunger}")
+
+    message = "\n".join(lines)
+    chunks = []
+    max_length = 1900
+
+    while len(message) > max_length:
+        split_at = message.rfind("\n", 0, max_length)
+        if split_at == -1:
+            split_at = max_length
+
+        chunks.append(message[:split_at])
+        message = message[split_at:].lstrip()
+
+    chunks.append(message)
+
+    await interaction.response.send_message(chunks[0])
+
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk)
+
+
 @feed_group.command(name="hunger", description="Check which cats in a Clan need to eat")
 @app_commands.describe(
     clan="The Clan or Outsider group you want to check"
@@ -5648,7 +5780,24 @@ async def feed_hunger_command(
         status_text = format_hunger_status(cat)
         lines.append(f"• **{name}** — {status_text}")
 
-    await interaction.response.send_message("\n".join(lines)[:1900])
+    message = "\n".join(lines)
+    chunks = []
+    max_length = 1900
+
+    while len(message) > max_length:
+        split_at = message.rfind("\n", 0, max_length)
+        if split_at == -1:
+            split_at = max_length
+
+        chunks.append(message[:split_at])
+        message = message[split_at:].lstrip()
+
+    chunks.append(message)
+
+    await interaction.response.send_message(chunks[0])
+
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk)
 
 # ─────────────────────────────
 # UPCOMING CEREMONIES PUBLIC COMMAND
