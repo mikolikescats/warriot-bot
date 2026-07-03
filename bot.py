@@ -76,6 +76,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 DATA_ROW_ID = "main"
 REPORT_CHANNEL_ID = 1441502516591202394
+AGE_REPORT_CHANNEL_ID = 1500707305631780984
 COMMAND_CHANNEL_ID = 1500705057207746610
 MEDICAL_COMMAND_CHANNEL_ID = 1503486789900570784
 WEATHER_CHANNEL_ID = 1441502516591202394
@@ -91,6 +92,14 @@ DEPUTY_ROLE_ID = 1449118789521375312
 MEDICINE_CAT_ROLE_ID = 1449118843485032599
 MEDICINE_CAT_APPRENTICE_ROLE_ID = 1449118899860672683
 HEALER_ROLE_ID = 1449118955418550364
+
+PROPHECY_PING_ROLE_IDS = [
+    LEADER_ROLE_ID,
+    DEPUTY_ROLE_ID,
+    MEDICINE_CAT_ROLE_ID,
+    MEDICINE_CAT_APPRENTICE_ROLE_ID,
+    HEALER_ROLE_ID
+]
 
 MEDICAL_ROLE_IDS = {
     MEDICINE_CAT_ROLE_ID,
@@ -769,31 +778,21 @@ HUNGER_LEVELS = [
     "Starving",
     "Hungry",
     "Satisfied",
-    "Fed",
-    "Well-fed",
-    "Thriving",
-    "Stuffed"
+    "Full",
+    "Well Fed"
 ]
 
 HUNGER_MODIFIERS = {
     "Starving": -2,
     "Hungry": -1,
     "Satisfied": 0,
-    "Fed": 0,
-    "Well-fed": 1,
-    "Thriving": 2,
-    "Stuffed": -1
+    "Full": 1,
+    "Well Fed": 2
 }
 
 HUNGER_DECAY_DAYS = {
-    # Hunger levels above Satisfied drop after 2 real-life weeks.
-    "Stuffed": 14,
-    "Thriving": 14,
-    "Well-fed": 14,
-    "Fed": 14,
-
-    # Once a cat reaches Satisfied, they have 1 month before becoming Hungry.
-    # Hungry cats then have another month before becoming Starving.
+    "Well Fed": 14,
+    "Full": 14,
     "Satisfied": 30,
     "Hungry": 30,
     "Starving": None
@@ -801,14 +800,23 @@ HUNGER_DECAY_DAYS = {
 
 
 def normalize_hunger_level(level):
-    if level in HUNGER_LEVELS:
-        return level
+    raw_level = str(level or "Satisfied").strip()
 
-    # Handles any older saved data from when this level was called Sated.
-    if level == "Sated":
-        return "Satisfied"
+    if raw_level in HUNGER_LEVELS:
+        return raw_level
 
-    return "Satisfied"
+    aliases = {
+        "Sated": "Satisfied",
+        "Fed": "Full",
+        "Well-fed": "Well Fed",
+        "Well-Fed": "Well Fed",
+        "Wellfed": "Well Fed",
+        "Well fed": "Well Fed",
+        "Thriving": "Well Fed",
+        "Stuffed": "Well Fed"
+    }
+
+    return aliases.get(raw_level, "Satisfied")
 
 
 def update_hunger_decay(cat):
@@ -1361,8 +1369,39 @@ PROPHECIES = [
 ]
 
 
+def prophecy_role_mentions():
+    return " ".join(f"<@&{role_id}>" for role_id in PROPHECY_PING_ROLE_IDS)
+
+
+def get_saved_active_prophecy():
+    active_prophecy = data.get("active_prophecy")
+
+    if active_prophecy:
+        return active_prophecy
+
+    used_prophecies = data.get("used_prophecies", [])
+
+    if used_prophecies:
+        data["active_prophecy"] = used_prophecies[-1]
+        return data["active_prophecy"]
+
+    return None
+
+
 def generate_prophecy(report):
     data.setdefault("used_prophecies", [])
+    data.setdefault("prophecies_paused", False)
+    data.setdefault("active_prophecy", None)
+
+    if data.get("prophecies_paused"):
+        active_prophecy = get_saved_active_prophecy()
+
+        if active_prophecy:
+            report["prophecies"].append(active_prophecy)
+        else:
+            report["prophecies"].append("🌙 Prophecy generation is currently paused. No active omen is saved.")
+
+        return
 
     available = [
         prophecy for prophecy in PROPHECIES
@@ -1375,7 +1414,9 @@ def generate_prophecy(report):
 
     prophecy = random.choice(available)
     data["used_prophecies"].append(prophecy)
+    data["active_prophecy"] = prophecy
     report["prophecies"].append(prophecy)
+
 
 async def run_moon_update():
     async with data_lock:
@@ -1559,7 +1600,10 @@ async def run_moon_update():
             age = cat.get("age", 0)
             clan = cat.get("clan", "Unknown Clan")
 
-            delay = cat.get("ceremony_delay", 0)
+            try:
+                delay = int(cat.get("ceremony_delay", 0) or 0)
+            except Exception:
+                delay = 0
 
             if delay > 0:
                 is_due_for_ceremony = (
@@ -1569,16 +1613,26 @@ async def run_moon_update():
                 )
 
                 if is_due_for_ceremony:
-                    cat["ceremony_delay"] = delay - 1
-                    add_history(
-                        cat,
-                        f"Ceremony delayed. {cat['ceremony_delay']} moon(s) remaining"
-                    )
-                    report["ceremony_delays"].append(
-                        f"⏳ {name}'s ceremony is delayed. {cat['ceremony_delay']} moon(s) remaining."
-                    )
+                    new_delay = max(0, delay - 1)
 
-                continue
+                    if new_delay <= 0:
+                        cat.pop("ceremony_delay", None)
+                        add_history(cat, "Ceremony delay ended")
+                        report["ceremony_delays"].append(
+                            f"⏳ {name}'s ceremony delay is up. They may have their ceremony this moon."
+                        )
+                    else:
+                        cat["ceremony_delay"] = new_delay
+                        add_history(
+                            cat,
+                            f"Ceremony delayed. {new_delay} moon(s) remaining"
+                        )
+                        report["ceremony_delays"].append(
+                            f"⏳ {name}'s ceremony is delayed. {new_delay} moon(s) remaining."
+                        )
+                        continue
+                else:
+                    continue
 
             if rank == "Kit" and age >= 6:
                 report["upcoming_apprentices"].append(
@@ -1638,40 +1692,23 @@ def bold_clan_names(text):
     return text
 
 
-async def build_clan_report_text(report=None):
+async def build_age_report_text(report=None):
     if report is None:
         current_moon = data.get("moon", 0)
-
         report = {
-            "old_moon": current_moon - 1,
             "new_moon": current_moon,
-            "recovered": [],
-            "recovery_progress": [],
-            "apprentice_news": [],
-            "rank_changes": [],
-            "elder_retirements": [],
-            "ceremony_delays": [],
-            "upcoming_apprentices": [],
-            "warrior_assessments": [],
-            "upcoming_elders": [],
-            "births": [],
-            "deaths": [],
-            "succession": [],
-            "prophecies": [],
             "season": data.get("season", get_current_season())
         }
 
-    old_moon = report.get("old_moon", data.get("moon", 0) - 1)
     new_moon = report.get("new_moon", data.get("moon", 0))
 
     lines = [
-        f"🌙 Moon {new_moon} Report",
+        f"🌙 Moon {new_moon} Age Report",
         f"🍃 Season: {report.get('season', data.get('season', 'Unknown'))} ({get_season_moon()}/3)",
+        "",
+        "A moon has passed over Echostone Mountain. Every living cat who is not age-frozen has grown one moon older, and the records below show each Clan's updated ages.",
         ""
     ]
-
-    lines.append("📋 Current Clan Records")
-    lines.append("")
 
     for clan_name in CLAN_NAMES_ONLY:
         lines.append(f"⛺ **{clan_name}**")
@@ -1703,14 +1740,19 @@ async def build_clan_report_text(report=None):
 
             for name, cat in ranked_cats:
                 mentor = cat.get("mentor")
+                age_text = f"{cat.get('age', 0)} moons"
+                age_freeze_text = freeze_remaining_text(cat, "freeze_age", "freeze_age_until")
+
+                if age_freeze_text:
+                    age_text += f" (age frozen {age_freeze_text})"
 
                 if rank in ["Apprentice", "Medicine Cat Apprentice"] and mentor:
                     lines.append(
-                        f"• {name} - {cat.get('age', 0)} moons | Mentor: {mentor}"
+                        f"• {name} - {age_text} | Mentor: {mentor}"
                     )
                 else:
                     lines.append(
-                        f"• {name} - {cat.get('age', 0)} moons"
+                        f"• {name} - {age_text}"
                     )
 
             lines.append("")
@@ -1728,14 +1770,54 @@ async def build_clan_report_text(report=None):
         outsiders.sort(key=lambda item: item[1].get("age", 0), reverse=True)
 
         for name, cat in outsiders:
+            age_text = f"{cat.get('age', 0)} moons"
+            age_freeze_text = freeze_remaining_text(cat, "freeze_age", "freeze_age_until")
+
+            if age_freeze_text:
+                age_text += f" (age frozen {age_freeze_text})"
+
             faction = f" | {cat.get('faction')}" if cat.get("faction") else ""
             lines.append(
-                f"• {name} - {cat.get('rank')} - {cat.get('age', 0)} moons{faction}"
+                f"• {name} - {cat.get('rank')} - {age_text}{faction}"
             )
     else:
         lines.append("No outsiders")
 
-    lines.extend(["", f"## 📜 What Happened in Moon {old_moon}"])
+    return "\n".join(lines)
+
+
+async def build_clan_report_text(report=None):
+    if report is None:
+        current_moon = data.get("moon", 0)
+
+        report = {
+            "old_moon": current_moon - 1,
+            "new_moon": current_moon,
+            "recovered": [],
+            "recovery_progress": [],
+            "apprentice_news": [],
+            "rank_changes": [],
+            "elder_retirements": [],
+            "ceremony_delays": [],
+            "upcoming_apprentices": [],
+            "warrior_assessments": [],
+            "upcoming_elders": [],
+            "births": [],
+            "deaths": [],
+            "succession": [],
+            "prophecies": [],
+            "season": data.get("season", get_current_season())
+        }
+
+    old_moon = report.get("old_moon", data.get("moon", 0) - 1)
+    new_moon = report.get("new_moon", data.get("moon", 0))
+
+    lines = [
+        f"🌙 Moon {new_moon} Story Report",
+        f"🍃 Season: {report.get('season', data.get('season', 'Unknown'))} ({get_season_moon()}/3)",
+        "",
+        f"## 📜 What Happened in Moon {old_moon}"
+    ]
 
     if (
         not report.get("recovered")
@@ -1830,9 +1912,15 @@ async def build_clan_report_text(report=None):
             lines.extend(report["ceremony_delays"])
 
     lines.extend(["", "### 🌙 Prophecies / Omens"])
-    lines.extend(report["prophecies"] if report.get("prophecies") else ["No prophecy was recorded."])
+
+    if report.get("prophecies"):
+        lines.append(prophecy_role_mentions())
+        lines.extend(report["prophecies"])
+    else:
+        lines.append("No prophecy was recorded.")
 
     return "\n".join(lines)
+
 
 @bot.tree.command(name="moontest", description="Preview what the moon report would look like for a future moon")
 @app_commands.describe(
@@ -2630,15 +2718,26 @@ async def revertmoon(interaction: discord.Interaction, confirm: str):
         ephemeral=True
     )
 
-@bot.tree.command(name="prophecy", description="Staff only. Post a custom prophecy or omen")
+prophecy_group = app_commands.Group(
+    name="prophecy",
+    description="Prophecy commands"
+)
+
+
+@prophecy_group.command(name="post", description="Staff only. Post a custom prophecy or omen")
 @app_commands.describe(
     text="The custom prophecy or omen to post"
 )
-async def prophecy(interaction: discord.Interaction, text: str):
+async def prophecy_post(interaction: discord.Interaction, text: str):
     if not await staff_command_check(interaction):
         return
 
+    async with data_lock:
+        data["active_prophecy"] = text
+        save_data(data)
+
     message = (
+        f"{prophecy_role_mentions()}\n"
         "🌙 **A prophecy has been received...**\n\n"
         f"{text}"
     )
@@ -2648,7 +2747,7 @@ async def prophecy(interaction: discord.Interaction, text: str):
     if channel:
         await send_long_message(channel, message)
         await interaction.response.send_message(
-            "🌙 Custom prophecy posted.",
+            "🌙 Custom prophecy posted and saved as the active prophecy.",
             ephemeral=True
         )
     else:
@@ -2656,6 +2755,68 @@ async def prophecy(interaction: discord.Interaction, text: str):
             "Could not find the report channel.",
             ephemeral=True
         )
+
+
+@prophecy_group.command(name="pause", description="Staff only. Pause new monthly prophecy rolls")
+@app_commands.describe(
+    current_prophecy="Optional. Save this as the prophecy to keep showing while paused."
+)
+async def prophecy_pause(interaction: discord.Interaction, current_prophecy: str = None):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        data["prophecies_paused"] = True
+
+        if current_prophecy:
+            data["active_prophecy"] = current_prophecy
+        else:
+            get_saved_active_prophecy()
+
+        active_prophecy = data.get("active_prophecy")
+        save_data(data)
+
+    if active_prophecy:
+        await interaction.response.send_message(
+            f"🌙 Prophecy rolls are now paused. The active prophecy will remain:\n\n{active_prophecy}",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            "🌙 Prophecy rolls are now paused. No active prophecy was found, so no new prophecy will roll until `/prophecy unpause` is used.",
+            ephemeral=True
+        )
+
+
+@prophecy_group.command(name="unpause", description="Staff only. Resume new monthly prophecy rolls")
+async def prophecy_unpause(interaction: discord.Interaction):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        data["prophecies_paused"] = False
+        save_data(data)
+
+    await interaction.response.send_message(
+        "🌙 Prophecy rolls are no longer paused. The next moon report can roll a new prophecy.",
+        ephemeral=True
+    )
+
+
+@prophecy_group.command(name="status", description="Staff only. Check whether prophecy rolls are paused")
+async def prophecy_status(interaction: discord.Interaction):
+    if not await staff_command_check(interaction):
+        return
+
+    paused = data.get("prophecies_paused", False)
+    active_prophecy = data.get("active_prophecy") or "None saved."
+    status_text = "Paused" if paused else "Rolling normally"
+
+    await interaction.response.send_message(
+        f"🌙 **Prophecy Status:** {status_text}\n"
+        f"**Active Prophecy:** {active_prophecy}",
+        ephemeral=True
+    )
 
 
 @bot.tree.command(name="advancemoon", description="Advance the moon manually")
@@ -2666,14 +2827,25 @@ async def advance_moon(interaction: discord.Interaction):
     await interaction.response.defer()
 
     report = await run_moon_update()
-    message = await build_clan_report_text(report)
+    story_message = await build_clan_report_text(report)
+    age_message = await build_age_report_text(report)
 
-    channel = bot.get_channel(REPORT_CHANNEL_ID)
+    age_channel = bot.get_channel(AGE_REPORT_CHANNEL_ID)
+    story_channel = bot.get_channel(REPORT_CHANNEL_ID)
 
-    if channel:
-        await send_long_message(channel, "@everyone 🌙 A moon has been manually advanced...\n\n" + message)
+    if age_channel:
+        await send_long_message(
+            age_channel,
+            "@everyone 🌙 A moon has passed over Echostone Mountain. Every living cat turns one moon older unless their age is frozen.\n\n" + age_message
+        )
 
-    await interaction.followup.send("🌙 Moon advanced manually.")
+    if story_channel:
+        await send_long_message(
+            story_channel,
+            "@everyone 🌙 A moon has been manually advanced across the Clans...\n\n" + story_message
+        )
+
+    await interaction.followup.send("🌙 Moon advanced manually. Age records and story updates were sent to their separate channels.")
 
 # ─────────────────────────────
 # /BOTINFO
@@ -2691,12 +2863,12 @@ async def botinfo(interaction: discord.Interaction):
         "`/resetmoon` — Staff only. Resets moon count and adjusts living cat ages\n"
         "`/weatherreport` — Manually post or view this week's weather report\n"
         "`/setweather` — Staff only. Manually set custom weather\n"
-        "`/prophecy` — Staff only. Post a custom prophecy or omen\n"
+        "`/prophecy post` — Staff only. Post a custom prophecy or omen\n`/prophecy pause` — Staff only. Pause new monthly prophecy rolls and keep the active prophecy\n`/prophecy unpause` — Staff only. Resume new monthly prophecy rolls\n"
         "`/revertmoon` — Staff only. Reverts to the saved state before the last moon advance\n\n"
 
         "📜 **Quest / Gathering Commands**\n"
         "`/quest force` — Quest manager only. Force-post a new 2-week quest cycle and apply consequences for unfinished quests\n"
-        "`/quest complete [Clan]` — Staff only. Mark a Clan or Outsider quest as complete and post the reward\n"
+        "`/quest complete [Clan]` — Staff only. Mark a Clan or Outsider quest as complete and post the reward\n`/resetquest [Clan/Outsider/All]` — Staff only. Replace one or all active quests while keeping the current due date\n"
         "`/gatheringreport [ClanName]` — Generate a Clan-specific report including recent promotions, deaths, injuries, quest results, and major story changes\n"
         "`/rollhelp` — Helps calculate whether an OC caught their prey using their roll, modifiers, and required hunting number\n\n"
 
@@ -2715,9 +2887,8 @@ async def botinfo(interaction: discord.Interaction):
         "`/feed reset [Name]` — Staff only. Reset one OC's hunger back to Satisfied with a fresh timer\n"
         "`/feed resetclan [Clan]` — Staff only. Reset every living cat in a Clan or Outsider group back to Satisfied with a fresh timer\n"
         "`/feed hunger [Clan]` — Check which cats in a Clan are Starving, Hungry, or Satisfied\n"
-        "Fed, Well-fed, Thriving, and Stuffed each last 2 weeks before dropping down by 1 level.\n"
-        "Satisfied lasts 1 month before becoming Hungry. Hungry lasts another month before becoming Starving.\n"
-        "Hunger affects hunting rolls: Starving -2, Hungry -1, Satisfied/Fed no change, Well-fed +1, Thriving +2, Stuffed -1.\n\n"
+        "Well Fed lasts 2 weeks before dropping to Full. Full lasts 2 weeks before dropping to Satisfied. Satisfied lasts 30 days before Hungry, and Hungry lasts 30 days before Starving.\n"
+        "Hunger affects hunting rolls: Starving -2, Hungry -1, Satisfied no change, Full +1, Well Fed +2.\n\n"
 
         "🛠️ **Staff Cat Management**\n"
         "`/cat add` — Add a new living cat\n"
@@ -4576,7 +4747,7 @@ async def weekly_weather_report():
 QUEST_CHANNEL_ID = 1441502516591202394
 QUEST_FORCE_ROLE_ID = 1441507932369063957
 QUEST_DURATION_DAYS = 14
-QUEST_SYSTEM_VERSION = "v2_fun_categories"
+QUEST_SYSTEM_VERSION = "v3_attainable_hunts"
 
 CLAN_ROLE_IDS = {
     "BlizzardClan": 1445529729309605978,
@@ -4643,6 +4814,8 @@ def reset_legacy_quest_data_if_needed():
         data.setdefault("quest_reminders_sent_v2", {})
         return
 
+    existing_active_quests_v2 = copy.deepcopy(data.get("active_quests_v2", {}))
+
     for old_key in [
         "active_quests",
         "quest_results",
@@ -4654,7 +4827,7 @@ def reset_legacy_quest_data_if_needed():
         data.pop(old_key, None)
 
     data["quest_system_version"] = QUEST_SYSTEM_VERSION
-    data["active_quests_v2"] = {}
+    data["active_quests_v2"] = existing_active_quests_v2
     data["used_quests_v2"] = {}
     data["quest_effects_v2"] = {}
     data["quest_history_v2"] = []
@@ -4824,7 +4997,19 @@ def build_quest_database():
         for index in range(20):
             site = lore["sites"][index % len(lore["sites"])]
             style_title, style_description = HUNTING_STYLES[index]
-            amount = site["amount"] + (index % 3)
+            amount = 3 + (index % 4)
+
+            if amount == 6:
+                reward_text = f"If completed, {group} earns **+3 to all hunting rolls** for the next 2 real-life weeks."
+                effect = {"kind": "hunting", "target": "all hunting rolls", "modifier": 3}
+                failure_text = f"If failed, there is a chance {group} suffers **-1 to all hunting rolls** for the next 2 real-life weeks as prey routes grow harder to trust."
+                penalty = {"kind": "hunting", "target": "all hunting rolls", "modifier": -1, "chance": 0.5}
+            else:
+                reward_text = f"If completed, {group} earns **+2 to {site['bonus']} hunting rolls** for the next 2 real-life weeks."
+                effect = {"kind": "hunting", "target": site["bonus"], "modifier": 2}
+                failure_text = f"If failed, there is a chance {group} suffers **-1 to {site['bonus']} hunting rolls** for the next 2 real-life weeks as prey becomes harder to track."
+                penalty = {"kind": "hunting", "target": site["bonus"], "modifier": -1, "chance": 0.5}
+
             quest_db[group]["hunting"].append({
                 "id": make_quest_id(group, "hunting", index + 1),
                 "category": "hunting",
@@ -4834,10 +5019,10 @@ def build_quest_database():
                     f"{style_description} Travel to **{site['name']}** ({site['channel']}) where {site['danger']} make the hunt feel alive. "
                     f"Use this quest as a group patrol, mentor lesson, rivalry scene, or fresh-kill pile rescue."
                 ),
-                "reward_text": f"If completed, {group} earns **+2 to {site['bonus']} hunting rolls** for the next 2 real-life weeks.",
-                "failure_text": f"If failed, there is a chance {group} suffers **-1 to {site['bonus']} hunting rolls** for the next 2 real-life weeks as prey becomes harder to track.",
-                "effect": {"kind": "hunting", "target": site["bonus"], "modifier": 2},
-                "penalty": {"kind": "hunting", "target": site["bonus"], "modifier": -1, "chance": 0.5}
+                "reward_text": reward_text,
+                "failure_text": failure_text,
+                "effect": effect,
+                "penalty": penalty
             })
 
         for index in range(15):
@@ -4987,6 +5172,18 @@ def add_quest_effect(group, effect, source_title, result_text):
     data["quest_effects_v2"][group].append(saved_effect)
 
 
+def format_hunting_effect_text(group, modifier, target, reason=None):
+    if target == "all hunting rolls":
+        base_text = f"For the next **2 real-life weeks**, {group} gets **{format_modifier(modifier)} to all hunting rolls**"
+    else:
+        base_text = f"For the next **2 real-life weeks**, {group} gets **{format_modifier(modifier)} to {target} hunting rolls**"
+
+    if reason:
+        return f"{base_text} {reason}"
+
+    return base_text + "."
+
+
 def apply_quest_success(group, quest):
     effect = quest.get("effect", {})
     category = quest.get("category")
@@ -4995,7 +5192,7 @@ def apply_quest_success(group, quest):
     if category == "hunting":
         target = effect.get("target", "fitting prey")
         modifier = effect.get("modifier", 2)
-        result_text = f"For the next **2 real-life weeks**, {group} gets **{format_modifier(modifier)} to {target} hunting rolls**."
+        result_text = format_hunting_effect_text(group, modifier, target)
 
     elif category == "social":
         result_text = f"For the next **2 real-life weeks**, {group} has a **morale boost**. Teamwork, training, bonding, and tense conversations may go a little smoother."
@@ -5024,7 +5221,12 @@ def apply_quest_failure(group, quest):
 
         target = penalty.get("target", "fitting prey")
         modifier = penalty.get("modifier", -1)
-        result_text = f"For the next **2 real-life weeks**, {group} has **{format_modifier(modifier)} to {target} hunting rolls** because the failed hunt scattered prey and muddled the trails."
+        result_text = format_hunting_effect_text(
+            group,
+            modifier,
+            target,
+            "because the failed hunt scattered prey and muddled the trails."
+        )
         add_quest_effect(group, penalty, title, result_text)
         return result_text
 
@@ -5324,6 +5526,106 @@ async def quest_complete(
             ephemeral=True
         )
 
+
+RESET_QUEST_CHOICES = [
+    app_commands.Choice(name="All", value="All")
+] + CLAN_CHOICES
+
+
+def get_current_quest_cycle_due_at():
+    reset_legacy_quest_data_if_needed()
+    active_quests = data.get("active_quests_v2", {})
+    due_dates = []
+
+    for quest in active_quests.values():
+        if not quest or not quest.get("due_at"):
+            continue
+
+        try:
+            due_dates.append(datetime.fromisoformat(quest["due_at"]))
+        except Exception:
+            continue
+
+    if due_dates:
+        return min(due_dates)
+
+    return datetime.now(TZ) + timedelta(days=QUEST_DURATION_DAYS)
+
+
+def replace_active_quest(group, due_at):
+    old_quest = data.get("active_quests_v2", {}).get(group)
+    new_quest = select_new_quest(group)
+    new_quest["due_at"] = due_at.isoformat()
+    new_quest["reset_at"] = datetime.now(TZ).isoformat()
+
+    if old_quest:
+        new_quest["replaced_quest_title"] = old_quest.get("title", "Unknown Quest")
+
+    data.setdefault("active_quests_v2", {})
+    data["active_quests_v2"][group] = new_quest
+
+    return old_quest, new_quest
+
+
+@bot.tree.command(name="resetquest", description="Staff only. Replace one group's quest or every active quest without changing the due date")
+@app_commands.describe(
+    group="Choose one Clan/Outsider group or All"
+)
+@app_commands.choices(group=RESET_QUEST_CHOICES)
+async def resetquest(interaction: discord.Interaction, group: app_commands.Choice[str]):
+    if not await staff_command_check(interaction):
+        return
+
+    selected_group = group.value
+
+    async with data_lock:
+        reset_legacy_quest_data_if_needed()
+        clean_expired_quest_effects()
+
+        due_at = get_current_quest_cycle_due_at()
+        groups_to_reset = QUEST_GROUP_ORDER if selected_group == "All" else [selected_group]
+        reset_results = []
+
+        for quest_group_name in groups_to_reset:
+            old_quest, new_quest = replace_active_quest(quest_group_name, due_at)
+            reset_results.append((quest_group_name, old_quest, new_quest))
+
+        save_data(data)
+
+    lines = [
+        "🔄 **Quest Reset**",
+        f"The replacement quest{'s' if len(reset_results) != 1 else ''} will still be due on **{due_at.strftime('%B %d, %Y')}**, so the regular 2-week schedule stays intact.",
+        ""
+    ]
+
+    for quest_group_name, old_quest, new_quest in reset_results:
+        lines.extend([
+            "━━━━━━━━━━━━━━━",
+            clan_mention(quest_group_name),
+            f"**{quest_group_name} replacement quest**"
+        ])
+
+        if old_quest:
+            lines.append(f"Old Quest: **{old_quest.get('title', 'Unknown Quest')}**")
+
+        lines.append(format_quest_block(quest_group_name, new_quest))
+        lines.append("")
+
+    announcement = "\n".join(lines)
+    channel = bot.get_channel(QUEST_CHANNEL_ID)
+
+    if channel:
+        await send_long_message(channel, announcement)
+        await interaction.response.send_message(
+            f"🔄 Reset quest{'s' if len(reset_results) != 1 else ''} for **{selected_group}** and posted the replacement.",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            "Quest channel not found. The replacement quest was saved, but no announcement was posted.",
+            ephemeral=True
+        )
+
 # ─────────────────────────────
 # HIATUS
 # ─────────────────────────────
@@ -5371,11 +5673,23 @@ async def monthly_moon():
         save_data(data)
 
     report = await run_moon_update()
-    message = await build_clan_report_text(report)
+    story_message = await build_clan_report_text(report)
+    age_message = await build_age_report_text(report)
 
-    channel = bot.get_channel(REPORT_CHANNEL_ID)
-    if channel:
-        await send_long_message(channel, "@everyone 🌙 A new moon has passed across the Clans...\n\n" + message)
+    age_channel = bot.get_channel(AGE_REPORT_CHANNEL_ID)
+    story_channel = bot.get_channel(REPORT_CHANNEL_ID)
+
+    if age_channel:
+        await send_long_message(
+            age_channel,
+            "@everyone 🌙 A moon has passed over Echostone Mountain. Every living cat turns one moon older unless their age is frozen.\n\n" + age_message
+        )
+
+    if story_channel:
+        await send_long_message(
+            story_channel,
+            "@everyone 🌙 A new moon has passed across the Clans...\n\n" + story_message
+        )
 
 # ─────────────────────────────
 # PUBLIC COMMANDS
@@ -6193,5 +6507,6 @@ bot.tree.add_command(medical_group)
 bot.tree.add_command(hiatus_group)
 bot.tree.add_command(feed_group)
 bot.tree.add_command(quest_group)
+bot.tree.add_command(prophecy_group)
 keep_alive()
 bot.run(TOKEN)
