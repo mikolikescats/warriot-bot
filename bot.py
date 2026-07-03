@@ -4747,6 +4747,8 @@ async def weekly_weather_report():
 QUEST_CHANNEL_ID = 1441502516591202394
 QUEST_FORCE_ROLE_ID = 1441507932369063957
 QUEST_DURATION_DAYS = 14
+QUEST_SCHEDULE_START_WEEK = 20
+QUEST_FORCE_SKIP_DAYS = 5
 QUEST_SYSTEM_VERSION = "v3_attainable_hunts"
 
 CLAN_ROLE_IDS = {
@@ -5289,23 +5291,56 @@ def format_quest_block(group, quest):
     return "\n".join(lines)
 
 
-def build_quest_announcement():
+def build_quest_announcement(due_at=None, apply_failures=True, forced=False, skipped_schedule=None):
     reset_legacy_quest_data_if_needed()
     clean_expired_quest_effects()
 
-    failed_results = complete_pending_failures()
+    issued_at = datetime.now(TZ)
+
+    if due_at is None:
+        due_at = issued_at + timedelta(days=QUEST_DURATION_DAYS)
+
+    if apply_failures:
+        failed_results = complete_pending_failures()
+    else:
+        failed_results = []
+        data.setdefault("quest_history_v2", [])
+
+        for old_group, old_quest in list(data.get("active_quests_v2", {}).items()):
+            if not old_quest:
+                continue
+
+            archived_quest = copy.deepcopy(old_quest)
+            archived_quest["status"] = "Cleared"
+            archived_quest["cleared_at"] = issued_at.isoformat()
+            archived_quest["clear_reason"] = "Replaced by forced quest cycle. No failure penalty was applied."
+            archived_quest.setdefault("group", old_group)
+            data["quest_history_v2"].append(archived_quest)
 
     data["active_quests_v2"] = {}
-    issued_at = datetime.now(TZ)
-    due_at = issued_at + timedelta(days=QUEST_DURATION_DAYS)
 
-    lines = [
-        "🌙 **A half moon has passed...**",
-        "",
-        "New quests are now available for every Clan and the Outsiders! Complete them within the next **2 real-life weeks** before the next quest cycle begins.",
-        f"These quests are due by **{due_at.strftime('%B %d, %Y')}**.",
-        ""
-    ]
+    if forced:
+        lines = [
+            "🌙 **New quests have been forced...**",
+            "",
+            "The current active quests have been cleared and replaced. No failure penalties were applied for the cleared quests.",
+            f"These replacement quests are due by **{due_at.strftime('%B %d, %Y')}**, keeping the regular every-other-Monday quest schedule intact.",
+            ""
+        ]
+
+        if skipped_schedule:
+            lines.extend([
+                f"Because this reset happened within **{QUEST_FORCE_SKIP_DAYS} days** of the next scheduled quest cycle, the **{skipped_schedule.strftime('%B %d, %Y')}** automatic reset will be skipped.",
+                ""
+            ])
+    else:
+        lines = [
+            "🌙 **A half moon has passed...**",
+            "",
+            "New quests are now available for every Clan and the Outsiders! Complete them before the next regular quest cycle begins.",
+            f"These quests are due by **{due_at.strftime('%B %d, %Y')}**.",
+            ""
+        ]
 
     if failed_results:
         lines.extend([
@@ -5323,6 +5358,8 @@ def build_quest_announcement():
 
     for group in QUEST_GROUP_ORDER:
         quest = select_new_quest(group)
+        quest["issued_at"] = issued_at.isoformat()
+        quest["due_at"] = due_at.isoformat()
         data["active_quests_v2"][group] = quest
         lines.append(format_quest_block(group, quest))
 
@@ -5403,19 +5440,55 @@ async def quest_reminders():
         await send_long_message(channel, message)
 
 
+def quest_period_key(dt):
+    return f"{dt.year}-W{dt.isocalendar().week}"
+
+
+def is_regular_quest_cycle(dt):
+    return dt.weekday() == 0 and (dt.isocalendar().week - QUEST_SCHEDULE_START_WEEK) % 2 == 0
+
+
+def next_regular_quest_cycle(after_time):
+    for days_ahead in range(0, 60):
+        candidate_date = after_time.date() + timedelta(days=days_ahead)
+        candidate = datetime.combine(
+            candidate_date,
+            time(hour=10, minute=0),
+            tzinfo=TZ
+        )
+
+        if candidate <= after_time:
+            continue
+
+        if is_regular_quest_cycle(candidate):
+            return candidate
+
+    return after_time + timedelta(days=QUEST_DURATION_DAYS)
+
+
+def forced_quest_due_date(now):
+    next_cycle = next_regular_quest_cycle(now)
+    days_until_next_cycle = (next_cycle.date() - now.date()).days
+
+    if days_until_next_cycle <= QUEST_FORCE_SKIP_DAYS:
+        skipped_cycle = next_cycle
+        due_at = next_regular_quest_cycle(skipped_cycle + timedelta(seconds=1))
+        return due_at, skipped_cycle
+
+    return next_cycle, None
+
+
 @tasks.loop(minutes=30)
 async def biweekly_quest_report():
     now = datetime.now(TZ)
 
-    if now.weekday() != 0 or now.hour != 10:
+    if now.hour != 10:
         return
 
-    START_QUEST_WEEK = 20
-
-    if (now.isocalendar().week - START_QUEST_WEEK) % 2 != 0:
+    if not is_regular_quest_cycle(now):
         return
 
-    quest_period = f"{now.year}-W{now.isocalendar().week}"
+    quest_period = quest_period_key(now)
 
     async with data_lock:
         reset_legacy_quest_data_if_needed()
@@ -5433,29 +5506,48 @@ async def biweekly_quest_report():
         await send_quest_announcement(channel, message)
 
 
+
 quest_group = app_commands.Group(
     name="quest",
     description="Quest commands"
 )
 
 
-@quest_group.command(name="force", description="Force-post a new quest cycle")
+@quest_group.command(name="force", description="Force-post a new quest cycle and keep the regular Monday schedule")
 async def quest_force(interaction: discord.Interaction):
     if not await quest_force_check(interaction):
         return
 
     async with data_lock:
         reset_legacy_quest_data_if_needed()
-        message = build_quest_announcement()
+        now = datetime.now(TZ)
+        due_at, skipped_cycle = forced_quest_due_date(now)
+
+        if skipped_cycle:
+            data["last_quest_period_v2"] = quest_period_key(skipped_cycle)
+
+        data["quest_reminders_sent_v2"] = {}
+        message = build_quest_announcement(
+            due_at=due_at,
+            apply_failures=False,
+            forced=True,
+            skipped_schedule=skipped_cycle
+        )
         save_data(data)
 
     channel = bot.get_channel(QUEST_CHANNEL_ID)
 
     if channel:
         await send_quest_announcement(channel, message)
-        await interaction.response.send_message("🌙 New quests forced and posted.", ephemeral=True)
+
+        response = f"🌙 New quests forced and posted. They are due on **{due_at.strftime('%B %d, %Y')}**."
+        if skipped_cycle:
+            response += f" The **{skipped_cycle.strftime('%B %d, %Y')}** automatic reset will be skipped."
+
+        await interaction.response.send_message(response, ephemeral=True)
     else:
         await interaction.response.send_message("Quest channel not found. Check QUEST_CHANNEL_ID.", ephemeral=True)
+
 
 
 @quest_group.command(name="complete", description="Mark a Clan or Outsider quest as complete")
