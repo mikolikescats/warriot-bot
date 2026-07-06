@@ -30,6 +30,7 @@ if not TOKEN:
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 
 bot = commands.Bot(
     command_prefix="!",
@@ -82,7 +83,31 @@ MEDICAL_COMMAND_CHANNEL_ID = 1503486789900570784
 WEATHER_CHANNEL_ID = 1441502516591202394
 WEATHER_REPORT_ROLE_ID = 1500967820194877490
 HIATUS_CHANNEL_ID = 1441505660905984120
+HIATUS_ROLE_ID = 1463773050242728049
+MEMBER_ROLE_ID = 1441508526504808561
 DEATH_ANNOUNCEMENT_CHANNEL_ID = 1441498271842304183
+
+MEMBERSHIP_MILESTONE_CHANNEL_ID = 1441505660905984120
+MEMBERSHIP_MILESTONE_PING_ROLE_IDS = [
+    1441506626371715103,
+    1484027097784516668
+]
+
+OC_COUNT_ROLE_IDS = {
+    11: 1489121685289570385,
+    12: 1511063554311323879,
+    13: 1489121950893609010,
+    14: 1511063886860648458,
+    15: 1489122040714760212,
+    16: 1511064133250977924,
+    17: 1489122237763027125,
+    18: 1511064322242117804,
+    19: 1489122317182308393,
+    20: 1511064426197815456
+}
+
+ONE_MONTH_SLOT_DAYS = 30
+THREE_MONTH_SLOT_DAYS = 90
 
 HELPER_ROLE_ID = 1484027097784516668
 MODERATOR_ROLE_ID = 1441506626371715103
@@ -298,6 +323,7 @@ def fresh_default_data():
         "question_usage": {},
         "used_questions": [],
         "hiatuses": {},
+        "membership_milestones": {},
         "last_moon_snapshot": None
     }
 
@@ -417,6 +443,282 @@ async def staff_command_check(interaction: discord.Interaction):
         return False
 
     return True
+
+# ─────────────────────────────
+# HIATUS ROLE HELPERS
+# ─────────────────────────────
+
+async def fetch_member_by_id(guild, user_id):
+    if guild is None:
+        return None
+
+    try:
+        raw_user_id = int(str(user_id).strip())
+    except ValueError:
+        return None
+
+    member = guild.get_member(raw_user_id)
+
+    if member:
+        return member
+
+    try:
+        return await guild.fetch_member(raw_user_id)
+    except discord.NotFound:
+        return None
+    except discord.Forbidden:
+        return None
+    except discord.HTTPException:
+        return None
+
+
+def get_guild_for_hiatus(info):
+    guild_id = info.get("guild_id") if isinstance(info, dict) else None
+
+    if guild_id:
+        try:
+            guild = bot.get_guild(int(guild_id))
+            if guild:
+                return guild
+        except Exception:
+            pass
+
+    if len(bot.guilds) == 1:
+        return bot.guilds[0]
+
+    return None
+
+
+async def update_hiatus_roles(guild, user_id, on_hiatus):
+    if guild is None:
+        return False, "I could not find the server to update roles."
+
+    member = await fetch_member_by_id(guild, user_id)
+
+    if member is None:
+        return False, "I could not find that member in the server."
+
+    hiatus_role = guild.get_role(HIATUS_ROLE_ID)
+    member_role = guild.get_role(MEMBER_ROLE_ID)
+
+    missing_roles = []
+
+    if hiatus_role is None:
+        missing_roles.append("Hiatus")
+
+    if member_role is None:
+        missing_roles.append("Member")
+
+    if missing_roles:
+        return False, f"I could not find the following role(s): {', '.join(missing_roles)}."
+
+    try:
+        if on_hiatus:
+            roles_to_add = [hiatus_role] if hiatus_role not in member.roles else []
+            roles_to_remove = [member_role] if member_role in member.roles else []
+            reason = "Member placed on hiatus through the Echostone bot."
+        else:
+            roles_to_add = [member_role] if member_role not in member.roles else []
+            roles_to_remove = [hiatus_role] if hiatus_role in member.roles else []
+            reason = "Member returned from hiatus through the Echostone bot."
+
+        if roles_to_add:
+            await member.add_roles(*roles_to_add, reason=reason)
+
+        if roles_to_remove:
+            await member.remove_roles(*roles_to_remove, reason=reason)
+
+    except discord.Forbidden:
+        return False, "I do not have permission to change those roles. Make sure I have Manage Roles and my bot role is above the Member and Hiatus roles."
+    except discord.HTTPException as error:
+        return False, f"Discord rejected the role update: {error}"
+
+    if on_hiatus:
+        return True, "Hiatus role added and Member role removed."
+
+    return True, "Member role restored and Hiatus role removed."
+
+
+def get_membership_guild():
+    if len(bot.guilds) == 1:
+        return bot.guilds[0]
+
+    for guild in bot.guilds:
+        if guild.get_role(MEMBER_ROLE_ID):
+            return guild
+
+    return None
+
+
+def milestone_ping_text():
+    return " ".join(f"<@&{role_id}>" for role_id in MEMBERSHIP_MILESTONE_PING_ROLE_IDS)
+
+
+def highest_oc_count_from_roles(member):
+    member_role_ids = {role.id for role in getattr(member, "roles", [])}
+    found_counts = [count for count, role_id in OC_COUNT_ROLE_IDS.items() if role_id in member_role_ids]
+
+    if not found_counts:
+        return None
+
+    return max(found_counts)
+
+
+async def increase_oc_count_role(member, reason):
+    current_count = highest_oc_count_from_roles(member)
+
+    if current_count is None:
+        return False, None, None, "No 11–20 OC count role was found, so I could not tell which role to upgrade."
+
+    if current_count >= 20:
+        return True, current_count, current_count, "Already at the 20 OC maximum, so no role upgrade was applied."
+
+    new_count = current_count + 1
+    new_role = member.guild.get_role(OC_COUNT_ROLE_IDS[new_count])
+
+    if new_role is None:
+        return False, current_count, new_count, f"The {new_count} OCs role could not be found."
+
+    roles_to_remove = []
+    for count, role_id in OC_COUNT_ROLE_IDS.items():
+        role = member.guild.get_role(role_id)
+        if role and role in member.roles and count != new_count:
+            roles_to_remove.append(role)
+
+    try:
+        await member.add_roles(new_role, reason=reason)
+
+        if roles_to_remove:
+            await member.remove_roles(*roles_to_remove, reason=reason)
+
+    except discord.Forbidden:
+        return False, current_count, new_count, "I do not have permission to update OC count roles. Make sure I have Manage Roles and my bot role is above the OC count roles."
+    except discord.HTTPException as error:
+        return False, current_count, new_count, f"Discord rejected the OC count role update: {error}"
+
+    return True, current_count, new_count, f"OC slot role upgraded from {current_count} OCs to {new_count} OCs."
+
+
+async def iter_fetch_guild_members(guild):
+    try:
+        async for member in guild.fetch_members(limit=None):
+            yield member
+    except discord.Forbidden:
+        print("Could not fetch guild members. Server Members Intent may be disabled or the bot lacks access.")
+    except discord.HTTPException as error:
+        print(f"Could not fetch guild members: {error}")
+
+
+async def run_membership_milestone_check(post_to_channel=True):
+    guild = get_membership_guild()
+
+    if guild is None:
+        return ["⚠️ I could not find the server for membership milestone checks."]
+
+    now = datetime.now(TZ)
+    today_key = now.date().isoformat()
+    notices = []
+    changed = False
+
+    async with data_lock:
+        data.setdefault("membership_milestones", {})
+        milestone_data = data["membership_milestones"]
+
+    member_role = guild.get_role(MEMBER_ROLE_ID)
+
+    if member_role is None:
+        return ["⚠️ I could not find the Member role, so membership milestones could not be checked."]
+
+    async for member in iter_fetch_guild_members(guild):
+        if member.bot:
+            continue
+
+        if member_role not in member.roles:
+            continue
+
+        if member.joined_at is None:
+            continue
+
+        joined_at = member.joined_at.astimezone(TZ)
+        days_in_server = (now.date() - joined_at.date()).days
+        user_id = str(member.id)
+
+        async with data_lock:
+            member_record = data.setdefault("membership_milestones", {}).setdefault(user_id, {})
+            already_one_month = member_record.get("one_month_awarded")
+            already_three_month = member_record.get("three_month_awarded")
+
+        member_notices = []
+
+        if days_in_server >= ONE_MONTH_SLOT_DAYS and not already_one_month:
+            success, old_count, new_count, role_message = await increase_oc_count_role(
+                member,
+                "30-day active membership milestone through the Echostone bot."
+            )
+
+            async with data_lock:
+                member_record = data.setdefault("membership_milestones", {}).setdefault(user_id, {})
+                member_record["one_month_awarded"] = success
+                member_record["one_month_last_checked_at"] = now.isoformat()
+                if success:
+                    member_record["one_month_awarded_at"] = now.isoformat()
+                member_record["one_month_days_in_server"] = days_in_server
+                member_record["one_month_role_success"] = success
+                member_record["one_month_role_message"] = role_message
+                changed = True
+
+            member_notices.append(
+                f"🌙 **1 Month Milestone:** {member.mention} has been in the server for **{days_in_server} days** and qualifies for their **+1 OC slot**.\n"
+                f"{('✅' if success else '⚠️')} {role_message}"
+            )
+
+            # Keep the local role list reasonably fresh before a possible 3-month upgrade in the same run.
+            try:
+                member = await guild.fetch_member(member.id)
+            except Exception:
+                pass
+
+        if days_in_server >= THREE_MONTH_SLOT_DAYS and not already_three_month:
+            success, old_count, new_count, role_message = await increase_oc_count_role(
+                member,
+                "3-month active membership milestone through the Echostone bot."
+            )
+
+            async with data_lock:
+                member_record = data.setdefault("membership_milestones", {}).setdefault(user_id, {})
+                member_record["three_month_awarded"] = success
+                member_record["three_month_last_checked_at"] = now.isoformat()
+                if success:
+                    member_record["three_month_awarded_at"] = now.isoformat()
+                member_record["three_month_days_in_server"] = days_in_server
+                member_record["three_month_role_success"] = success
+                member_record["three_month_role_message"] = role_message
+                changed = True
+
+            member_notices.append(
+                f"🌙 **3 Month Milestone:** {member.mention} has been in the server for **{days_in_server} days** and qualifies for their **additional +1 OC slot**.\n"
+                f"{('✅' if success else '⚠️')} {role_message}"
+            )
+
+        if member_notices:
+            notices.extend(member_notices)
+
+    if changed:
+        async with data_lock:
+            data["last_membership_milestone_check"] = today_key
+            save_data(data)
+
+    if post_to_channel and notices:
+        channel = bot.get_channel(MEMBERSHIP_MILESTONE_CHANNEL_ID)
+        if channel:
+            header = (
+                f"{milestone_ping_text()}\n"
+                f"🌙 **Membership Slot Milestone Update**\n"
+                f"The following member milestone(s) were reached and processed automatically:"
+            )
+            await send_long_message(channel, header + "\n\n" + "\n\n".join(notices))
+
+    return notices
 
 # ─────────────────────────────
 # SMALL HELPERS
@@ -2581,6 +2883,9 @@ async def on_ready():
     if not check_hiatuses.is_running():
         check_hiatuses.start()
 
+    if not check_membership_milestones.is_running():
+        check_membership_milestones.start()
+
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -2926,9 +3231,9 @@ async def botinfo(interaction: discord.Interaction):
         "🍼 **Litter Command**\n"
         "`/addlitter` — Record kits born to a mother and connect family automatically\n\n"
         "🌙 **Hiatus Commands**\n"
-        "`/hiatus add [user_id] [days]` — Staff only. Add a hiatus using a raw Discord user ID\n"
+        "`/hiatus add [user_id] [days]` — Staff only. Add a hiatus, remove Member, and add the Hiatus role\n"
         "`/hiatus edit [user_id] [days]` — Staff only. Change how long a current hiatus lasts from today\n"
-        "`/hiatus end [user_id]` — Staff only. Manually remove someone from hiatus\n"
+        "`/hiatus end [user_id]` — Staff only. Manually remove someone from hiatus, restore Member, and remove Hiatus\n"
         "`/hiatus all` — Staff only. View everyone currently on hiatus and how many days remain\n\n"
 
         "💭 **OC Question System**\n"
@@ -2989,21 +3294,32 @@ async def hiatus_add(interaction: discord.Interaction, user_id: str, days: int):
         return
 
     end_date = datetime.now(TZ) + timedelta(days=days)
+    guild_id = interaction.guild.id if interaction.guild else None
 
     async with data_lock:
         data.setdefault("hiatuses", {})
         data["hiatuses"][user_id] = {
             "days": days,
             "start_date": datetime.now(TZ).date().isoformat(),
-            "end_date": end_date.date().isoformat()
+            "end_date": end_date.date().isoformat(),
+            "guild_id": guild_id
         }
 
         save_data(data)
 
-    await interaction.response.send_message(
+    role_success, role_message = await update_hiatus_roles(interaction.guild, user_id, on_hiatus=True)
+
+    response = (
         f"🌙 <@{user_id}> has been placed on hiatus for **{days} day(s)**.\n"
         f"They are set to return on **{end_date.strftime('%B %d, %Y')}**."
     )
+
+    if role_success:
+        response += f"\n✅ {role_message}"
+    else:
+        response += f"\n⚠️ Hiatus was saved, but roles were not changed: {role_message}"
+
+    await interaction.response.send_message(response)
 
 
 @hiatus_group.command(name="end", description="Manually end a hiatus using a raw Discord user ID")
@@ -3025,9 +3341,16 @@ async def hiatus_end(interaction: discord.Interaction, user_id: str):
         del data["hiatuses"][user_id]
         save_data(data)
 
-    await interaction.response.send_message(
-        f"✅ <@{user_id}> has been manually removed from hiatus."
-    )
+    role_success, role_message = await update_hiatus_roles(interaction.guild, user_id, on_hiatus=False)
+
+    response = f"✅ <@{user_id}> has been manually removed from hiatus."
+
+    if role_success:
+        response += f"\n✅ {role_message}"
+    else:
+        response += f"\n⚠️ Hiatus was ended, but roles were not changed: {role_message}"
+
+    await interaction.response.send_message(response)
 
 @hiatus_group.command(name="all", description="View everyone currently on hiatus")
 async def hiatus_all(interaction: discord.Interaction):
@@ -5726,6 +6049,7 @@ async def resetquest(interaction: discord.Interaction, group: app_commands.Choic
 async def check_hiatuses():
     today = datetime.now(TZ).date()
     ended_hiatuses = []
+    ended_info = {}
 
     async with data_lock:
         data.setdefault("hiatuses", {})
@@ -5735,6 +6059,7 @@ async def check_hiatuses():
 
             if today >= end_date:
                 ended_hiatuses.append(user_id)
+                ended_info[user_id] = copy.deepcopy(info)
 
         for user_id in ended_hiatuses:
             del data["hiatuses"][user_id]
@@ -5744,9 +6069,101 @@ async def check_hiatuses():
 
     channel = bot.get_channel(HIATUS_CHANNEL_ID)
 
-    if channel:
-        for user_id in ended_hiatuses:
-            await channel.send(f"✅ <@{user_id}> is now off hiatus!")
+    for user_id in ended_hiatuses:
+        guild = get_guild_for_hiatus(ended_info.get(user_id, {}))
+        role_success, role_message = await update_hiatus_roles(guild, user_id, on_hiatus=False)
+
+        if channel:
+            message = f"✅ <@{user_id}> is now off hiatus!"
+
+            if role_success:
+                message += f"\n✅ {role_message}"
+            else:
+                message += f"\n⚠️ Roles were not changed automatically: {role_message}"
+
+            await channel.send(message)
+
+
+@tasks.loop(time=time(hour=10, minute=15, tzinfo=TZ))
+async def check_membership_milestones():
+    async with data_lock:
+        today_key = datetime.now(TZ).date().isoformat()
+
+        if data.get("last_membership_milestone_check") == today_key:
+            return
+
+    notices = await run_membership_milestone_check(post_to_channel=True)
+
+    async with data_lock:
+        data["last_membership_milestone_check"] = today_key
+        save_data(data)
+
+    if notices:
+        print(f"Membership milestone check posted {len(notices)} notice(s).")
+
+
+membership_group = app_commands.Group(
+    name="membership",
+    description="Membership milestone and OC slot commands"
+)
+
+
+@membership_group.command(name="check", description="Staff only. Run the 1-month and 3-month OC slot milestone check now.")
+async def membership_check(interaction: discord.Interaction):
+    if not await staff_command_check(interaction):
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    notices = await run_membership_milestone_check(post_to_channel=True)
+
+    async with data_lock:
+        data["last_membership_milestone_check"] = datetime.now(TZ).date().isoformat()
+        save_data(data)
+
+    if notices:
+        await interaction.followup.send(
+            f"✅ Membership milestone check complete. Posted **{len(notices)}** milestone notice(s).",
+            ephemeral=True
+        )
+    else:
+        await interaction.followup.send(
+            "✅ Membership milestone check complete. No new 1-month or 3-month milestones were due.",
+            ephemeral=True
+        )
+
+
+@membership_group.command(name="status", description="Staff only. View stored milestone status for a member by raw Discord user ID.")
+@app_commands.describe(user_id="Raw Discord user ID from /raw-format")
+async def membership_status(interaction: discord.Interaction, user_id: str):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        record = data.setdefault("membership_milestones", {}).get(str(user_id), {})
+
+    guild = interaction.guild or get_membership_guild()
+    member = await fetch_member_by_id(guild, user_id) if guild else None
+
+    if member and member.joined_at:
+        days_in_server = (datetime.now(TZ).date() - member.joined_at.astimezone(TZ).date()).days
+        joined_text = f"Joined **{member.joined_at.astimezone(TZ).strftime('%B %d, %Y')}** (**{days_in_server} days ago**)"
+        oc_count = highest_oc_count_from_roles(member)
+        oc_text = f"{oc_count} OCs" if oc_count else "No 11–20 OC role found"
+    else:
+        joined_text = "Member could not be found or join date is unavailable."
+        oc_text = "Unknown"
+
+    one_month = "Yes" if record.get("one_month_awarded") else "No"
+    three_month = "Yes" if record.get("three_month_awarded") else "No"
+
+    await interaction.response.send_message(
+        f"🌙 **Membership Status for <@{user_id}>**\n"
+        f"{joined_text}\n"
+        f"Current OC Slot Role: **{oc_text}**\n"
+        f"30-Day Slot Awarded: **{one_month}**\n"
+        f"3-Month Slot Awarded: **{three_month}**",
+        ephemeral=True
+    )
 
 # ─────────────────────────────
 # MONTHLY MOON LOOP
@@ -6597,6 +7014,7 @@ bot.tree.add_command(mentor_group)
 bot.tree.add_command(relationship_group)
 bot.tree.add_command(medical_group)
 bot.tree.add_command(hiatus_group)
+bot.tree.add_command(membership_group)
 bot.tree.add_command(feed_group)
 bot.tree.add_command(quest_group)
 bot.tree.add_command(prophecy_group)
