@@ -93,6 +93,13 @@ MEMBERSHIP_MILESTONE_PING_ROLE_IDS = [
     1484027097784516668
 ]
 
+# Members with any of these roles are not active RP members and should not
+# receive automatic OC slot milestone rewards.
+NON_RP_MILESTONE_ROLE_IDS = {
+    1491988054301479004,
+    1448897126976454747
+}
+
 OC_COUNT_ROLE_IDS = {
     11: 1489121685289570385,
     12: 1511063554311323879,
@@ -609,6 +616,60 @@ async def iter_fetch_guild_members(guild):
         print(f"Could not fetch guild members: {error}")
 
 
+def member_has_any_role(member, role_ids):
+    member_role_ids = {role.id for role in getattr(member, "roles", [])}
+    return bool(member_role_ids.intersection(set(role_ids)))
+
+
+def milestone_was_processed(record, milestone_key):
+    """
+    Treat both the new processed flag and older awarded fields as already handled.
+    This prevents the bot from giving the same 30-day or 90-day OC slot more than once,
+    even if the data was saved by an older version of the bot.
+    """
+    return bool(
+        record.get(f"{milestone_key}_processed")
+        or record.get(f"{milestone_key}_awarded")
+        or record.get(f"{milestone_key}_awarded_at")
+    )
+
+
+async def process_membership_milestone(member, user_id, milestone_key, milestone_label, days_in_server, reason):
+    success, old_count, new_count, role_message = await increase_oc_count_role(member, reason)
+    now_iso = datetime.now(TZ).isoformat()
+
+    async with data_lock:
+        member_record = data.setdefault("membership_milestones", {}).setdefault(user_id, {})
+
+        # The important flag: once this milestone is attempted, it is done forever
+        # unless staff manually edits the database. This stops daily repeat awards.
+        member_record[f"{milestone_key}_processed"] = True
+        member_record[f"{milestone_key}_processed_at"] = now_iso
+        member_record[f"{milestone_key}_days_in_server"] = days_in_server
+        member_record[f"{milestone_key}_role_success"] = success
+        member_record[f"{milestone_key}_role_message"] = role_message
+        member_record[f"{milestone_key}_old_oc_count"] = old_count
+        member_record[f"{milestone_key}_new_oc_count"] = new_count
+
+        # Keep the old field names too so /membership status and any older saved data
+        # continue to make sense.
+        member_record[f"{milestone_key}_awarded"] = True
+        member_record[f"{milestone_key}_last_checked_at"] = now_iso
+        member_record[f"{milestone_key}_awarded_at"] = now_iso
+
+    if success and old_count is not None and new_count is not None and new_count > old_count:
+        result_line = f"✅ I added **+1 OC slot**: **{old_count} OCs → {new_count} OCs**."
+    elif success and old_count == 20:
+        result_line = "✅ They are already at the **20 OC maximum**, so no extra slot was added."
+    else:
+        result_line = f"⚠️ I could not add the OC slot automatically: {role_message}"
+
+    return (
+        f"🌙 **{milestone_label}:** {member.mention} has been in the server for **{days_in_server} days**.\n"
+        f"{result_line}"
+    )
+
+
 async def run_membership_milestone_check(post_to_channel=True):
     guild = get_membership_guild()
 
@@ -622,7 +683,6 @@ async def run_membership_milestone_check(post_to_channel=True):
 
     async with data_lock:
         data.setdefault("membership_milestones", {})
-        milestone_data = data["membership_milestones"]
 
     member_role = guild.get_role(MEMBER_ROLE_ID)
 
@@ -636,6 +696,11 @@ async def run_membership_milestone_check(post_to_channel=True):
         if member_role not in member.roles:
             continue
 
+        # Ignore non-RP members entirely. They do not get slot upgrades and staff
+        # does not get pinged for their 30/90-day milestones.
+        if member_has_any_role(member, NON_RP_MILESTONE_ROLE_IDS):
+            continue
+
         if member.joined_at is None:
             continue
 
@@ -645,60 +710,39 @@ async def run_membership_milestone_check(post_to_channel=True):
 
         async with data_lock:
             member_record = data.setdefault("membership_milestones", {}).setdefault(user_id, {})
-            already_one_month = member_record.get("one_month_awarded")
-            already_three_month = member_record.get("three_month_awarded")
+            one_month_processed = milestone_was_processed(member_record, "one_month")
+            three_month_processed = milestone_was_processed(member_record, "three_month")
 
         member_notices = []
 
-        if days_in_server >= ONE_MONTH_SLOT_DAYS and not already_one_month:
-            success, old_count, new_count, role_message = await increase_oc_count_role(
-                member,
-                "30-day active membership milestone through the Echostone bot."
-            )
+        if days_in_server >= ONE_MONTH_SLOT_DAYS and not one_month_processed:
+            member_notices.append(await process_membership_milestone(
+                member=member,
+                user_id=user_id,
+                milestone_key="one_month",
+                milestone_label="30 Day Milestone",
+                days_in_server=days_in_server,
+                reason="30-day active membership milestone through the Echostone bot."
+            ))
+            changed = True
 
-            async with data_lock:
-                member_record = data.setdefault("membership_milestones", {}).setdefault(user_id, {})
-                member_record["one_month_awarded"] = success
-                member_record["one_month_last_checked_at"] = now.isoformat()
-                if success:
-                    member_record["one_month_awarded_at"] = now.isoformat()
-                member_record["one_month_days_in_server"] = days_in_server
-                member_record["one_month_role_success"] = success
-                member_record["one_month_role_message"] = role_message
-                changed = True
-
-            member_notices.append(
-                f"🌙 **1 Month Milestone:** {member.mention} has been in the server for **{days_in_server} days** and qualifies for their **+1 OC slot**.\n"
-                f"{('✅' if success else '⚠️')} {role_message}"
-            )
-
-            # Keep the local role list reasonably fresh before a possible 3-month upgrade in the same run.
+            # Refresh roles before checking the 90-day milestone, so a member who
+            # legitimately receives both in one run climbs by exactly two slots.
             try:
                 member = await guild.fetch_member(member.id)
             except Exception:
                 pass
 
-        if days_in_server >= THREE_MONTH_SLOT_DAYS and not already_three_month:
-            success, old_count, new_count, role_message = await increase_oc_count_role(
-                member,
-                "3-month active membership milestone through the Echostone bot."
-            )
-
-            async with data_lock:
-                member_record = data.setdefault("membership_milestones", {}).setdefault(user_id, {})
-                member_record["three_month_awarded"] = success
-                member_record["three_month_last_checked_at"] = now.isoformat()
-                if success:
-                    member_record["three_month_awarded_at"] = now.isoformat()
-                member_record["three_month_days_in_server"] = days_in_server
-                member_record["three_month_role_success"] = success
-                member_record["three_month_role_message"] = role_message
-                changed = True
-
-            member_notices.append(
-                f"🌙 **3 Month Milestone:** {member.mention} has been in the server for **{days_in_server} days** and qualifies for their **additional +1 OC slot**.\n"
-                f"{('✅' if success else '⚠️')} {role_message}"
-            )
+        if days_in_server >= THREE_MONTH_SLOT_DAYS and not three_month_processed:
+            member_notices.append(await process_membership_milestone(
+                member=member,
+                user_id=user_id,
+                milestone_key="three_month",
+                milestone_label="90 Day Milestone",
+                days_in_server=days_in_server,
+                reason="90-day active membership milestone through the Echostone bot."
+            ))
+            changed = True
 
         if member_notices:
             notices.extend(member_notices)
@@ -714,7 +758,7 @@ async def run_membership_milestone_check(post_to_channel=True):
             header = (
                 f"{milestone_ping_text()}\n"
                 f"🌙 **Membership Slot Milestone Update**\n"
-                f"The following member milestone(s) were reached and processed automatically:"
+                f"The following RP member milestone(s) were reached and processed automatically. Each milestone can only be processed once per member:"
             )
             await send_long_message(channel, header + "\n\n" + "\n\n".join(notices))
 
@@ -6339,15 +6383,20 @@ async def membership_status(interaction: discord.Interaction, user_id: str):
         joined_text = "Member could not be found or join date is unavailable."
         oc_text = "Unknown"
 
-    one_month = "Yes" if record.get("one_month_awarded") else "No"
-    three_month = "Yes" if record.get("three_month_awarded") else "No"
+    one_month = "Yes" if milestone_was_processed(record, "one_month") else "No"
+    three_month = "Yes" if milestone_was_processed(record, "three_month") else "No"
+
+    excluded_text = "No"
+    if member and member_has_any_role(member, NON_RP_MILESTONE_ROLE_IDS):
+        excluded_text = "Yes — ignored for automatic RP slot milestones"
 
     await interaction.response.send_message(
         f"🌙 **Membership Status for <@{user_id}>**\n"
         f"{joined_text}\n"
         f"Current OC Slot Role: **{oc_text}**\n"
-        f"30-Day Slot Awarded: **{one_month}**\n"
-        f"3-Month Slot Awarded: **{three_month}**",
+        f"Ignored Non-RP Role: **{excluded_text}**\n"
+        f"30-Day Milestone Processed: **{one_month}**\n"
+        f"90-Day Milestone Processed: **{three_month}**",
         ephemeral=True
     )
 
