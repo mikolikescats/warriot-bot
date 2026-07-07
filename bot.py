@@ -86,6 +86,8 @@ HIATUS_CHANNEL_ID = 1441505660905984120
 HIATUS_ROLE_ID = 1463773050242728049
 MEMBER_ROLE_ID = 1441508526504808561
 DEATH_ANNOUNCEMENT_CHANNEL_ID = 1441498271842304183
+ACTIVITY_WARNING_CHANNEL_ID = 1500705057207746610
+ACTIVITY_WARNING_USER_ID = 1440182563674132490
 
 MEMBERSHIP_MILESTONE_CHANNEL_ID = 1441505660905984120
 MEMBERSHIP_MILESTONE_PING_ROLE_IDS = [
@@ -331,6 +333,8 @@ def fresh_default_data():
         "used_questions": [],
         "hiatuses": {},
         "membership_milestones": {},
+        "activity_reminders": {},
+        "last_activity_reminder_id": 0,
         "last_moon_snapshot": None
     }
 
@@ -2929,6 +2933,9 @@ async def on_ready():
 
     if not check_membership_milestones.is_running():
         check_membership_milestones.start()
+
+    if not check_activity_reminders.is_running():
+        check_activity_reminders.start()
 
 
 @bot.tree.error
@@ -6332,6 +6339,210 @@ async def check_membership_milestones():
         print(f"Membership milestone check posted {len(notices)} notice(s).")
 
 
+
+# ─────────────────────────────
+# ACTIVITY WARNING REMINDERS
+# ─────────────────────────────
+
+def clean_discord_user_id(value):
+    cleaned = str(value).strip()
+    cleaned = cleaned.replace("<@", "").replace(">", "").replace("!", "")
+    return cleaned
+
+
+@tasks.loop(minutes=30)
+async def check_activity_reminders():
+    now = datetime.now(TZ)
+    due_reminders = []
+
+    async with data_lock:
+        data.setdefault("activity_reminders", {})
+
+        for reminder_id, reminder in list(data["activity_reminders"].items()):
+            if reminder.get("status", "Pending") != "Pending":
+                continue
+
+            due_at = reminder.get("due_at")
+            if not due_at:
+                continue
+
+            try:
+                due_time = datetime.fromisoformat(due_at)
+            except Exception:
+                reminder["status"] = "Broken"
+                reminder["error"] = "Invalid due_at timestamp"
+                continue
+
+            if now >= due_time:
+                reminder["status"] = "Sent"
+                reminder["sent_at"] = now.isoformat()
+                due_reminders.append((reminder_id, copy.deepcopy(reminder)))
+
+        if due_reminders:
+            save_data(data)
+
+    if not due_reminders:
+        return
+
+    channel = bot.get_channel(ACTIVITY_WARNING_CHANNEL_ID)
+
+    if not channel:
+        print("Activity reminder channel was not found.")
+        return
+
+    for reminder_id, reminder in due_reminders:
+        target_user_id = reminder.get("target_user_id")
+        days = int(reminder.get("days", 0))
+        day_word = "day" if days == 1 else "days"
+
+        await channel.send(
+            f"<@{ACTIVITY_WARNING_USER_ID}> ⏳ **{days} {day_word} is up for <@{target_user_id}>.**\n"
+            f"Activity warning reminder `{reminder_id}` is now due."
+        )
+
+
+activity_group = app_commands.Group(
+    name="activity",
+    description="Activity warning reminder commands"
+)
+
+
+@activity_group.command(name="reminder", description="Set an activity warning reminder for a member.")
+@app_commands.describe(
+    xdays="How many days until the reminder posts",
+    user_id="Raw Discord user ID from /raw-format"
+)
+async def activity_reminder(interaction: discord.Interaction, xdays: int, user_id: str):
+    if not await staff_command_check(interaction):
+        return
+
+    if xdays < 1:
+        await interaction.response.send_message(
+            "❌ The reminder must be at least 1 day long.",
+            ephemeral=True
+        )
+        return
+
+    cleaned_user_id = clean_discord_user_id(user_id)
+
+    if not cleaned_user_id.isdigit():
+        await interaction.response.send_message(
+            "❌ Please use a raw Discord user ID, or a valid user mention.",
+            ephemeral=True
+        )
+        return
+
+    now = datetime.now(TZ)
+    due_at = now + timedelta(days=xdays)
+
+    async with data_lock:
+        data.setdefault("activity_reminders", {})
+        next_id = int(data.get("last_activity_reminder_id", 0)) + 1
+        data["last_activity_reminder_id"] = next_id
+
+        reminder_id = f"activity-{next_id}"
+        data["activity_reminders"][reminder_id] = {
+            "target_user_id": cleaned_user_id,
+            "days": xdays,
+            "created_at": now.isoformat(),
+            "due_at": due_at.isoformat(),
+            "created_by": str(interaction.user.id),
+            "status": "Pending"
+        }
+
+        save_data(data)
+
+    day_word = "day" if xdays == 1 else "days"
+
+    await interaction.response.send_message(
+        f"⏳ Activity reminder set for <@{cleaned_user_id}>.\n"
+        f"I will ping <@{ACTIVITY_WARNING_USER_ID}> in <#{ACTIVITY_WARNING_CHANNEL_ID}> when **{xdays} {day_word}** is up.\n"
+        f"Due: **{due_at.strftime('%B %d, %Y at %I:%M %p')}** Toronto time.\n"
+        f"Reminder ID: `{reminder_id}`",
+        ephemeral=True
+    )
+
+
+@activity_group.command(name="list", description="View pending activity warning reminders.")
+async def activity_list(interaction: discord.Interaction):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        reminders = copy.deepcopy(data.setdefault("activity_reminders", {}))
+
+    pending = [
+        (reminder_id, reminder)
+        for reminder_id, reminder in reminders.items()
+        if reminder.get("status", "Pending") == "Pending"
+    ]
+
+    if not pending:
+        await interaction.response.send_message(
+            "✅ There are no pending activity warning reminders.",
+            ephemeral=True
+        )
+        return
+
+    pending.sort(key=lambda item: item[1].get("due_at", ""))
+
+    lines = ["⏳ **Pending Activity Warning Reminders**", ""]
+
+    for reminder_id, reminder in pending[:30]:
+        target_user_id = reminder.get("target_user_id")
+        due_at = reminder.get("due_at")
+        days = reminder.get("days", "?")
+
+        try:
+            due_text = datetime.fromisoformat(due_at).strftime("%B %d, %Y at %I:%M %p")
+        except Exception:
+            due_text = "Unknown due date"
+
+        lines.append(
+            f"• `{reminder_id}` — <@{target_user_id}> — **{days} day(s)** — due **{due_text}**"
+        )
+
+    if len(pending) > 30:
+        lines.append(f"\n…and {len(pending) - 30} more pending reminder(s).")
+
+    await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
+
+
+@activity_group.command(name="cancel", description="Cancel a pending activity warning reminder.")
+@app_commands.describe(reminder_id="Reminder ID, such as activity-1")
+async def activity_cancel(interaction: discord.Interaction, reminder_id: str):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        data.setdefault("activity_reminders", {})
+        reminder = data["activity_reminders"].get(reminder_id)
+
+        if not reminder:
+            await interaction.response.send_message(
+                f"❌ Reminder `{reminder_id}` was not found.",
+                ephemeral=True
+            )
+            return
+
+        if reminder.get("status", "Pending") != "Pending":
+            await interaction.response.send_message(
+                f"❌ Reminder `{reminder_id}` is already marked as **{reminder.get('status', 'Unknown')}**.",
+                ephemeral=True
+            )
+            return
+
+        reminder["status"] = "Cancelled"
+        reminder["cancelled_at"] = datetime.now(TZ).isoformat()
+        reminder["cancelled_by"] = str(interaction.user.id)
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🧹 Cancelled activity warning reminder `{reminder_id}`.",
+        ephemeral=True
+    )
+
+
 membership_group = app_commands.Group(
     name="membership",
     description="Membership milestone and OC slot commands"
@@ -7249,6 +7460,7 @@ bot.tree.add_command(mentor_group)
 bot.tree.add_command(relationship_group)
 bot.tree.add_command(medical_group)
 bot.tree.add_command(hiatus_group)
+bot.tree.add_command(activity_group)
 bot.tree.add_command(membership_group)
 bot.tree.add_command(feed_group)
 bot.tree.add_command(quest_group)
