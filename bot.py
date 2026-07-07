@@ -6350,6 +6350,45 @@ def clean_discord_user_id(value):
     return cleaned
 
 
+def get_activity_warning_summary(reminders, user_id):
+    cleaned_user_id = clean_discord_user_id(user_id)
+    sent_warnings = []
+    pending_reminders = []
+
+    for reminder_id, reminder in reminders.items():
+        if str(reminder.get("target_user_id")) != cleaned_user_id:
+            continue
+
+        status = reminder.get("status", "Pending")
+
+        if status == "Sent":
+            sent_warnings.append((reminder_id, reminder))
+
+        elif status == "Pending":
+            pending_reminders.append((reminder_id, reminder))
+
+    sent_warnings.sort(key=lambda item: item[1].get("sent_at") or item[1].get("due_at") or "")
+    pending_reminders.sort(key=lambda item: item[1].get("due_at", ""))
+
+    return {
+        "was_warned_before": len(sent_warnings) > 0,
+        "sent_count": len(sent_warnings),
+        "pending_count": len(pending_reminders),
+        "sent_warnings": sent_warnings,
+        "pending_reminders": pending_reminders
+    }
+
+
+def format_warning_history(summary):
+    sent_count = summary.get("sent_count", 0)
+
+    if sent_count == 0:
+        return "No previous completed activity warnings."
+
+    warning_word = "warning" if sent_count == 1 else "warnings"
+    return f"Warned before: Yes — {sent_count} previous completed activity {warning_word}."
+
+
 @tasks.loop(minutes=30)
 async def check_activity_reminders():
     now = datetime.now(TZ)
@@ -6394,10 +6433,13 @@ async def check_activity_reminders():
         target_user_id = reminder.get("target_user_id")
         days = int(reminder.get("days", 0))
         day_word = "day" if days == 1 else "days"
+        previous_warning_count = int(reminder.get("previous_warning_count", 0))
+        warning_history_text = format_warning_history({"sent_count": previous_warning_count})
 
         await channel.send(
             f"<@{ACTIVITY_WARNING_USER_ID}> ⏳ **{days} {day_word} is up for <@{target_user_id}>.**\n"
-            f"Activity warning reminder `{reminder_id}` is now due."
+            f"Activity warning reminder `{reminder_id}` is now due.\n"
+            f"**Warning History Before This Reminder:** {warning_history_text}"
         )
 
 
@@ -6437,6 +6479,8 @@ async def activity_reminder(interaction: discord.Interaction, xdays: int, user_i
 
     async with data_lock:
         data.setdefault("activity_reminders", {})
+        warning_summary = get_activity_warning_summary(data["activity_reminders"], cleaned_user_id)
+        previous_warning_count = int(warning_summary.get("sent_count", 0))
         next_id = int(data.get("last_activity_reminder_id", 0)) + 1
         data["last_activity_reminder_id"] = next_id
 
@@ -6447,17 +6491,21 @@ async def activity_reminder(interaction: discord.Interaction, xdays: int, user_i
             "created_at": now.isoformat(),
             "due_at": due_at.isoformat(),
             "created_by": str(interaction.user.id),
-            "status": "Pending"
+            "status": "Pending",
+            "was_warned_before": previous_warning_count > 0,
+            "previous_warning_count": previous_warning_count
         }
 
         save_data(data)
 
     day_word = "day" if xdays == 1 else "days"
+    warning_history_text = format_warning_history({"sent_count": previous_warning_count})
 
     await interaction.response.send_message(
         f"⏳ Activity reminder set for <@{cleaned_user_id}>.\n"
         f"I will ping <@{ACTIVITY_WARNING_USER_ID}> in <#{ACTIVITY_WARNING_CHANNEL_ID}> when **{xdays} {day_word}** is up.\n"
         f"Due: **{due_at.strftime('%B %d, %Y at %I:%M %p')}** Toronto time.\n"
+        f"**Warning History:** {warning_history_text}\n"
         f"Reminder ID: `{reminder_id}`",
         ephemeral=True
     )
@@ -6492,14 +6540,17 @@ async def activity_list(interaction: discord.Interaction):
         target_user_id = reminder.get("target_user_id")
         due_at = reminder.get("due_at")
         days = reminder.get("days", "?")
+        previous_warning_count = int(reminder.get("previous_warning_count", 0))
 
         try:
             due_text = datetime.fromisoformat(due_at).strftime("%B %d, %Y at %I:%M %p")
         except Exception:
             due_text = "Unknown due date"
 
+        history_text = "first warning" if previous_warning_count == 0 else f"warned before {previous_warning_count} time(s)"
+
         lines.append(
-            f"• `{reminder_id}` — <@{target_user_id}> — **{days} day(s)** — due **{due_text}**"
+            f"• `{reminder_id}` — <@{target_user_id}> — **{days} day(s)** — due **{due_text}** — {history_text}"
         )
 
     if len(pending) > 30:
@@ -6541,6 +6592,110 @@ async def activity_cancel(interaction: discord.Interaction, reminder_id: str):
         f"🧹 Cancelled activity warning reminder `{reminder_id}`.",
         ephemeral=True
     )
+
+
+@activity_group.command(name="end", description="End a pending activity reminder for a user who became active again.")
+@app_commands.describe(
+    user_id="Raw Discord user ID or mention",
+    reason="Optional note, such as 'started participating again'"
+)
+async def activity_end(interaction: discord.Interaction, user_id: str, reason: str = None):
+    if not await staff_command_check(interaction):
+        return
+
+    cleaned_user_id = clean_discord_user_id(user_id)
+
+    if not cleaned_user_id.isdigit():
+        await interaction.response.send_message(
+            "❌ Please use a raw Discord user ID, or a valid user mention.",
+            ephemeral=True
+        )
+        return
+
+    now_iso = datetime.now(TZ).isoformat()
+    ended_ids = []
+
+    async with data_lock:
+        data.setdefault("activity_reminders", {})
+        summary_before = get_activity_warning_summary(data["activity_reminders"], cleaned_user_id)
+
+        for reminder_id, reminder in data["activity_reminders"].items():
+            if str(reminder.get("target_user_id")) != cleaned_user_id:
+                continue
+
+            if reminder.get("status", "Pending") != "Pending":
+                continue
+
+            reminder["status"] = "Ended"
+            reminder["ended_at"] = now_iso
+            reminder["ended_by"] = str(interaction.user.id)
+            reminder["end_reason"] = reason or "User began participating again"
+            ended_ids.append(reminder_id)
+
+        if ended_ids:
+            save_data(data)
+
+    warning_history_text = format_warning_history(summary_before)
+
+    if not ended_ids:
+        await interaction.response.send_message(
+            f"✅ No pending activity countdowns were found for <@{cleaned_user_id}>.\n"
+            f"**Warning History:** {warning_history_text}",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"✅ Ended **{len(ended_ids)}** pending activity countdown(s) for <@{cleaned_user_id}> because they began participating again.\n"
+        f"**Ended Reminder(s):** {', '.join(f'`{reminder_id}`' for reminder_id in ended_ids)}\n"
+        f"**Warning History:** {warning_history_text}",
+        ephemeral=True
+    )
+
+
+@activity_group.command(name="status", description="Check a user's activity warning history and pending countdowns.")
+@app_commands.describe(user_id="Raw Discord user ID or mention")
+async def activity_status(interaction: discord.Interaction, user_id: str):
+    if not await staff_command_check(interaction):
+        return
+
+    cleaned_user_id = clean_discord_user_id(user_id)
+
+    if not cleaned_user_id.isdigit():
+        await interaction.response.send_message(
+            "❌ Please use a raw Discord user ID, or a valid user mention.",
+            ephemeral=True
+        )
+        return
+
+    async with data_lock:
+        reminders = copy.deepcopy(data.setdefault("activity_reminders", {}))
+
+    summary = get_activity_warning_summary(reminders, cleaned_user_id)
+    warning_history_text = format_warning_history(summary)
+
+    lines = [
+        f"⏳ **Activity Warning Status for <@{cleaned_user_id}>**",
+        f"**Warning History:** {warning_history_text}",
+        f"**Pending Countdown(s):** {summary.get('pending_count', 0)}"
+    ]
+
+    if summary.get("pending_reminders"):
+        lines.append("")
+        lines.append("**Pending Reminders:**")
+
+        for reminder_id, reminder in summary["pending_reminders"][:10]:
+            due_at = reminder.get("due_at")
+            days = reminder.get("days", "?")
+
+            try:
+                due_text = datetime.fromisoformat(due_at).strftime("%B %d, %Y at %I:%M %p")
+            except Exception:
+                due_text = "Unknown due date"
+
+            lines.append(f"• `{reminder_id}` — **{days} day(s)** — due **{due_text}**")
+
+    await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
 
 
 membership_group = app_commands.Group(
