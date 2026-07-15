@@ -22,14 +22,14 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN is missing. Add it to Render Environment Variables.")
+    raise RuntimeError("DISCORD_TOKEN is missing. Add it to Railway Variables.")
 
 # ─────────────────────────────
 # BOT SETUP
 # ─────────────────────────────
 
 intents = discord.Intents.default()
-intents.message_content = True
+intents.message_content = False
 intents.members = True
 
 bot = commands.Bot(
@@ -7621,4 +7621,5 @@ bot.tree.add_command(feed_group)
 bot.tree.add_command(quest_group)
 bot.tree.add_command(prophecy_group)
 keep_alive()
+print("Starting Discord bot. Server Members Intent is required; Message Content Intent is disabled.")
 bot.run(TOKEN)
