@@ -91,7 +91,7 @@ ACTIVITY_WARNING_USER_ID = 1440182563674132490
 
 HONOUR_ANNOUNCEMENT_CHANNEL_ID = 1441502516591202394
 HONOUR_TRACKER_CHANNEL_ID = 1441503004749594787
-HONOUR_ANNOUNCEMENT_USER_ID = 1449118016360026253
+HONOUR_ANNOUNCEMENT_ROLE_ID = 1449118016360026253
 
 HONOUR_ROLE_LIMITS = {
     "Sentinel": 3,
@@ -1294,7 +1294,7 @@ async def announce_new_honour_role(cat_name, clan_name, display_role, role_categ
     article = "an" if display_role[0].lower() in "aeiou" else "a"
 
     message = (
-        f"<@{HONOUR_ANNOUNCEMENT_USER_ID}>\n"
+        f"<@&{HONOUR_ANNOUNCEMENT_ROLE_ID}>\n"
         f"🏅 **A New Honour Is Carved Into Clan History!**\n\n"
         f"**{clan_name}** has named **{cat_name}** {article} **{display_role}**. "
         f"Their service to the Clan will now be remembered among its honoured cats.\n"
