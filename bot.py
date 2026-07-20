@@ -89,6 +89,25 @@ DEATH_ANNOUNCEMENT_CHANNEL_ID = 1441498271842304183
 ACTIVITY_WARNING_CHANNEL_ID = 1500705057207746610
 ACTIVITY_WARNING_USER_ID = 1440182563674132490
 
+HONOUR_ANNOUNCEMENT_CHANNEL_ID = 1441502516591202394
+HONOUR_TRACKER_CHANNEL_ID = 1441503004749594787
+HONOUR_ANNOUNCEMENT_USER_ID = 1449118016360026253
+
+HONOUR_ROLE_LIMITS = {
+    "Sentinel": 3,
+    "Scout": 3,
+    "Mediator": 2
+}
+
+HONOUR_ROLE_ORDER = ["Sentinel", "Scout", "Mediator"]
+
+HONOUR_CLAN_FALLBACK_ICONS = {
+    "BlizzardClan": "❄️",
+    "TorrentClan": "🌊",
+    "FossilClan": "🦴",
+    "SpruceClan": "🌲"
+}
+
 MEMBERSHIP_MILESTONE_CHANNEL_ID = 1441505660905984120
 MEMBERSHIP_MILESTONE_PING_ROLE_IDS = [
     1441506626371715103,
@@ -303,6 +322,12 @@ PREY_SIZE_CHOICES = [
     app_commands.Choice(name="Large Prey", value="large")
 ]
 
+HONOUR_ROLE_CHOICES = [
+    app_commands.Choice(name="Sentinel", value="Sentinel"),
+    app_commands.Choice(name="Scout", value="Scout"),
+    app_commands.Choice(name="Mediator", value="Mediator")
+]
+
 # ─────────────────────────────
 # DATA FUNCTIONS
 # ─────────────────────────────
@@ -335,6 +360,7 @@ def fresh_default_data():
         "membership_milestones": {},
         "activity_reminders": {},
         "last_activity_reminder_id": 0,
+        "honour_tracker_message_id": None,
         "last_moon_snapshot": None
     }
 
@@ -793,6 +819,7 @@ def prepare_cat_record(name, cat):
     cat.setdefault("freeze_hunger_until", None)
     cat.setdefault("previous_mentors", [])
     cat.setdefault("past_apprentices", [])
+    cat.setdefault("honour_role", None)
 
 
 def format_history_entry(entry):
@@ -1119,6 +1146,165 @@ def format_modifier(value):
         return f"+{value}"
 
     return str(value)
+
+# ─────────────────────────────
+# HONOUR ROLE SYSTEM
+# ─────────────────────────────
+
+
+def honour_role_category(saved_role):
+    if saved_role == "Mediator Apprentice":
+        return "Mediator"
+
+    return saved_role
+
+
+def honour_role_holders(clan_name, role_category):
+    holders = []
+
+    for cat_name, cat in data.get("cats", {}).items():
+        if str(cat.get("status", "Alive")).lower() == "dead":
+            continue
+
+        if cat.get("clan") != clan_name:
+            continue
+
+        if honour_role_category(cat.get("honour_role")) != role_category:
+            continue
+
+        holders.append(cat_name)
+
+    holders.sort(key=str.lower)
+    return holders
+
+
+def normalize_emoji_name(value):
+    return "".join(character.lower() for character in str(value) if character.isalnum())
+
+
+def honour_clan_label(guild, clan_name):
+    target_names = {
+        normalize_emoji_name(clan_name),
+        normalize_emoji_name(clan_name.replace("Clan", ""))
+    }
+
+    if guild is not None:
+        for emoji in getattr(guild, "emojis", []):
+            if normalize_emoji_name(emoji.name) in target_names:
+                return str(emoji)
+
+    return HONOUR_CLAN_FALLBACK_ICONS.get(clan_name, "🐾")
+
+
+def honour_slot_symbols(clan_name, role_category):
+    limit = HONOUR_ROLE_LIMITS[role_category]
+    used = min(len(honour_role_holders(clan_name, role_category)), limit)
+    open_slots = max(0, limit - used)
+
+    # The tracker uses ❌ for a filled position and ✅ for an open position.
+    return ("❌" * used) + ("✅" * open_slots)
+
+
+def build_honour_tracker_text(guild=None, include_heading=True):
+    lines = []
+
+    if include_heading:
+        lines.extend([
+            "## 🏅 Honour Role Availability",
+            "✅ = open position • ❌ = filled position",
+            ""
+        ])
+
+    for clan_name in CLAN_NAMES_ONLY:
+        clan_label = honour_clan_label(guild, clan_name)
+
+        for role_category in HONOUR_ROLE_ORDER:
+            symbols = honour_slot_symbols(clan_name, role_category)
+            lines.append(f"# {clan_label} {role_category} {symbols}")
+
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+async def get_honour_channel(channel_id):
+    channel = bot.get_channel(channel_id)
+
+    if channel is not None:
+        return channel
+
+    try:
+        return await bot.fetch_channel(channel_id)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return None
+
+
+async def update_honour_tracker_message():
+    channel = await get_honour_channel(HONOUR_TRACKER_CHANNEL_ID)
+
+    if channel is None:
+        raise RuntimeError("The Honour Role tracker channel could not be found.")
+
+    tracker_text = build_honour_tracker_text(getattr(channel, "guild", None))
+    saved_message_id = data.get("honour_tracker_message_id")
+    tracker_message = None
+
+    if saved_message_id:
+        try:
+            tracker_message = await channel.fetch_message(int(saved_message_id))
+            await tracker_message.edit(content=tracker_text)
+            return tracker_message
+        except discord.NotFound:
+            tracker_message = None
+        except discord.Forbidden as error:
+            raise RuntimeError("The bot cannot edit the Honour Role tracker message.") from error
+        except (discord.HTTPException, ValueError, TypeError):
+            tracker_message = None
+
+    tracker_message = await channel.send(tracker_text)
+
+    async with data_lock:
+        data["honour_tracker_message_id"] = tracker_message.id
+        save_data(data)
+
+    return tracker_message
+
+
+def honour_remaining_sentence(clan_name, role_category):
+    limit = HONOUR_ROLE_LIMITS[role_category]
+    used = len(honour_role_holders(clan_name, role_category))
+    remaining = max(0, limit - used)
+
+    if remaining == 0:
+        return f"Every **{role_category}** position in **{clan_name}** is now filled."
+
+    if remaining == 1:
+        return f"Only **1 {role_category} position** remains open in **{clan_name}**."
+
+    return f"**{remaining} {role_category} positions** remain open in **{clan_name}**."
+
+
+async def announce_new_honour_role(cat_name, clan_name, display_role, role_category):
+    channel = await get_honour_channel(HONOUR_ANNOUNCEMENT_CHANNEL_ID)
+
+    if channel is None:
+        return False
+
+    tracker_text = build_honour_tracker_text(getattr(channel, "guild", None), include_heading=False)
+    article = "an" if display_role[0].lower() in "aeiou" else "a"
+
+    message = (
+        f"<@{HONOUR_ANNOUNCEMENT_USER_ID}>\n"
+        f"🏅 **A New Honour Is Carved Into Clan History!**\n\n"
+        f"**{clan_name}** has named **{cat_name}** {article} **{display_role}**. "
+        f"Their service to the Clan will now be remembered among its honoured cats.\n"
+        f"{honour_remaining_sentence(clan_name, role_category)}\n\n"
+        f"## Honour Roles Still Remaining\n"
+        f"{tracker_text}"
+    )
+
+    await channel.send(message)
+    return True
 
 # ─────────────────────────────
 # HUNGER / FEEDING SYSTEM
@@ -2937,6 +3123,12 @@ async def on_ready():
     if not check_activity_reminders.is_running():
         check_activity_reminders.start()
 
+    try:
+        await update_honour_tracker_message()
+        print("Honour Role tracker is up to date.")
+    except Exception as error:
+        print(f"Honour Role tracker update failed: {error}")
+
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -3259,7 +3451,12 @@ async def botinfo(interaction: discord.Interaction):
         "`/cat tinderhide` — Hide/unhide a cat from Cat Tinder\n"
         "`/freezecat` — Staff only. Freeze or unfreeze a cat's age and/or hunger, either indefinitely or for a set number of days\n"
         "`/frozenlist` — Staff only. View all cats with active age or hunger freezes\n\n"
-        "`/cat clearhistorymoon` — Delete cat history entries from a specific moon\n"
+        "`/cat clearhistorymoon` — Delete cat history entries from a specific moon\n\n"
+
+        "🏅 **Honour Role Commands**\n"
+        "`/honour role [Cat] [Role]` — Staff only. Name an eligible Warrior or Apprentice to a Clan Honour Role\n"
+        "`/honour remove [Cat]` — Staff only. Remove a cat's current Honour Role and reopen the position\n"
+        "`/honour tracker` — Staff only. Refresh the single Honour Role availability tracker message\n\n"
 
         "🩹 **Staff Injury Commands**\n"
         "`/injury add` — Add an injury or illness\n"
@@ -3330,6 +3527,205 @@ mentor_group = app_commands.Group(name="mentor", description="Manage mentors and
 relationship_group = app_commands.Group(name="relationship", description="Manage relationships")
 medical_group = app_commands.Group(name="medical", description="Medicine cat treatment commands")
 hiatus_group = app_commands.Group(name="hiatus", description="Manage member hiatuses")
+honour_group = app_commands.Group(name="honour", description="Manage Clan Honour Roles")
+
+
+@honour_group.command(name="role", description="Give an eligible cat a Clan Honour Role")
+@app_commands.describe(
+    cat_name="The cat receiving the Honour Role",
+    role="Choose Sentinel, Scout, or Mediator"
+)
+@app_commands.choices(role=HONOUR_ROLE_CHOICES)
+async def honour_role_command(
+    interaction: discord.Interaction,
+    cat_name: str,
+    role: app_commands.Choice[str]
+):
+    if not await staff_command_check(interaction):
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    role_category = role.value
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if cat_name not in cats:
+            await interaction.followup.send(
+                f"❌ Cat '{cat_name}' was not found.",
+                ephemeral=True
+            )
+            return
+
+        cat = cats[cat_name]
+        prepare_cat_record(cat_name, cat)
+
+        if cat_is_dead(cat):
+            await interaction.followup.send(
+                "❌ Dead cats cannot receive an Honour Role.",
+                ephemeral=True
+            )
+            return
+
+        clan_name = cat.get("clan")
+        rank = cat.get("rank")
+
+        if clan_name not in CLAN_NAMES_ONLY:
+            await interaction.followup.send(
+                "❌ Honour Roles are only available to cats in BlizzardClan, TorrentClan, FossilClan, or SpruceClan.",
+                ephemeral=True
+            )
+            return
+
+        if rank not in ["Warrior", "Apprentice"]:
+            await interaction.followup.send(
+                f"❌ Only Warriors and Apprentices may receive Honour Roles. **{cat_name}** is currently a **{rank}**.",
+                ephemeral=True
+            )
+            return
+
+        if rank == "Apprentice" and role_category == "Sentinel":
+            await interaction.followup.send(
+                "❌ Apprentices cannot become Sentinels. Apprentices may become Scouts or Mediator Apprentices.",
+                ephemeral=True
+            )
+            return
+
+        existing_role = cat.get("honour_role")
+
+        if existing_role:
+            await interaction.followup.send(
+                f"❌ **{cat_name}** already holds the Honour Role **{existing_role}**. Use `/honour remove` before assigning a different one.",
+                ephemeral=True
+            )
+            return
+
+        current_holders = honour_role_holders(clan_name, role_category)
+        role_limit = HONOUR_ROLE_LIMITS[role_category]
+
+        if len(current_holders) >= role_limit:
+            holder_text = ", ".join(current_holders) if current_holders else "Unknown"
+            await interaction.followup.send(
+                f"❌ **{clan_name}** already has the maximum of **{role_limit} {role_category}s**.\n"
+                f"**Current holders:** {holder_text}",
+                ephemeral=True
+            )
+            return
+
+        display_role = (
+            "Mediator Apprentice"
+            if rank == "Apprentice" and role_category == "Mediator"
+            else role_category
+        )
+
+        cat["honour_role"] = display_role
+        add_history(cat, f"Earned the Honour Role {display_role}")
+        save_data(data)
+
+    tracker_updated = True
+    announcement_sent = True
+
+    try:
+        await update_honour_tracker_message()
+    except Exception as error:
+        tracker_updated = False
+        print(f"Could not update Honour Role tracker: {error}")
+
+    try:
+        announcement_sent = await announce_new_honour_role(
+            cat_name=cat_name,
+            clan_name=clan_name,
+            display_role=display_role,
+            role_category=role_category
+        )
+    except Exception as error:
+        announcement_sent = False
+        print(f"Could not post Honour Role announcement: {error}")
+
+    response_lines = [
+        f"🏅 **{cat_name}** is now **{display_role}** of **{clan_name}**."
+    ]
+
+    if tracker_updated:
+        response_lines.append("✅ The Honour Role tracker was updated.")
+    else:
+        response_lines.append("⚠️ The role was saved, but the tracker could not be updated. Check the bot's channel permissions.")
+
+    if announcement_sent:
+        response_lines.append("✅ The Honour Role announcement was posted.")
+    else:
+        response_lines.append("⚠️ The role was saved, but the announcement could not be posted. Check the bot's channel permissions.")
+
+    await interaction.followup.send("\n".join(response_lines), ephemeral=True)
+
+
+@honour_group.command(name="remove", description="Remove a cat's current Honour Role")
+@app_commands.describe(cat_name="The cat whose Honour Role should be removed")
+async def honour_remove_command(interaction: discord.Interaction, cat_name: str):
+    if not await staff_command_check(interaction):
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if cat_name not in cats:
+            await interaction.followup.send(
+                f"❌ Cat '{cat_name}' was not found.",
+                ephemeral=True
+            )
+            return
+
+        cat = cats[cat_name]
+        old_role = cat.get("honour_role")
+
+        if not old_role:
+            await interaction.followup.send(
+                f"❌ **{cat_name}** does not currently hold an Honour Role.",
+                ephemeral=True
+            )
+            return
+
+        cat["honour_role"] = None
+        add_history(cat, f"Honour Role {old_role} removed")
+        save_data(data)
+
+    try:
+        await update_honour_tracker_message()
+        tracker_line = "✅ The Honour Role tracker was updated."
+    except Exception as error:
+        print(f"Could not update Honour Role tracker: {error}")
+        tracker_line = "⚠️ The role was removed, but the tracker could not be updated."
+
+    await interaction.followup.send(
+        f"🧹 Removed **{old_role}** from **{cat_name}**.\n{tracker_line}",
+        ephemeral=True
+    )
+
+
+@honour_group.command(name="tracker", description="Refresh the Honour Role availability tracker")
+async def honour_tracker_command(interaction: discord.Interaction):
+    if not await staff_command_check(interaction):
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        tracker_message = await update_honour_tracker_message()
+    except Exception as error:
+        await interaction.followup.send(
+            f"❌ The Honour Role tracker could not be updated: {error}",
+            ephemeral=True
+        )
+        return
+
+    await interaction.followup.send(
+        f"✅ Honour Role tracker updated: {tracker_message.jump_url}",
+        ephemeral=True
+    )
+
 
 @hiatus_group.command(name="add", description="Add a hiatus using a raw Discord user ID")
 @app_commands.describe(
@@ -3619,6 +4015,9 @@ async def cat_rank(interaction: discord.Interaction, name: str, rank: app_comman
     if not await staff_command_check(interaction):
         return
 
+    honour_role_changed = False
+    honour_role_note = None
+
     async with data_lock:
         if name not in data["cats"]:
             await interaction.response.send_message("Cat not found.", ephemeral=True)
@@ -3634,6 +4033,29 @@ async def cat_rank(interaction: discord.Interaction, name: str, rank: app_comman
             return
 
         cat["rank"] = rank.value
+
+        current_honour_role = cat.get("honour_role")
+
+        if current_honour_role:
+            if rank.value == "Warrior" and current_honour_role == "Mediator Apprentice":
+                cat["honour_role"] = "Mediator"
+                honour_role_changed = True
+                honour_role_note = "Their Mediator Apprentice title was updated to Mediator."
+                add_history(cat, "Mediator Apprentice title advanced to Mediator")
+
+            elif rank.value == "Apprentice" and current_honour_role == "Mediator":
+                cat["honour_role"] = "Mediator Apprentice"
+                honour_role_changed = True
+                honour_role_note = "Their Mediator title was updated to Mediator Apprentice."
+                add_history(cat, "Mediator title changed to Mediator Apprentice")
+
+            elif rank.value not in ["Warrior", "Apprentice"] or (
+                rank.value == "Apprentice" and current_honour_role == "Sentinel"
+            ):
+                cat["honour_role"] = None
+                honour_role_changed = True
+                honour_role_note = f"Their Honour Role **{current_honour_role}** was removed because the new rank is not eligible."
+                add_history(cat, f"Honour Role {current_honour_role} removed after rank change")
 
         # If an apprentice becomes a warrior, move mentor to past
         if old_rank == "Apprentice" and rank.value == "Warrior" and old_mentor:
@@ -3655,7 +4077,18 @@ async def cat_rank(interaction: discord.Interaction, name: str, rank: app_comman
         add_history(cat, f"Rank changed to {rank.value}")
         save_data(data)
 
-    await interaction.response.send_message(f"⚔ **{name}** is now **{rank.value}**.")
+    response = f"⚔ **{name}** is now **{rank.value}**."
+
+    if honour_role_note:
+        response += f"\n🏅 {honour_role_note}"
+
+    await interaction.response.send_message(response)
+
+    if honour_role_changed:
+        try:
+            await update_honour_tracker_message()
+        except Exception as error:
+            print(f"Could not update Honour Role tracker after rank change: {error}")
 
 
 @bot.tree.command(
@@ -3679,6 +4112,8 @@ async def changeclan(
 ):
     if not await staff_command_check(interaction):
         return
+
+    honour_role_removed = None
 
     async with data_lock:
         cats = data.get("cats", {})
@@ -3744,6 +4179,11 @@ async def changeclan(
         if selected_clan != "Outsider":
             cat["faction"] = None
 
+        if old_clan != selected_clan and cat.get("honour_role"):
+            honour_role_removed = cat.get("honour_role")
+            cat["honour_role"] = None
+            add_history(cat, f"Honour Role {honour_role_removed} removed after leaving {old_clan}")
+
         cat["clan"] = selected_clan
         cat["rank"] = selected_rank
 
@@ -3764,7 +4204,18 @@ async def changeclan(
     if rank_note:
         response_lines.append(f"-# {rank_note}")
 
+    if honour_role_removed:
+        response_lines.append(
+            f"🏅 Their Honour Role **{honour_role_removed}** was removed because Honour Roles belong to the Clan where they were earned."
+        )
+
     await interaction.response.send_message("\n".join(response_lines))
+
+    if honour_role_removed:
+        try:
+            await update_honour_tracker_message()
+        except Exception as error:
+            print(f"Could not update Honour Role tracker after Clan change: {error}")
 
 @cat_group.command(name="rename", description="Rename a cat")
 @app_commands.describe(old_name="Current name", new_name="New name")
@@ -3826,6 +4277,7 @@ async def cat_markdead(
             return
 
         cat = data["cats"][name]
+        had_honour_role = bool(cat.get("honour_role"))
         cat["status"] = "Dead"
         cat["afterlife"] = afterlife.value
         cat["death_moon"] = data["moon"]
@@ -3853,6 +4305,12 @@ async def cat_markdead(
             death_message += f"\n**Cause of Death:** {cause}"
 
         await channel.send(death_message)
+
+    if had_honour_role:
+        try:
+            await update_honour_tracker_message()
+        except Exception as error:
+            print(f"Could not update Honour Role tracker after death: {error}")
 
 
 @cat_group.command(name="adddead", description="Add a cat who is already dead")
@@ -3916,10 +4374,14 @@ async def cat_delete(interaction: discord.Interaction, name: str):
     if not await staff_command_check(interaction):
         return
 
+    had_honour_role = False
+
     async with data_lock:
         if name not in data["cats"]:
             await interaction.response.send_message("Cat not found.", ephemeral=True)
             return
+
+        had_honour_role = bool(data["cats"][name].get("honour_role"))
 
         for other_name, other_cat in data["cats"].items():
             if other_name == name:
@@ -3945,6 +4407,12 @@ async def cat_delete(interaction: discord.Interaction, name: str):
     await interaction.response.send_message(
         f"🗑 Deleted **{name}** permanently and removed related records."
     )
+
+    if had_honour_role:
+        try:
+            await update_honour_tracker_message()
+        except Exception as error:
+            print(f"Could not update Honour Role tracker after deleting cat: {error}")
 
 
 @cat_group.command(name="delayceremony", description="Delay a cat's automatic promotion")
@@ -6871,6 +7339,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
 
         status = cat.get("status", "Alive")
         afterlife = cat.get("afterlife") or "None"
+        honour_role = cat.get("honour_role") or "None"
         mentor = format_mentor_display(cat)
         apprentices_text = format_apprentices_display(cat)
 
@@ -6915,6 +7384,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
             f"🐾 **{name}**\n"
             f"**Clan**: {cat.get('clan')}\n"
             f"**Rank**: {cat.get('rank')}\n"
+            f"**Honour Role**: {honour_role}\n"
         )
 
         if cat.get("clan") == "Outsider":
@@ -7615,6 +8085,7 @@ bot.tree.add_command(mentor_group)
 bot.tree.add_command(relationship_group)
 bot.tree.add_command(medical_group)
 bot.tree.add_command(hiatus_group)
+bot.tree.add_command(honour_group)
 bot.tree.add_command(activity_group)
 bot.tree.add_command(membership_group)
 bot.tree.add_command(feed_group)
