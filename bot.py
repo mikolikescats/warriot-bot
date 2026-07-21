@@ -92,6 +92,7 @@ ACTIVITY_WARNING_USER_ID = 1440182563674132490
 HONOUR_ANNOUNCEMENT_CHANNEL_ID = 1441502516591202394
 HONOUR_TRACKER_CHANNEL_ID = 1441503004749594787
 HONOUR_ANNOUNCEMENT_ROLE_ID = 1449118016360026253
+HONOUR_DISCORD_TIMEOUT_SECONDS = 12
 
 HONOUR_ROLE_LIMITS = {
     "Sentinel": 3,
@@ -803,6 +804,36 @@ def add_history(cat, entry):
     cat["history"].append(f"Moon {data['moon']}: {entry}")
 
 
+def normalize_permanent_conditions(cat):
+    """Return a clean, de-duplicated list of permanent status conditions."""
+    raw_conditions = cat.get("permanent_conditions", [])
+
+    if isinstance(raw_conditions, str):
+        raw_conditions = [raw_conditions]
+    elif not isinstance(raw_conditions, list):
+        raw_conditions = []
+
+    cleaned_conditions = []
+    seen = set()
+
+    for value in raw_conditions:
+        clean_value = str(value).strip()
+
+        if not clean_value:
+            continue
+
+        key = clean_value.casefold()
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        cleaned_conditions.append(clean_value)
+
+    cat["permanent_conditions"] = cleaned_conditions
+    return cleaned_conditions
+
+
 def prepare_cat_record(name, cat):
     cat.setdefault("history", [])
     cat.setdefault("born_moon", max(0, data.get("moon", 4) - cat.get("age", 0)))
@@ -820,6 +851,7 @@ def prepare_cat_record(name, cat):
     cat.setdefault("previous_mentors", [])
     cat.setdefault("past_apprentices", [])
     cat.setdefault("honour_role", None)
+    normalize_permanent_conditions(cat)
 
 
 def format_history_entry(entry):
@@ -3124,7 +3156,10 @@ async def on_ready():
         check_activity_reminders.start()
 
     try:
-        await update_honour_tracker_message()
+        await asyncio.wait_for(
+            update_honour_tracker_message(),
+            timeout=HONOUR_DISCORD_TIMEOUT_SECONDS
+        )
         print("Honour Role tracker is up to date.")
     except Exception as error:
         print(f"Honour Role tracker update failed: {error}")
@@ -3137,7 +3172,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     try:
         await safe_respond(
             interaction,
-            "Something went wrong while running that command. Check the Render logs for the exact error.",
+            "Something went wrong while running that command. Check the Railway logs for the exact error.",
             ephemeral=True
         )
     except Exception as send_error:
@@ -3458,6 +3493,11 @@ async def botinfo(interaction: discord.Interaction):
         "`/honour remove [Cat]` — Staff only. Remove a cat's current Honour Role and reopen the position\n"
         "`/honour tracker` — Staff only. Refresh the single Honour Role availability tracker message\n\n"
 
+        "♾️ **Permanent Status Commands**\n"
+        "`/condition add [Cat] [Status]` — Staff only. Add a permanent status such as Blind, Wobbly, Paralyzed, or Has ADHD\n"
+        "`/condition remove [Cat] [Status]` — Staff only. Remove one permanent status\n"
+        "`/condition clear [Cat]` — Staff only. Remove every permanent status from a cat\n\n"
+
         "🩹 **Staff Injury Commands**\n"
         "`/injury add` — Add an injury or illness\n"
         "`/injury remove` — Remove or resolve injury\n"
@@ -3528,6 +3568,163 @@ relationship_group = app_commands.Group(name="relationship", description="Manage
 medical_group = app_commands.Group(name="medical", description="Medicine cat treatment commands")
 hiatus_group = app_commands.Group(name="hiatus", description="Manage member hiatuses")
 honour_group = app_commands.Group(name="honour", description="Manage Clan Honour Roles")
+condition_group = app_commands.Group(name="condition", description="Manage permanent cat status conditions")
+
+
+@condition_group.command(name="add", description="Add a permanent status condition to a cat")
+@app_commands.describe(
+    cat_name="The cat receiving the permanent status",
+    condition="The exact status to display, such as Blind, Wobbly, or Has ADHD"
+)
+async def condition_add_command(
+    interaction: discord.Interaction,
+    cat_name: str,
+    condition: str
+):
+    if not await staff_command_check(interaction):
+        return
+
+    clean_condition = condition.strip()
+
+    if not clean_condition:
+        await interaction.response.send_message(
+            "❌ The permanent status cannot be blank.",
+            ephemeral=True
+        )
+        return
+
+    if len(clean_condition) > 100:
+        await interaction.response.send_message(
+            "❌ Keep the permanent status to 100 characters or fewer.",
+            ephemeral=True
+        )
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if cat_name not in cats:
+            await interaction.response.send_message(
+                f"❌ Cat '{cat_name}' was not found.",
+                ephemeral=True
+            )
+            return
+
+        cat = cats[cat_name]
+        prepare_cat_record(cat_name, cat)
+        conditions = normalize_permanent_conditions(cat)
+
+        if any(saved.casefold() == clean_condition.casefold() for saved in conditions):
+            await interaction.response.send_message(
+                f"❌ **{cat_name}** already has **{clean_condition}** listed as a permanent status.",
+                ephemeral=True
+            )
+            return
+
+        conditions.append(clean_condition)
+        cat["permanent_conditions"] = conditions
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"♾️ Added **{clean_condition}** as a permanent status for **{cat_name}**."
+    )
+
+
+@condition_group.command(name="remove", description="Remove one permanent status condition from a cat")
+@app_commands.describe(
+    cat_name="The cat whose permanent status should be removed",
+    condition="The status to remove"
+)
+async def condition_remove_command(
+    interaction: discord.Interaction,
+    cat_name: str,
+    condition: str
+):
+    if not await staff_command_check(interaction):
+        return
+
+    clean_condition = condition.strip()
+
+    if not clean_condition:
+        await interaction.response.send_message(
+            "❌ Enter the permanent status you want to remove.",
+            ephemeral=True
+        )
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if cat_name not in cats:
+            await interaction.response.send_message(
+                f"❌ Cat '{cat_name}' was not found.",
+                ephemeral=True
+            )
+            return
+
+        cat = cats[cat_name]
+        prepare_cat_record(cat_name, cat)
+        conditions = normalize_permanent_conditions(cat)
+        matching_condition = next(
+            (saved for saved in conditions if saved.casefold() == clean_condition.casefold()),
+            None
+        )
+
+        if matching_condition is None:
+            current_text = ", ".join(conditions) if conditions else "None"
+            await interaction.response.send_message(
+                f"❌ **{cat_name}** does not have **{clean_condition}** listed.\n"
+                f"**Current permanent status:** {current_text}",
+                ephemeral=True
+            )
+            return
+
+        cat["permanent_conditions"] = [
+            saved for saved in conditions
+            if saved.casefold() != matching_condition.casefold()
+        ]
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🧹 Removed **{matching_condition}** from **{cat_name}**'s permanent status."
+    )
+
+
+@condition_group.command(name="clear", description="Remove every permanent status condition from a cat")
+@app_commands.describe(cat_name="The cat whose permanent statuses should all be cleared")
+async def condition_clear_command(interaction: discord.Interaction, cat_name: str):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if cat_name not in cats:
+            await interaction.response.send_message(
+                f"❌ Cat '{cat_name}' was not found.",
+                ephemeral=True
+            )
+            return
+
+        cat = cats[cat_name]
+        prepare_cat_record(cat_name, cat)
+        conditions = normalize_permanent_conditions(cat)
+
+        if not conditions:
+            await interaction.response.send_message(
+                f"❌ **{cat_name}** has no permanent status conditions to clear.",
+                ephemeral=True
+            )
+            return
+
+        removed_text = ", ".join(conditions)
+        cat["permanent_conditions"] = []
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🧹 Cleared all permanent statuses from **{cat_name}**.\n"
+        f"**Removed:** {removed_text}"
+    )
 
 
 @honour_group.command(name="role", description="Give an eligible cat a Clan Honour Role")
@@ -3545,16 +3742,14 @@ async def honour_role_command(
         return
 
     await interaction.response.defer(ephemeral=True)
-
     role_category = role.value
 
     async with data_lock:
         cats = data.get("cats", {})
 
         if cat_name not in cats:
-            await interaction.followup.send(
-                f"❌ Cat '{cat_name}' was not found.",
-                ephemeral=True
+            await interaction.edit_original_response(
+                content=f"❌ Cat '{cat_name}' was not found."
             )
             return
 
@@ -3562,9 +3757,8 @@ async def honour_role_command(
         prepare_cat_record(cat_name, cat)
 
         if cat_is_dead(cat):
-            await interaction.followup.send(
-                "❌ Dead cats cannot receive an Honour Role.",
-                ephemeral=True
+            await interaction.edit_original_response(
+                content="❌ Dead cats cannot receive an Honour Role."
             )
             return
 
@@ -3572,32 +3766,28 @@ async def honour_role_command(
         rank = cat.get("rank")
 
         if clan_name not in CLAN_NAMES_ONLY:
-            await interaction.followup.send(
-                "❌ Honour Roles are only available to cats in BlizzardClan, TorrentClan, FossilClan, or SpruceClan.",
-                ephemeral=True
+            await interaction.edit_original_response(
+                content="❌ Honour Roles are only available to cats in BlizzardClan, TorrentClan, FossilClan, or SpruceClan."
             )
             return
 
         if rank not in ["Warrior", "Apprentice"]:
-            await interaction.followup.send(
-                f"❌ Only Warriors and Apprentices may receive Honour Roles. **{cat_name}** is currently a **{rank}**.",
-                ephemeral=True
+            await interaction.edit_original_response(
+                content=f"❌ Only Warriors and Apprentices may receive Honour Roles. **{cat_name}** is currently a **{rank}**."
             )
             return
 
         if rank == "Apprentice" and role_category == "Sentinel":
-            await interaction.followup.send(
-                "❌ Apprentices cannot become Sentinels. Apprentices may become Scouts or Mediator Apprentices.",
-                ephemeral=True
+            await interaction.edit_original_response(
+                content="❌ Apprentices cannot become Sentinels. Apprentices may become Scouts or Mediator Apprentices."
             )
             return
 
         existing_role = cat.get("honour_role")
 
         if existing_role:
-            await interaction.followup.send(
-                f"❌ **{cat_name}** already holds the Honour Role **{existing_role}**. Use `/honour remove` before assigning a different one.",
-                ephemeral=True
+            await interaction.edit_original_response(
+                content=f"❌ **{cat_name}** already holds the Honour Role **{existing_role}**. Use `/honour remove` before assigning a different one."
             )
             return
 
@@ -3606,10 +3796,11 @@ async def honour_role_command(
 
         if len(current_holders) >= role_limit:
             holder_text = ", ".join(current_holders) if current_holders else "Unknown"
-            await interaction.followup.send(
-                f"❌ **{clan_name}** already has the maximum of **{role_limit} {role_category}s**.\n"
-                f"**Current holders:** {holder_text}",
-                ephemeral=True
+            await interaction.edit_original_response(
+                content=(
+                    f"❌ **{clan_name}** already has the maximum of **{role_limit} {role_category}s**.\n"
+                    f"**Current holders:** {holder_text}"
+                )
             )
             return
 
@@ -3623,25 +3814,38 @@ async def honour_role_command(
         add_history(cat, f"Earned the Honour Role {display_role}")
         save_data(data)
 
+    await interaction.edit_original_response(
+        content=(
+            f"🏅 **{cat_name}** is now **{display_role}** of **{clan_name}**.\n"
+            "Updating the Honour Role tracker and announcement..."
+        )
+    )
+
     tracker_updated = True
     announcement_sent = True
 
     try:
-        await update_honour_tracker_message()
+        await asyncio.wait_for(
+            update_honour_tracker_message(),
+            timeout=HONOUR_DISCORD_TIMEOUT_SECONDS
+        )
     except Exception as error:
         tracker_updated = False
-        print(f"Could not update Honour Role tracker: {error}")
+        print(f"Could not update Honour Role tracker: {type(error).__name__}: {error}")
 
     try:
-        announcement_sent = await announce_new_honour_role(
-            cat_name=cat_name,
-            clan_name=clan_name,
-            display_role=display_role,
-            role_category=role_category
+        announcement_sent = await asyncio.wait_for(
+            announce_new_honour_role(
+                cat_name=cat_name,
+                clan_name=clan_name,
+                display_role=display_role,
+                role_category=role_category
+            ),
+            timeout=HONOUR_DISCORD_TIMEOUT_SECONDS
         )
     except Exception as error:
         announcement_sent = False
-        print(f"Could not post Honour Role announcement: {error}")
+        print(f"Could not post Honour Role announcement: {type(error).__name__}: {error}")
 
     response_lines = [
         f"🏅 **{cat_name}** is now **{display_role}** of **{clan_name}**."
@@ -3650,14 +3854,14 @@ async def honour_role_command(
     if tracker_updated:
         response_lines.append("✅ The Honour Role tracker was updated.")
     else:
-        response_lines.append("⚠️ The role was saved, but the tracker could not be updated. Check the bot's channel permissions.")
+        response_lines.append("⚠️ The role was saved, but the tracker update timed out or failed. Check the Railway logs and channel permissions.")
 
     if announcement_sent:
         response_lines.append("✅ The Honour Role announcement was posted.")
     else:
-        response_lines.append("⚠️ The role was saved, but the announcement could not be posted. Check the bot's channel permissions.")
+        response_lines.append("⚠️ The role was saved, but the announcement timed out or failed. Check the Railway logs and channel permissions.")
 
-    await interaction.followup.send("\n".join(response_lines), ephemeral=True)
+    await interaction.edit_original_response(content="\n".join(response_lines))
 
 
 @honour_group.command(name="remove", description="Remove a cat's current Honour Role")
@@ -3693,7 +3897,10 @@ async def honour_remove_command(interaction: discord.Interaction, cat_name: str)
         save_data(data)
 
     try:
-        await update_honour_tracker_message()
+        await asyncio.wait_for(
+            update_honour_tracker_message(),
+            timeout=HONOUR_DISCORD_TIMEOUT_SECONDS
+        )
         tracker_line = "✅ The Honour Role tracker was updated."
     except Exception as error:
         print(f"Could not update Honour Role tracker: {error}")
@@ -3713,7 +3920,10 @@ async def honour_tracker_command(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     try:
-        tracker_message = await update_honour_tracker_message()
+        tracker_message = await asyncio.wait_for(
+            update_honour_tracker_message(),
+            timeout=HONOUR_DISCORD_TIMEOUT_SECONDS
+        )
     except Exception as error:
         await interaction.followup.send(
             f"❌ The Honour Role tracker could not be updated: {error}",
@@ -7326,8 +7536,10 @@ async def clan(interaction: discord.Interaction, clan: app_commands.Choice[str])
 
 @bot.tree.command(name="catinfo", description="View details about a cat")
 async def catinfo(interaction: discord.Interaction, name: str):
+    await interaction.response.defer()
+
     if name not in data.get("cats", {}):
-        await interaction.response.send_message("Cat not found.", ephemeral=True)
+        await interaction.edit_original_response(content="Cat not found.")
         return
 
     async with data_lock:
@@ -7340,11 +7552,10 @@ async def catinfo(interaction: discord.Interaction, name: str):
         status = cat.get("status", "Alive")
         afterlife = cat.get("afterlife") or "None"
         honour_role = cat.get("honour_role") or "None"
+        permanent_conditions = normalize_permanent_conditions(cat)
         mentor = format_mentor_display(cat)
         apprentices_text = format_apprentices_display(cat)
-
         injury_text = format_injury(cat)
-
         hunger_text = format_hunger_status(cat)
 
         age_text = f"{cat.get('age', 0)} moons"
@@ -7387,6 +7598,10 @@ async def catinfo(interaction: discord.Interaction, name: str):
             f"**Honour Role**: {honour_role}\n"
         )
 
+        if permanent_conditions:
+            condition_label = "Permanent Status" if len(permanent_conditions) == 1 else "Permanent Statuses"
+            message += f"**{condition_label}**: {', '.join(permanent_conditions)}\n"
+
         if cat.get("clan") == "Outsider":
             faction = cat.get("faction") or "None"
             message += f"**Faction**: {faction}\n"
@@ -7404,7 +7619,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
             f"{history_text}"
         )
 
-    await safe_respond(interaction, message[:1900])
+    await interaction.edit_original_response(content=message[:1900])
 
 # ─────────────────────────────
 # NEEDS MENTOR COMMAND
@@ -8086,6 +8301,7 @@ bot.tree.add_command(relationship_group)
 bot.tree.add_command(medical_group)
 bot.tree.add_command(hiatus_group)
 bot.tree.add_command(honour_group)
+bot.tree.add_command(condition_group)
 bot.tree.add_command(activity_group)
 bot.tree.add_command(membership_group)
 bot.tree.add_command(feed_group)
