@@ -3493,7 +3493,7 @@ async def botinfo(interaction: discord.Interaction):
         "`/honour remove [Cat]` — Staff only. Remove a cat's current Honour Role and reopen the position\n"
         "`/honour tracker` — Staff only. Refresh the single Honour Role availability tracker message\n\n"
 
-        "♾️ **Permanent Status Commands**\n"
+        "♾️ **Permanent Condition Commands**\n"
         "`/condition add [Cat] [Status]` — Staff only. Add a permanent status such as Blind, Wobbly, Paralyzed, or Has ADHD\n"
         "`/condition remove [Cat] [Status]` — Staff only. Remove one permanent status\n"
         "`/condition clear [Cat]` — Staff only. Remove every permanent status from a cat\n\n"
@@ -7599,7 +7599,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
         )
 
         if permanent_conditions:
-            condition_label = "Permanent Status" if len(permanent_conditions) == 1 else "Permanent Statuses"
+            condition_label = "Permanent Condition" if len(permanent_conditions) == 1 else "Permanent Conditions"
             message += f"**{condition_label}**: {', '.join(permanent_conditions)}\n"
 
         if cat.get("clan") == "Outsider":
