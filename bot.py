@@ -94,6 +94,16 @@ HONOUR_TRACKER_CHANNEL_ID = 1441503004749594787
 HONOUR_ANNOUNCEMENT_ROLE_ID = 1449118016360026253
 HONOUR_DISCORD_TIMEOUT_SECONDS = 12
 
+PLOT_MANAGER_ROLE_ID = 1531124178378428577
+PLOT_MANAGER_CHANNEL_IDS = {
+    1441537369923784857,
+    1531125681361256509
+}
+PLOT_MODERATOR_CHANNEL_IDS = {
+    COMMAND_CHANNEL_ID,
+    *PLOT_MANAGER_CHANNEL_IDS
+}
+
 HONOUR_ROLE_LIMITS = {
     "Sentinel": 3,
     "Scout": 3,
@@ -276,6 +286,16 @@ CLAN_ONLY_CHOICES = [
     for clan in CLAN_NAMES_ONLY
 ]
 
+PLOT_MEMBER_TYPE_CHOICES = [
+    app_commands.Choice(name="Clan", value="Clan"),
+    app_commands.Choice(name="Outsider", value="Outsider")
+]
+
+PLOT_OUTSIDER_GROUP_CHOICES = [
+    app_commands.Choice(name="The Murmur", value="Murmur"),
+    app_commands.Choice(name="Other", value="Other")
+]
+
 RANK_CHOICES = [
     app_commands.Choice(name=rank, value=rank)
     for rank in ALL_RANKS
@@ -339,7 +359,8 @@ DEFAULT_DATA = {
     "last_moon_month": None,
     "season": "Newleaf",
     "last_weather_week": None,
-    "used_prophecies": []
+    "used_prophecies": [],
+    "plot_members": {}
 }
 
 
@@ -362,6 +383,7 @@ def fresh_default_data():
         "activity_reminders": {},
         "last_activity_reminder_id": 0,
         "honour_tracker_message_id": None,
+        "plot_members": {},
         "last_moon_snapshot": None
     }
 
@@ -481,6 +503,45 @@ async def staff_command_check(interaction: discord.Interaction):
         return False
 
     return True
+
+
+def member_has_role_id(member, role_id):
+    return any(role.id == role_id for role in getattr(member, "roles", []))
+
+
+async def plot_command_check(interaction: discord.Interaction):
+    # Plot commands require an approved role and an approved channel.
+    is_moderator = member_has_role_id(interaction.user, MODERATOR_ROLE_ID)
+    is_plot_manager = member_has_role_id(interaction.user, PLOT_MANAGER_ROLE_ID)
+    channel_id = interaction.channel_id
+
+    if is_moderator and channel_id in PLOT_MODERATOR_CHANNEL_IDS:
+        return True
+
+    if is_plot_manager and channel_id in PLOT_MANAGER_CHANNEL_IDS:
+        return True
+
+    if not is_moderator and not is_plot_manager:
+        await interaction.response.send_message(
+            "❌ You do not have permission to use plot commands.",
+            ephemeral=True
+        )
+        return False
+
+    if is_moderator:
+        allowed_channels = " ".join(
+            f"<#{allowed_id}>" for allowed_id in sorted(PLOT_MODERATOR_CHANNEL_IDS)
+        )
+    else:
+        allowed_channels = " ".join(
+            f"<#{allowed_id}>" for allowed_id in sorted(PLOT_MANAGER_CHANNEL_IDS)
+        )
+
+    await interaction.response.send_message(
+        f"❌ Use plot commands in one of these channels: {allowed_channels}",
+        ephemeral=True
+    )
+    return False
 
 # ─────────────────────────────
 # HIATUS ROLE HELPERS
@@ -3463,6 +3524,11 @@ async def botinfo(interaction: discord.Interaction):
         "`/question` — Random OC question prompt system\n"
         "`/needsmentor` — View apprentices and medicine cat apprentices who do not currently have mentors\n"
         "`/upcomingceremonies` — View cats eligible for apprentice ceremonies, warrior assessments, or elder retirement\n\n"
+
+        "📜 **Plot Commands**\n"
+        "`/plot member` — Add or update an existing cat on the plot roster\n"
+        "`/plot remove` — Remove a cat from the plot roster\n"
+        "`/plot roster` — Show all assigned Clan and Outsider plot members\n\n"
         
         "🍽️ **Feeding / Hunger Commands**\n"
         "`/feed cat [Name]` — Feed an OC normal prey and raise their hunger level by 1\n"
@@ -3569,6 +3635,224 @@ medical_group = app_commands.Group(name="medical", description="Medicine cat tre
 hiatus_group = app_commands.Group(name="hiatus", description="Manage member hiatuses")
 honour_group = app_commands.Group(name="honour", description="Manage Clan Honour Roles")
 condition_group = app_commands.Group(name="condition", description="Manage permanent cat status conditions")
+plot_group = app_commands.Group(name="plot", description="Manage plot-member records")
+
+
+@plot_group.command(name="member", description="Add or update an existing cat as a plot member")
+@app_commands.describe(
+    cat_name="The existing cat to add to the plot roster",
+    member_type="Choose whether this is a Clan cat or an Outsider",
+    outsider_group="Required for Outsiders: The Murmur or Other"
+)
+@app_commands.choices(
+    member_type=PLOT_MEMBER_TYPE_CHOICES,
+    outsider_group=PLOT_OUTSIDER_GROUP_CHOICES
+)
+async def plot_member_command(
+    interaction: discord.Interaction,
+    cat_name: str,
+    member_type: app_commands.Choice[str],
+    outsider_group: app_commands.Choice[str] = None
+):
+    if not await plot_command_check(interaction):
+        return
+
+    await interaction.response.defer()
+
+    async with data_lock:
+        cats = data.get("cats", {})
+
+        if cat_name not in cats:
+            await interaction.edit_original_response(
+                content=f"❌ Cat '{cat_name}' was not found. Add them to the bot first."
+            )
+            return
+
+        cat = cats[cat_name]
+        saved_clan = cat.get("clan")
+        selected_type = member_type.value
+
+        if selected_type == "Clan":
+            if saved_clan not in CLAN_NAMES_ONLY:
+                await interaction.edit_original_response(
+                    content=f"❌ **{cat_name}** is recorded as an Outsider. Choose **Outsider** instead."
+                )
+                return
+
+            if outsider_group is not None:
+                await interaction.edit_original_response(
+                    content="❌ The Murmur/Other option is only used when the member type is Outsider."
+                )
+                return
+
+            new_record = {
+                "member_type": "Clan",
+                "clan": saved_clan,
+                "outsider_group": None,
+                "added_at": datetime.now(TZ).isoformat(),
+                "added_by": str(interaction.user.id)
+            }
+            display_group = saved_clan
+
+        else:
+            if saved_clan != "Outsider":
+                await interaction.edit_original_response(
+                    content=f"❌ **{cat_name}** is recorded in **{saved_clan}**. Choose **Clan** instead."
+                )
+                return
+
+            if outsider_group is None:
+                await interaction.edit_original_response(
+                    content="❌ Choose whether this Outsider belongs under **The Murmur** or **Other**."
+                )
+                return
+
+            new_record = {
+                "member_type": "Outsider",
+                "clan": "Outsider",
+                "outsider_group": outsider_group.value,
+                "added_at": datetime.now(TZ).isoformat(),
+                "added_by": str(interaction.user.id)
+            }
+            display_group = "The Murmur" if outsider_group.value == "Murmur" else "Other Outsiders"
+
+        plot_members = data.setdefault("plot_members", {})
+        old_record = plot_members.get(cat_name)
+
+        if old_record:
+            old_type = old_record.get("member_type")
+            old_group = old_record.get("outsider_group") or old_record.get("clan")
+            new_group = new_record.get("outsider_group") or new_record.get("clan")
+
+            if old_type == selected_type and old_group == new_group:
+                await interaction.edit_original_response(
+                    content=f"❌ **{cat_name}** is already listed under **{display_group}** on the plot roster."
+                )
+                return
+
+        plot_members[cat_name] = new_record
+        save_data(data)
+
+    action = "updated on" if old_record else "added to"
+    await interaction.edit_original_response(
+        content=f"📜 **{cat_name}** has been {action} the plot roster under **{display_group}**."
+    )
+
+
+@plot_group.command(name="remove", description="Remove a cat from the plot-member roster")
+@app_commands.describe(cat_name="The cat to remove from the plot roster")
+async def plot_remove_command(interaction: discord.Interaction, cat_name: str):
+    if not await plot_command_check(interaction):
+        return
+
+    await interaction.response.defer()
+
+    async with data_lock:
+        plot_members = data.setdefault("plot_members", {})
+
+        if cat_name not in plot_members:
+            await interaction.edit_original_response(
+                content=f"❌ **{cat_name}** is not currently on the plot roster."
+            )
+            return
+
+        del plot_members[cat_name]
+        save_data(data)
+
+    await interaction.edit_original_response(
+        content=f"🧹 **{cat_name}** has been removed from the plot roster."
+    )
+
+
+@plot_group.command(name="roster", description="Show every cat assigned as a plot member")
+async def plot_roster_command(interaction: discord.Interaction):
+    if not await plot_command_check(interaction):
+        return
+
+    await interaction.response.defer()
+
+    async with data_lock:
+        cats = copy.deepcopy(data.get("cats", {}))
+        plot_members = copy.deepcopy(data.setdefault("plot_members", {}))
+
+    clan_groups = {clan: [] for clan in CLAN_NAMES_ONLY}
+    murmur_members = []
+    other_outsiders = []
+    missing_records = []
+
+    for cat_name, record in plot_members.items():
+        cat = cats.get(cat_name)
+
+        if not cat:
+            missing_records.append(cat_name)
+            continue
+
+        rank = cat.get("rank", "Unknown Rank")
+        member_type = record.get("member_type")
+
+        if member_type == "Clan":
+            clan = cat.get("clan")
+            if clan in clan_groups:
+                clan_groups[clan].append((cat_name, rank))
+            else:
+                missing_records.append(cat_name)
+        elif record.get("outsider_group") == "Murmur":
+            murmur_members.append((cat_name, rank))
+        else:
+            other_outsiders.append((cat_name, rank))
+
+    lines = ["# 📜 Echostone Mountain Plot Roster"]
+    total_members = 0
+
+    for clan in CLAN_NAMES_ONLY:
+        members = sorted(clan_groups[clan], key=lambda item: item[0].casefold())
+        total_members += len(members)
+        lines.extend(["", f"## {clan}"])
+        if members:
+            lines.extend(f"• **{name}** — {rank}" for name, rank in members)
+        else:
+            lines.append("*No plot members assigned.*")
+
+    murmur_members.sort(key=lambda item: item[0].casefold())
+    other_outsiders.sort(key=lambda item: item[0].casefold())
+    total_members += len(murmur_members) + len(other_outsiders)
+
+    lines.extend(["", "## Outsiders", "### The Murmur"])
+    if murmur_members:
+        lines.extend(f"• **{name}** — {rank}" for name, rank in murmur_members)
+    else:
+        lines.append("*No plot members assigned.*")
+
+    lines.extend(["", "### Other"])
+    if other_outsiders:
+        lines.extend(f"• **{name}** — {rank}" for name, rank in other_outsiders)
+    else:
+        lines.append("*No plot members assigned.*")
+
+    lines.extend(["", f"**Total Plot Members:** {total_members}"])
+
+    if missing_records:
+        lines.extend([
+            "",
+            "-# These saved plot records no longer match an existing cat: "
+            + ", ".join(sorted(missing_records, key=str.casefold))
+        ])
+
+    message = "\n".join(lines)
+    chunks = []
+
+    while len(message) > 1900:
+        split_at = message.rfind("\n", 0, 1900)
+        if split_at == -1:
+            split_at = 1900
+        chunks.append(message[:split_at])
+        message = message[split_at:].lstrip()
+
+    chunks.append(message)
+    await interaction.edit_original_response(content=chunks[0])
+
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk)
 
 
 @condition_group.command(name="add", description="Add a permanent status condition to a cat")
@@ -4445,6 +4729,10 @@ async def cat_rename(interaction: discord.Interaction, old_name: str, new_name: 
         data["cats"][new_name] = data["cats"].pop(old_name)
         add_history(data["cats"][new_name], f"Renamed from {old_name} to {new_name}")
 
+        plot_members = data.setdefault("plot_members", {})
+        if old_name in plot_members:
+            plot_members[new_name] = plot_members.pop(old_name)
+
         for other_cat in data["cats"].values():
             for key in ["mates", "ex_mates", "apprentices", "past_apprentices", "previous_mentors"]:
                 if key in other_cat:
@@ -4612,6 +4900,7 @@ async def cat_delete(interaction: discord.Interaction, name: str):
                 ]
 
         del data["cats"][name]
+        data.setdefault("plot_members", {}).pop(name, None)
         save_data(data)
 
     await interaction.response.send_message(
@@ -8302,6 +8591,7 @@ bot.tree.add_command(medical_group)
 bot.tree.add_command(hiatus_group)
 bot.tree.add_command(honour_group)
 bot.tree.add_command(condition_group)
+bot.tree.add_command(plot_group)
 bot.tree.add_command(activity_group)
 bot.tree.add_command(membership_group)
 bot.tree.add_command(feed_group)
