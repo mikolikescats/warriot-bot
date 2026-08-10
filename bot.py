@@ -82,6 +82,18 @@ COMMAND_CHANNEL_ID = 1500705057207746610
 MEDICAL_COMMAND_CHANNEL_ID = 1503486789900570784
 WEATHER_CHANNEL_ID = 1441502516591202394
 WEATHER_REPORT_ROLE_ID = 1500967820194877490
+
+# Severe weather rolls are separate from the normal weekly weather report.
+# Automatic severe-weather checks happen every Monday at 4 PM Toronto time.
+SEVERE_WEATHER_WEEKLY_CHANCE = 20
+SEVERE_WEATHER_DURATION_DAYS = 7
+SEVERE_WEATHER_AUTO_HOUR = 16
+SEVERE_WEATHER_AUTO_MINUTE = 0
+SEVERE_WEATHER_RECENT_EVENT_MEMORY = 3
+SEVERE_WEATHER_SECONDARY_SPREAD_CHANCE = 60
+NORTHERN_LIGHTS_WEEKLY_CHANCE = 10
+NORTHERN_LIGHTS_DURATION_HOURS = 24 * 7
+
 HIATUS_CHANNEL_ID = 1441505660905984120
 HIATUS_ROLE_ID = 1463773050242728049
 MEMBER_ROLE_ID = 1441508526504808561
@@ -384,6 +396,16 @@ def fresh_default_data():
         "last_activity_reminder_id": 0,
         "honour_tracker_message_id": None,
         "plot_members": {},
+        "outsider_groups": list(FACTIONS),
+        "current_weather": None,
+        "last_severe_weather_week": None,
+        "severe_weather_week_results": {},
+        "severe_weather_monthly_hits": {},
+        "severe_weather_history": {},
+        "active_severe_weather": [],
+        "severe_weather_quiet_streak": 0,
+        "aurora_active_until": None,
+        "last_aurora_week": None,
         "last_moon_snapshot": None
     }
 
@@ -431,6 +453,54 @@ def save_data(data_to_save):
 
 data = load_data()
 data_lock = asyncio.Lock()
+
+
+def get_outsider_groups():
+    """Return the built-in and staff-created Outsider groups in a stable order."""
+    saved_groups = data.get("outsider_groups", [])
+    if not isinstance(saved_groups, list):
+        saved_groups = []
+
+    groups = []
+    seen = set()
+    for value in list(FACTIONS) + saved_groups:
+        clean_value = str(value).strip()
+        if not clean_value:
+            continue
+        key = clean_value.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        groups.append(clean_value)
+    return groups
+
+
+def resolve_outsider_group(value):
+    """Resolve a typed group name to its saved capitalization."""
+    if value is None:
+        return None
+    clean_value = str(value).strip()
+    if not clean_value:
+        return None
+    for group_name in get_outsider_groups():
+        if group_name.casefold() == clean_value.casefold():
+            return group_name
+    return None
+
+
+async def outsider_group_autocomplete(
+    interaction: discord.Interaction,
+    current: str
+):
+    current_lower = str(current or "").casefold()
+    matches = [
+        group_name for group_name in get_outsider_groups()
+        if current_lower in group_name.casefold()
+    ]
+    return [
+        app_commands.Choice(name=group_name, value=group_name)
+        for group_name in matches[:25]
+    ]
 
 # ─────────────────────────────
 # PERMISSION HELPERS
@@ -895,6 +965,11 @@ def normalize_permanent_conditions(cat):
     return cleaned_conditions
 
 
+def display_cat_name(name, cat):
+    """Add the NPC marker anywhere a roster-style display needs it."""
+    return f"{name} (NPC)" if bool(cat.get("is_npc", False)) else name
+
+
 def prepare_cat_record(name, cat):
     cat.setdefault("history", [])
     cat.setdefault("born_moon", max(0, data.get("moon", 4) - cat.get("age", 0)))
@@ -912,6 +987,7 @@ def prepare_cat_record(name, cat):
     cat.setdefault("previous_mentors", [])
     cat.setdefault("past_apprentices", [])
     cat.setdefault("honour_role", None)
+    cat.setdefault("is_npc", False)
     normalize_permanent_conditions(cat)
 
 
@@ -1453,6 +1529,11 @@ def update_hunger_decay(cat):
 
     hunger = normalize_hunger_level(cat.get("hunger_level", "Satisfied"))
 
+    # NPCs still have a stored hunger value for compatibility, but it never decays.
+    if bool(cat.get("is_npc", False)):
+        cat["hunger_level"] = hunger
+        return hunger
+
     if is_hunger_frozen(cat):
         cat["hunger_level"] = hunger
         return hunger
@@ -1503,6 +1584,9 @@ def get_hunger_modifier(cat):
 
 def days_until_next_hunger_drop(cat):
     hunger = get_hunger_status(cat)
+
+    if bool(cat.get("is_npc", False)):
+        return None
 
     if hunger == "Starving":
         return None
@@ -2193,27 +2277,11 @@ async def run_moon_update():
                 cat["age"] = cat.get("age", 0) + 1
 
         # ─────────────────────────────
-        # AUTOMATIC KIT → APPRENTICE
+        # KIT CEREMONIES ARE MANUAL
         # ─────────────────────────────
-
-        for name, cat in data.get("cats", {}).items():
-            prepare_cat_record(name, cat)
-
-            if str(cat.get("status", "Alive")).lower() == "dead":
-                continue
-
-            if cat.get("clan") == "Outsider":
-                continue
-
-            if cat.get("rank") == "Kit" and cat.get("age", 0) >= 6:
-                cat["rank"] = "Apprentice"
-                cat["mentor"] = None
-
-                add_history(cat, "Rank changed to Apprentice")
-
-                report["apprentice_news"].append(
-                    f"🐾 {name} became an Apprentice."
-                )
+        # Kits remain Kits after reaching 6 moons so /upcomingceremonies can
+        # continue listing them until staff actually performs the ceremony and
+        # changes their rank with /cat rank.
 
         # ─────────────────────────────
         # THINGS TO LOOK FORWARD TO IN THE NEW MOON
@@ -2369,6 +2437,7 @@ async def build_age_report_text(report=None):
 
             for name, cat in ranked_cats:
                 mentor = cat.get("mentor")
+                shown_name = display_cat_name(name, cat)
                 age_text = f"{cat.get('age', 0)} moons"
                 age_freeze_text = freeze_remaining_text(cat, "freeze_age", "freeze_age_until")
 
@@ -2377,11 +2446,11 @@ async def build_age_report_text(report=None):
 
                 if rank in ["Apprentice", "Medicine Cat Apprentice"] and mentor:
                     lines.append(
-                        f"• {name} - {age_text} | Mentor: {mentor}"
+                        f"• {shown_name} - {age_text} | Mentor: {mentor}"
                     )
                 else:
                     lines.append(
-                        f"• {name} - {age_text}"
+                        f"• {shown_name} - {age_text}"
                     )
 
             lines.append("")
@@ -2399,6 +2468,7 @@ async def build_age_report_text(report=None):
         outsiders.sort(key=lambda item: item[1].get("age", 0), reverse=True)
 
         for name, cat in outsiders:
+            shown_name = display_cat_name(name, cat)
             age_text = f"{cat.get('age', 0)} moons"
             age_freeze_text = freeze_remaining_text(cat, "freeze_age", "freeze_age_until")
 
@@ -2407,7 +2477,7 @@ async def build_age_report_text(report=None):
 
             faction = f" | {cat.get('faction')}" if cat.get("faction") else ""
             lines.append(
-                f"• {name} - {cat.get('rank')} - {age_text}{faction}"
+                f"• {shown_name} - {cat.get('rank')} - {age_text}{faction}"
             )
     else:
         lines.append("No outsiders")
@@ -3143,7 +3213,8 @@ def get_weather_opener_category(weather, modifier):
     return "neutral"
 
 
-def generate_weekly_weather():
+def generate_weekly_weather_details():
+    """Generate the normal weekly weather and keep the raw condition available to severe weather."""
     now = datetime.now(TZ)
     averages = BANFF_MONTHLY_AVERAGES[now.month]
     season = data.get("season", get_current_season())
@@ -3168,11 +3239,10 @@ def generate_weekly_weather():
         )
 
     opener = random.choice(opener_options)
-
     avg_temp = random.randint(averages["low"], averages["high"])
     modifier_text = f"+{modifier}" if modifier > 0 else str(modifier)
 
-    return (
+    report = (
         f"{opener}\n\n"
         f"🍃 Season: {season}\n"
         f"🌡️ Average Temp: {avg_temp}°C\n"
@@ -3180,6 +3250,1551 @@ def generate_weekly_weather():
         f"🎯 Hunting Modifier: {modifier_text}\n"
         f"📖 Effect: {reason}"
     )
+
+    return {
+        "generated_at": now.isoformat(),
+        "season": season,
+        "average_temp": avg_temp,
+        "weather": weather,
+        "modifier": modifier,
+        "reason": reason,
+        "opener": opener,
+        "report": report
+    }
+
+
+def generate_weekly_weather():
+    return generate_weekly_weather_details()["report"]
+
+
+# ─────────────────────────────
+# SEVERE WEATHER SYSTEM
+# ─────────────────────────────
+
+SEVERE_EFFECT_TYPE_LABELS = {
+    "hunting": "hunting rolls",
+    "fishing": "fishing rolls",
+    "both": "hunting and fishing rolls",
+    "none": "prey rolls"
+}
+
+SEVERE_EFFECT_TYPE_CHOICES = [
+    app_commands.Choice(name="Hunting", value="hunting"),
+    app_commands.Choice(name="Fishing", value="fishing"),
+    app_commands.Choice(name="Hunting + Fishing", value="both"),
+    app_commands.Choice(name="No Roll Modifier", value="none")
+]
+
+SEVERE_ROLL_TYPE_CHOICES = [
+    app_commands.Choice(name="Hunting", value="hunting"),
+    app_commands.Choice(name="Fishing", value="fishing")
+]
+
+SEVERE_TIER_WEIGHTS = {
+    "local": 50,
+    "territory": 35,
+    "major": 15
+}
+
+SHARED_SEVERE_EVENTS = [
+    {
+        "key": "severe_thunderstorms",
+        "name": "Severe Thunderstorms",
+        "emoji": "⛈️",
+        "tier": "territory",
+        "seasons": ["Newleaf", "Greenleaf", "Leaf-fall"],
+        "regional": True,
+        "description": "A powerful storm system crashes across the mountain with lightning, torrential rain, and violent gusts. Prey takes shelter and exposed routes become dangerous.",
+        "effects": [
+            {"location": "Entire Territory", "modifier": -2, "type": "hunting", "note": "Thunder, rain, and erratic wind make hunting difficult."}
+        ],
+        "target_overrides": {
+            "TorrentClan": [
+                {"location": "Entire Territory", "modifier": -2, "type": "both", "note": "Hunting and fishing are both disrupted by swollen water and storm conditions."}
+            ]
+        },
+        "secondary_modifier": -1,
+        "secondary_type": "hunting",
+        "secondary_note": "Distant thunder, rain, and gusty wind disturb prey at the edge of the storm."
+    },
+    {
+        "key": "violent_windstorm",
+        "name": "Violent Windstorm",
+        "emoji": "🌬️",
+        "tier": "territory",
+        "seasons": ["Newleaf", "Greenleaf", "Leaf-fall", "Leafbare"],
+        "regional": True,
+        "description": "Powerful sustained winds tear across Echostone Mountain. Scent trails scatter, branches strain, and birds disappear into shelter.",
+        "effects": [
+            {"location": "Entire Territory", "modifier": -2, "type": "hunting", "note": "Strong winds scatter scent and make stalking difficult."}
+        ],
+        "secondary_modifier": -1,
+        "secondary_type": "hunting",
+        "secondary_note": "Strong gusts reach the outer territory and make scent less reliable."
+    },
+    {
+        "key": "extreme_heatwave",
+        "name": "Extreme Heatwave",
+        "emoji": "☀️",
+        "tier": "territory",
+        "seasons": ["Greenleaf"],
+        "regional": True,
+        "requires_dry": True,
+        "description": "A stretch of oppressive heat settles over the mountain. Prey hides through the hottest hours and cats tire faster while travelling.",
+        "effects": [
+            {"location": "Entire Territory", "modifier": -2, "type": "hunting", "note": "Prey stays hidden during the hottest parts of the day."}
+        ],
+        "target_overrides": {
+            "TorrentClan": [
+                {"location": "Entire Territory", "modifier": -1, "type": "both", "note": "Access to water helps TorrentClan cope, but prey and fish are still less active."}
+            ]
+        },
+        "secondary_modifier": -1,
+        "secondary_type": "hunting",
+        "secondary_note": "The edge of the heatwave still makes prey less active."
+    },
+    {
+        "key": "cold_snap",
+        "name": "Sudden Cold Snap",
+        "emoji": "🥶",
+        "tier": "territory",
+        "seasons": ["Leaf-fall", "Leafbare", "Newleaf"],
+        "regional": True,
+        "description": "Temperatures suddenly plunge. The ground hardens, small prey retreats underground, and exposed patrol routes become sharply colder.",
+        "effects": [
+            {"location": "Entire Territory", "modifier": -2, "type": "hunting", "note": "Prey retreats into warmer shelter."}
+        ],
+        "secondary_modifier": -1,
+        "secondary_type": "hunting",
+        "secondary_note": "A weaker edge of the cold snap reaches the territory."
+    },
+    {
+        "key": "ice_storm",
+        "name": "Severe Ice Storm",
+        "emoji": "🌨️",
+        "tier": "major",
+        "seasons": ["Leaf-fall", "Leafbare", "Newleaf"],
+        "regional": True,
+        "description": "Freezing rain coats stone, branches, roots, and paths in dangerous ice. Travelling becomes slow and prey is difficult to reach.",
+        "effects": [
+            {"location": "Entire Territory", "modifier": -3, "type": "hunting", "note": "Ice makes travel, stalking, and pouncing hazardous."}
+        ],
+        "secondary_modifier": -1,
+        "secondary_type": "hunting",
+        "secondary_note": "Patchy ice reaches the edge of the storm system."
+    },
+    {
+        "key": "severe_hailstorm",
+        "name": "Severe Hailstorm",
+        "emoji": "🧊",
+        "tier": "territory",
+        "seasons": ["Newleaf", "Greenleaf", "Leaf-fall"],
+        "regional": True,
+        "description": "Large hail sweeps across exposed ground and hammers the canopy. Most prey stays hidden until the storm system passes.",
+        "effects": [
+            {"location": "Entire Territory", "modifier": -2, "type": "hunting", "note": "Hail drives prey into shelter."}
+        ],
+        "secondary_modifier": -1,
+        "secondary_type": "hunting",
+        "secondary_note": "Scattered hail and storm winds reach the outer edge."
+    },
+    {
+        "key": "torrential_rain",
+        "name": "Torrential Rain",
+        "emoji": "🌧️",
+        "tier": "territory",
+        "seasons": ["Newleaf", "Greenleaf", "Leaf-fall"],
+        "regional": True,
+        "description": "Relentless rain soaks the mountain, washes away scent trails, and turns low ground into mud and standing water.",
+        "effects": [
+            {"location": "Entire Territory", "modifier": -2, "type": "hunting", "note": "Rain washes scent away and drives prey into shelter."}
+        ],
+        "target_overrides": {
+            "TorrentClan": [
+                {"location": "Entire Territory", "modifier": -2, "type": "both", "note": "Rain disrupts land prey while swollen water makes fishing difficult."}
+            ]
+        },
+        "secondary_modifier": -1,
+        "secondary_type": "hunting",
+        "secondary_note": "Steady rain reaches the outer territory and weakens scent trails."
+    },
+    {
+        "key": "wildfire_smoke",
+        "name": "Wildfire Smoke",
+        "emoji": "🌫️",
+        "tier": "territory",
+        "seasons": ["Greenleaf", "Leaf-fall"],
+        "regional": True,
+        "description": "Smoke from a distant wildfire drifts across Echostone Mountain. Visibility drops and the sharp scent of smoke overwhelms normal prey trails.",
+        "effects": [
+            {"location": "Entire Territory", "modifier": -2, "type": "hunting", "note": "Smoke reduces visibility and masks scent."}
+        ],
+        "secondary_modifier": -1,
+        "secondary_type": "hunting",
+        "secondary_note": "A thinner veil of smoke reaches the territory."
+    },
+    {
+        "key": "severe_blizzard",
+        "name": "Severe Blizzard",
+        "emoji": "❄️",
+        "tier": "major",
+        "seasons": ["Leafbare"],
+        "regional": True,
+        "description": "A severe blizzard sweeps over the mountain. Snow, wind, and near-whiteout visibility bury scent and force most prey deep into shelter.",
+        "effects": [
+            {"location": "Entire Territory", "modifier": -3, "type": "hunting", "note": "Snow and whiteout conditions make hunting extremely difficult."}
+        ],
+        "target_overrides": {
+            "TorrentClan": [
+                {"location": "Entire Territory", "modifier": -3, "type": "both", "note": "Snow and ice disrupt both land hunting and fishing access."}
+            ]
+        },
+        "secondary_modifier": -1,
+        "secondary_type": "hunting",
+        "secondary_note": "Heavy snow and wind reach the outer edge of the blizzard."
+    },
+    {
+        "key": "heavy_snowdrifts",
+        "name": "Heavy Snowdrifts",
+        "emoji": "🌨️",
+        "tier": "territory",
+        "seasons": ["Leafbare"],
+        "regional": True,
+        "description": "Deep drifting snow piles across familiar routes and buries the entrances to many prey shelters.",
+        "effects": [
+            {"location": "Entire Territory", "modifier": -2, "type": "hunting", "note": "Deep snow slows travel and hides small prey."}
+        ],
+        "secondary_modifier": -1,
+        "secondary_type": "hunting",
+        "secondary_note": "Lighter drifting snow reaches the territory."
+    }
+]
+
+CLAN_SEVERE_EVENTS = {
+    "BlizzardClan": [
+        {
+            "key": "blizzard_avalanche",
+            "name": "Avalanche at Glacier's Edge",
+            "emoji": "🏔️",
+            "tier": "major",
+            "seasons": ["Leafbare", "Newleaf"],
+            "regional": False,
+            "description": "A slab of unstable snow breaks loose above Glacier's Edge, burying familiar paths beneath packed snow and broken ice. No cats are automatically injured; any story consequences are left to RP.",
+            "effects": [
+                {"location": "Glacier's Edge", "modifier": -3, "type": "hunting", "note": "Fresh avalanche debris makes the hunting ground unstable and difficult to cross."}
+            ]
+        },
+        {
+            "key": "blizzard_whiteout",
+            "name": "Whiteout Over BlizzardClan",
+            "emoji": "🌨️",
+            "tier": "major",
+            "seasons": ["Leafbare"],
+            "regional": False,
+            "description": "A brutal whiteout swallows BlizzardClan's exposed territory. The Hollow of Teeth remains shelter, but visibility outside drops to almost nothing.",
+            "effects": [
+                {"location": "Entire Territory", "modifier": -3, "type": "hunting", "note": "Visibility and scent are nearly erased by blowing snow."}
+            ]
+        },
+        {
+            "key": "blizzard_rockfall",
+            "name": "Rockfall at Glacier's Edge",
+            "emoji": "🪨",
+            "tier": "local",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall", "Leafbare"],
+            "regional": False,
+            "description": "Weather-loosened stone breaks from the mountain face and crashes across part of Glacier's Edge.",
+            "effects": [
+                {"location": "Glacier's Edge", "modifier": -2, "type": "hunting", "note": "Loose rock and blocked routes make hunting more difficult."}
+            ]
+        },
+        {
+            "key": "blizzard_frozen_teeth_icefall",
+            "name": "Frozen Teeth Icefall",
+            "emoji": "🧊",
+            "tier": "local",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall", "Leafbare"],
+            "regional": False,
+            "description": "Rapid temperature changes crack several of the Frozen Teeth loose inside the Hollow of Teeth. Parts of camp are temporarily hazardous while cats keep clear of unstable ice.",
+            "effects": [
+                {"location": "The Hollow of Teeth", "modifier": 0, "type": "none", "note": "Camp RP hazard only. Hunting and fishing are unaffected."}
+            ]
+        },
+        {
+            "key": "blizzard_frost_tunnel_collapse",
+            "name": "Ice Collapse in the Frost Tunnels",
+            "emoji": "🧊",
+            "tier": "local",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall", "Leafbare"],
+            "regional": False,
+            "description": "A section of old ice fractures inside the Frost Tunnels, blocking familiar passages and forcing hunters through tighter routes.",
+            "effects": [
+                {"location": "Frost Tunnels", "modifier": -2, "type": "hunting", "note": "Blocked passages make tunnel hunting much harder."}
+            ]
+        },
+        {
+            "key": "blizzard_cloud_plateau_gale",
+            "name": "Gale on Cloud Plateau",
+            "emoji": "🌬️",
+            "tier": "local",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall", "Leafbare"],
+            "regional": False,
+            "description": "A fierce high-altitude gale tears across Cloud Plateau, scattering scent and making the exposed rockland difficult to cross.",
+            "effects": [
+                {"location": "Cloud Plateau", "modifier": -2, "type": "hunting", "note": "Powerful crosswinds ruin scent and balance."}
+            ]
+        }
+    ],
+    "FossilClan": [
+        {
+            "key": "fossil_dust_storm",
+            "name": "Dust Storm",
+            "emoji": "🌪️",
+            "tier": "territory",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall"],
+            "regional": False,
+            "requires_dry": True,
+            "description": "Powerful wind tears dust and grit from the exposed stone, swallowing FossilClan territory beneath a reddish haze.",
+            "effects": [
+                {"location": "Entire Territory", "modifier": -2, "type": "hunting", "note": "Dust ruins visibility and scent."},
+                {"location": "Dustwind Flats", "modifier": -3, "type": "hunting", "note": "The exposed Flats take the worst of the storm."}
+            ]
+        },
+        {
+            "key": "fossil_sandstorm",
+            "name": "Sandstorm on Dustwind Flats",
+            "emoji": "🌪️",
+            "tier": "major",
+            "seasons": ["Greenleaf", "Leaf-fall"],
+            "regional": False,
+            "requires_dry": True,
+            "description": "A dense wall of windblown grit races across Dustwind Flats. Cats caught in the open have little visibility until it passes.",
+            "effects": [
+                {"location": "Dustwind Flats", "modifier": -3, "type": "hunting", "note": "Blowing grit makes tracking and visibility extremely poor."}
+            ]
+        },
+        {
+            "key": "fossil_raptorfang_rockslide",
+            "name": "Rockslide at Raptorfang Spires",
+            "emoji": "🪨",
+            "tier": "local",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall", "Leafbare"],
+            "regional": False,
+            "description": "Stone breaks loose from the narrow Raptorfang Spires and tumbles across several climbing routes.",
+            "effects": [
+                {"location": "Raptorfang Spires", "modifier": -3, "type": "hunting", "note": "Unstable ledges and debris make hunting dangerous."}
+            ]
+        },
+        {
+            "key": "fossil_ground_collapse",
+            "name": "Ground Collapse on Dustwind Flats",
+            "emoji": "🕳️",
+            "tier": "local",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall", "Leafbare"],
+            "regional": False,
+            "description": "Loose earth gives way beneath part of Dustwind Flats, opening a dangerous depression and disturbing prey routes.",
+            "effects": [
+                {"location": "Dustwind Flats", "modifier": -2, "type": "hunting", "note": "Broken ground disrupts running and tracking."}
+            ]
+        },
+        {
+            "key": "fossil_drought",
+            "name": "Extreme Drought",
+            "emoji": "☀️",
+            "tier": "major",
+            "seasons": ["Greenleaf"],
+            "regional": False,
+            "requires_dry": True,
+            "description": "Long-lasting heat and dry air leave FossilClan's exposed territory parched. Small prey travels less and stays close to hidden water.",
+            "effects": [
+                {"location": "Entire Territory", "modifier": -2, "type": "hunting", "note": "Prey movement drops sharply during the drought."}
+            ]
+        },
+        {
+            "key": "fossil_red_rock_cliff_crumble",
+            "name": "Cliff Crumble at the Red Rock",
+            "emoji": "🪨",
+            "tier": "local",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall", "Leafbare"],
+            "regional": False,
+            "description": "A weathered section of the cliff above the Red Rock sheds loose stone. Camp routes near the edge are treated with extra caution.",
+            "effects": [
+                {"location": "The Red Rock", "modifier": 0, "type": "none", "note": "Camp RP hazard only. Hunting is unaffected."}
+            ]
+        },
+        {
+            "key": "fossil_rexhead_wind_shear",
+            "name": "Wind Shear at Rexhead Pillars",
+            "emoji": "🌬️",
+            "tier": "local",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall", "Leafbare"],
+            "regional": False,
+            "description": "Sudden crosswinds slam into the broad ledges of Rexhead Pillars, making leaps and aerial prey much harder to judge.",
+            "effects": [
+                {"location": "Rexhead Pillars", "modifier": -2, "type": "hunting", "note": "Strong crosswinds interfere with balance and prey movement."}
+            ]
+        }
+    ],
+    "TorrentClan": [
+        {
+            "key": "torrent_camp_flood",
+            "name": "Camp Flood",
+            "emoji": "🌊",
+            "tier": "major",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall"],
+            "regional": False,
+            "requires_wet": True,
+            "description": "Persistent rain and swollen water push the tide beyond its normal reach. Parts of the Island are flooded and cats may need to move nests or supplies to higher ground. No cats or herbs are automatically harmed.",
+            "effects": [
+                {"location": "Trout Run", "modifier": -2, "type": "both", "note": "Swollen rapids make hunting and fishing difficult."},
+                {"location": "Reedmarsh", "modifier": -2, "type": "both", "note": "Floodwater disturbs prey and deepens the marsh."},
+                {"location": "The Island", "modifier": 0, "type": "none", "note": "Camp RP effect only. Story consequences are left to players and staff."}
+            ]
+        },
+        {
+            "key": "torrent_river_flooding",
+            "name": "River Flooding",
+            "emoji": "🌊",
+            "tier": "territory",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall"],
+            "regional": False,
+            "requires_wet": True,
+            "description": "The river rises over familiar banks and covers normally safe stones around Trout Run.",
+            "effects": [
+                {"location": "Trout Run", "modifier": -2, "type": "both", "note": "High water makes fishing, land prey tracking, and crossings difficult."}
+            ]
+        },
+        {
+            "key": "torrent_flash_flood",
+            "name": "Flash Flood in Reedmarsh",
+            "emoji": "🌊",
+            "tier": "local",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall"],
+            "regional": False,
+            "description": "A sudden rush of water tears through Reedmarsh, flooding reed tunnels and muddying the hunting ground.",
+            "effects": [
+                {"location": "Reedmarsh", "modifier": -3, "type": "both", "note": "Fast water and deep mud make prey extremely difficult to catch."}
+            ]
+        },
+        {
+            "key": "torrent_dangerous_rapids",
+            "name": "Dangerous Rapids",
+            "emoji": "🌊",
+            "tier": "local",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall"],
+            "regional": False,
+            "description": "Snowmelt or upstream rain turns Trout Run into a violent torrent. Fish remain present, but reaching them is much more dangerous.",
+            "effects": [
+                {"location": "Trout Run", "modifier": -2, "type": "fishing", "note": "Fishing is disrupted by dangerous current speed."}
+            ]
+        },
+        {
+            "key": "torrent_frozen_river",
+            "name": "Frozen River",
+            "emoji": "🧊",
+            "tier": "major",
+            "seasons": ["Leafbare"],
+            "regional": False,
+            "description": "A brutal stretch of cold seals much of Trout Run beneath thick, uneven ice. TorrentClan cats can still travel, play, train, and slide across the ice, but reaching fish requires finding or breaking open water.",
+            "effects": [
+                {"location": "Trout Run", "modifier": -6, "type": "fishing", "note": "Fishing is nearly impossible through the thick ice. Land hunting is unaffected."}
+            ]
+        },
+        {
+            "key": "torrent_glistening_overflow",
+            "name": "Glistening Pools Overflow",
+            "emoji": "💧",
+            "tier": "local",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall"],
+            "regional": False,
+            "requires_wet": True,
+            "description": "Heavy runoff causes the Glistening Pools to spill over their banks and merge through the low ground.",
+            "effects": [
+                {"location": "Glistening Pools", "modifier": -2, "type": "both", "note": "Cloudy water and flooded banks disturb both fish and land prey."}
+            ]
+        },
+        {
+            "key": "torrent_high_tide_surge",
+            "name": "High Tide Surge",
+            "emoji": "🌊",
+            "tier": "local",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall", "Leafbare"],
+            "regional": False,
+            "description": "An unusually high tide surrounds the Island and pushes water farther through the roots than normal.",
+            "effects": [
+                {"location": "The Island", "modifier": 0, "type": "none", "note": "Camp and travel RP effect only. Hunting is unaffected."}
+            ]
+        }
+    ],
+    "SpruceClan": [
+        {
+            "key": "spruce_whispering_fire",
+            "name": "Fire at Whispering Branches",
+            "emoji": "🔥",
+            "tier": "major",
+            "seasons": ["Greenleaf", "Leaf-fall"],
+            "regional": False,
+            "requires_dry": True,
+            "description": "After dry weather, a small localized fire breaks out around Whispering Branches. It does not automatically injure cats or destroy camp, but smoke and scorched undergrowth drive prey from the area.",
+            "effects": [
+                {"location": "Whispering Branches", "modifier": -3, "type": "hunting", "note": "The affected hunting ground is smoky and prey has scattered."}
+            ]
+        },
+        {
+            "key": "spruce_fallen_trees",
+            "name": "Fallen Trees at Whispering Branches",
+            "emoji": "🌲",
+            "tier": "local",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall", "Leafbare"],
+            "regional": False,
+            "description": "Storm-weakened spruce trees fall through part of Whispering Branches, blocking familiar paths and scattering canopy prey.",
+            "effects": [
+                {"location": "Whispering Branches", "modifier": -2, "type": "hunting", "note": "Blocked paths and disturbed prey make hunting harder."}
+            ]
+        },
+        {
+            "key": "spruce_deeproot_mudslide",
+            "name": "Mudslide at Deeproot Tangle",
+            "emoji": "🟤",
+            "tier": "local",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall"],
+            "regional": False,
+            "requires_wet": True,
+            "description": "Saturated earth gives way around Deeproot Tangle, filling hollows with mud and shifting the root maze.",
+            "effects": [
+                {"location": "Deeproot Tangle", "modifier": -2, "type": "hunting", "note": "Mud and shifted roots make the hunting ground harder to navigate."}
+            ]
+        },
+        {
+            "key": "spruce_dense_fog",
+            "name": "Dense Forest Fog",
+            "emoji": "🌫️",
+            "tier": "territory",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall"],
+            "regional": False,
+            "description": "Dense fog settles beneath the evergreen canopy. Shapes vanish between the trunks and even familiar paths become difficult to read.",
+            "effects": [
+                {"location": "Entire Territory", "modifier": -2, "type": "hunting", "note": "Poor visibility makes tracking and pouncing difficult."}
+            ]
+        },
+        {
+            "key": "spruce_sundance_flood",
+            "name": "Sundance Pond Flood",
+            "emoji": "💧",
+            "tier": "local",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall"],
+            "regional": False,
+            "requires_wet": True,
+            "description": "Heavy runoff raises Sundance Pond over its usual banks and clouds the shallows.",
+            "effects": [
+                {"location": "Sundance Pond", "modifier": -2, "type": "both", "note": "Flooded banks and cloudy water disturb prey."}
+            ]
+        },
+        {
+            "key": "spruce_canopy_ice",
+            "name": "Ice-Heavy Canopy",
+            "emoji": "🌨️",
+            "tier": "major",
+            "seasons": ["Leafbare"],
+            "regional": False,
+            "description": "Freezing rain coats the evergreen canopy until branches sag and crack beneath the weight. Different hunting grounds feel the storm at different strengths.",
+            "effects": [
+                {"location": "Whispering Branches", "modifier": -3, "type": "hunting", "note": "Falling ice and strained branches make canopy hunting extremely difficult."},
+                {"location": "Deeproot Tangle", "modifier": -2, "type": "hunting", "note": "Ice and fallen debris clog the root maze."},
+                {"location": "Sundance Pond", "modifier": -1, "type": "hunting", "note": "Icy banks make land hunting less reliable."}
+            ]
+        },
+        {
+            "key": "spruce_root_washout",
+            "name": "Root Washout",
+            "emoji": "🌧️",
+            "tier": "local",
+            "seasons": ["Newleaf", "Greenleaf", "Leaf-fall"],
+            "regional": False,
+            "requires_wet": True,
+            "description": "Heavy rain washes soil from beneath part of the forest floor, exposing unstable roots and opening new gaps around Deeproot Tangle.",
+            "effects": [
+                {"location": "Deeproot Tangle", "modifier": -2, "type": "hunting", "note": "Unstable roots and washed-out ground make hunting more difficult."}
+            ]
+        }
+    ]
+}
+
+OUTSIDER_SEVERE_EVENTS = [
+    {
+        "key": "outsider_frostbite_gale",
+        "name": "Extreme Gale at Frostbite Ridge",
+        "emoji": "🌬️",
+        "tier": "local",
+        "seasons": ["Newleaf", "Greenleaf", "Leaf-fall", "Leafbare"],
+        "regional": False,
+        "description": "Extreme wind screams across Frostbite Ridge. Birds struggle against the gusts and narrow ledges become especially dangerous.",
+        "effects": [
+            {"location": "Frostbite Ridge", "modifier": -3, "type": "hunting", "note": "Crosswinds make bird hunting and balance extremely difficult."}
+        ]
+    },
+    {
+        "key": "outsider_frostbite_ice",
+        "name": "Ice-Coated Frostbite Ridge",
+        "emoji": "🧊",
+        "tier": "local",
+        "seasons": ["Leaf-fall", "Leafbare", "Newleaf"],
+        "regional": False,
+        "description": "Freezing moisture coats Frostbite Ridge in slick ice, turning already dangerous ledges into glassy footing.",
+        "effects": [
+            {"location": "Frostbite Ridge", "modifier": -3, "type": "hunting", "note": "Icy footing makes hunting on the cliffs extremely difficult."}
+        ]
+    },
+    {
+        "key": "outsider_sanctuary_flood",
+        "name": "Sanctuary Field Flooding",
+        "emoji": "🌧️",
+        "tier": "local",
+        "seasons": ["Newleaf", "Greenleaf", "Leaf-fall"],
+        "regional": False,
+        "requires_wet": True,
+        "description": "Heavy rain floods low sections of the Sanctuary fields and drives barn mice deeper into dry storage areas.",
+        "effects": [
+            {"location": "The Sanctuary", "modifier": -1, "type": "hunting", "note": "The Sanctuary remains safe, but mice are less exposed than usual."}
+        ]
+    },
+    {
+        "key": "outsider_neon_flash_flood",
+        "name": "Flash Flood at the Neon Path",
+        "emoji": "🌊",
+        "tier": "local",
+        "seasons": ["Newleaf", "Greenleaf", "Leaf-fall"],
+        "regional": False,
+        "description": "Storm drains overflow around the Neon Path, sending dirty water across concrete and around the dumpsters.",
+        "effects": [
+            {"location": "The Neon Path", "modifier": -2, "type": "hunting", "note": "Floodwater scatters rodents and makes the plaza difficult to cross."}
+        ]
+    },
+    {
+        "key": "outsider_town_ice",
+        "name": "Twoleg Town Ice Storm",
+        "emoji": "🌨️",
+        "tier": "local",
+        "seasons": ["Leaf-fall", "Leafbare", "Newleaf"],
+        "regional": False,
+        "description": "Freezing rain coats fences, paths, and rooftops throughout Twoleg Town.",
+        "effects": [
+            {"location": "The Twoleg Town", "modifier": -2, "type": "hunting", "note": "Icy footing makes the few available prey opportunities harder to reach."}
+        ]
+    },
+    {
+        "key": "outsider_neon_heat",
+        "name": "Concrete Heat at the Neon Path",
+        "emoji": "☀️",
+        "tier": "local",
+        "seasons": ["Greenleaf"],
+        "regional": False,
+        "requires_dry": True,
+        "description": "Extreme heat radiates from the concrete around the Neon Path. Rodents and scavengers retreat into cooler hiding places.",
+        "effects": [
+            {"location": "The Neon Path", "modifier": -1, "type": "hunting", "note": "Prey stays hidden from the heat."}
+        ]
+    }
+]
+
+
+def severe_week_key(now=None):
+    now = now or datetime.now(TZ)
+    iso = now.isocalendar()
+    return f"{iso.year}-W{iso.week:02d}"
+
+
+def severe_month_key(now=None):
+    now = now or datetime.now(TZ)
+    return now.strftime("%Y-%m")
+
+
+def severe_entity_key(label, kind=None):
+    if kind == "clan" or label in CLAN_NAMES_ONLY:
+        return f"clan:{label}"
+    return f"outsider:{label}"
+
+
+def populated_outsider_groups():
+    groups = []
+    seen = set()
+
+    for cat in data.get("cats", {}).values():
+        if cat.get("clan") != "Outsider":
+            continue
+        if str(cat.get("status", "Alive")).lower() == "dead":
+            continue
+
+        group = cat.get("faction")
+        if not group:
+            continue
+
+        resolved = resolve_outsider_group(group) or str(group).strip()
+        key = resolved.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        groups.append(resolved)
+
+    groups.sort(key=str.casefold)
+    return groups
+
+
+def get_severe_entities(include_empty_outsider=False):
+    entities = [
+        {"key": severe_entity_key(clan, "clan"), "label": clan, "kind": "clan"}
+        for clan in CLAN_NAMES_ONLY
+    ]
+
+    outsider_groups = get_outsider_groups() if include_empty_outsider else populated_outsider_groups()
+    for group in outsider_groups:
+        entities.append({
+            "key": severe_entity_key(group, "outsider"),
+            "label": group,
+            "kind": "outsider"
+        })
+
+    return entities
+
+
+def resolve_severe_target_name(value):
+    clean = str(value or "").strip()
+    if not clean:
+        return None
+
+    for entity in get_severe_entities(include_empty_outsider=True):
+        if entity["label"].casefold() == clean.casefold():
+            return entity
+
+    return None
+
+
+def parse_severe_targets(raw_targets, include_empty_outsider=True):
+    if not raw_targets:
+        return []
+
+    available = get_severe_entities(include_empty_outsider=include_empty_outsider)
+    by_name = {entity["label"].casefold(): entity for entity in available}
+
+    tokens = [
+        token.strip()
+        for token in str(raw_targets).replace(";", ",").split(",")
+        if token.strip()
+    ]
+
+    resolved = []
+    seen = set()
+
+    def add_entity(entity):
+        if entity["key"] not in seen:
+            seen.add(entity["key"])
+            resolved.append(entity)
+
+    for token in tokens:
+        lowered = token.casefold()
+
+        if lowered in {"all", "everyone", "all groups", "all territories"}:
+            for entity in available:
+                add_entity(entity)
+            continue
+
+        if lowered in {"all clans", "clans"}:
+            for entity in available:
+                if entity["kind"] == "clan":
+                    add_entity(entity)
+            continue
+
+        if lowered in {"all outsiders", "outsider", "outsiders"}:
+            for entity in available:
+                if entity["kind"] == "outsider":
+                    add_entity(entity)
+            continue
+
+        entity = by_name.get(lowered)
+        if entity:
+            add_entity(entity)
+            continue
+
+        raise ValueError(
+            f"Unknown severe-weather target: {token}. Use Clan names or saved Outsider group names."
+        )
+
+    return resolved
+
+
+def current_weather_condition():
+    current = data.get("current_weather")
+    if isinstance(current, dict):
+        return str(current.get("weather", "")).strip()
+    return ""
+
+
+def current_weather_is_wet():
+    condition = current_weather_condition().casefold()
+    wet_words = [
+        "rain", "drizzle", "shower", "downpour", "thunder",
+        "snow", "blizzard", "flurr", "wet", "fog", "mist", "hail", "frozen rain"
+    ]
+    return bool(condition) and any(word in condition for word in wet_words)
+
+
+def current_weather_is_dry():
+    condition = current_weather_condition().casefold()
+    if not condition:
+        return False
+
+    wet_words = [
+        "rain", "drizzle", "shower", "downpour", "thunder",
+        "snow", "blizzard", "flurr", "wet", "fog", "mist", "hail", "frozen"
+    ]
+    return not any(word in condition for word in wet_words)
+
+
+def current_weather_allows_aurora():
+    condition = current_weather_condition().casefold()
+    if not condition:
+        return True
+
+    obscuring_words = [
+        "rain", "drizzle", "shower", "downpour", "thunder",
+        "snow", "blizzard", "flurr", "fog", "mist", "hail"
+    ]
+    return not any(word in condition for word in obscuring_words)
+
+
+def aurora_date_allowed(now=None):
+    now = now or datetime.now(TZ)
+    month = now.month
+    day = now.day
+
+    if month in {10, 11, 12, 1, 2, 3}:
+        return True
+    if month == 9 and day >= 20:
+        return True
+    if month == 4 and day <= 10:
+        return True
+    return False
+
+
+def cleanup_expired_severe_weather(now=None):
+    now = now or datetime.now(TZ)
+    active = data.setdefault("active_severe_weather", [])
+    kept = []
+
+    for event in active:
+        expires_at = event.get("expires_at")
+        try:
+            expires = datetime.fromisoformat(expires_at) if expires_at else None
+        except Exception:
+            expires = None
+
+        if expires and expires <= now:
+            continue
+
+        kept.append(event)
+
+    changed = len(kept) != len(active)
+    data["active_severe_weather"] = kept
+
+    aurora_until = data.get("aurora_active_until")
+    if aurora_until:
+        try:
+            if datetime.fromisoformat(aurora_until) <= now:
+                data["aurora_active_until"] = None
+                changed = True
+        except Exception:
+            data["aurora_active_until"] = None
+            changed = True
+
+    return changed
+
+
+def severe_monthly_hit_keys(now=None):
+    month = severe_month_key(now)
+    raw = data.setdefault("severe_weather_monthly_hits", {}).get(month, [])
+    return set(raw if isinstance(raw, list) else [])
+
+
+def severe_has_monthly_hit(entity_key, now=None):
+    return entity_key in severe_monthly_hit_keys(now)
+
+
+def record_severe_primary_hit(entity, event_key, now=None):
+    now = now or datetime.now(TZ)
+    month = severe_month_key(now)
+
+    monthly = data.setdefault("severe_weather_monthly_hits", {})
+    hits = monthly.setdefault(month, [])
+    if entity["key"] not in hits:
+        hits.append(entity["key"])
+
+    # Keep only the most recent 8 month buckets.
+    for old_month in sorted(monthly.keys())[:-8]:
+        monthly.pop(old_month, None)
+
+    history = data.setdefault("severe_weather_history", {})
+    entity_history = history.setdefault(entity["key"], [])
+    entity_history.append({
+        "event_key": event_key,
+        "event_name": severe_event_name(event_key),
+        "date": now.date().isoformat(),
+        "month": month
+    })
+    history[entity["key"]] = entity_history[-12:]
+
+
+def recent_severe_event_keys(entity_key):
+    history = data.setdefault("severe_weather_history", {}).get(entity_key, [])
+    return [
+        entry.get("event_key")
+        for entry in history[-SEVERE_WEATHER_RECENT_EVENT_MEMORY:]
+        if entry.get("event_key")
+    ]
+
+
+def severe_event_catalog():
+    catalog = {}
+
+    for event in SHARED_SEVERE_EVENTS:
+        catalog[event["key"]] = event
+
+    for events in CLAN_SEVERE_EVENTS.values():
+        for event in events:
+            catalog[event["key"]] = event
+
+    for event in OUTSIDER_SEVERE_EVENTS:
+        catalog[event["key"]] = event
+
+    return catalog
+
+
+def severe_event_name(event_key):
+    event = severe_event_catalog().get(event_key)
+    if event:
+        return event.get("name", event_key)
+    if str(event_key).startswith("manual:"):
+        return str(event_key).split("manual:", 1)[1].replace("_", " ").title()
+    return str(event_key)
+
+
+def severe_event_key_from_name(name):
+    clean = str(name or "").strip()
+    if not clean:
+        return "manual:weather_event"
+
+    for event in severe_event_catalog().values():
+        if event.get("name", "").casefold() == clean.casefold():
+            return event["key"]
+
+    slug = "".join(character.lower() if character.isalnum() else "_" for character in clean)
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return f"manual:{slug.strip('_') or 'weather_event'}"
+
+
+def severe_event_is_eligible(event, season):
+    seasons = event.get("seasons")
+    if seasons and season not in seasons:
+        return False
+
+    if event.get("requires_dry") and not current_weather_is_dry():
+        return False
+
+    if event.get("requires_wet") and not current_weather_is_wet():
+        return False
+
+    return True
+
+
+def severe_pool_for_entity(entity):
+    pool = list(SHARED_SEVERE_EVENTS)
+
+    if entity["kind"] == "clan":
+        pool.extend(CLAN_SEVERE_EVENTS.get(entity["label"], []))
+    else:
+        pool.extend(OUTSIDER_SEVERE_EVENTS)
+
+    return pool
+
+
+def choose_severe_event_for_entity(entity, season, used_event_keys=None):
+    used_event_keys = set(used_event_keys or [])
+    eligible = [
+        event for event in severe_pool_for_entity(entity)
+        if severe_event_is_eligible(event, season)
+    ]
+
+    if not eligible:
+        return None
+
+    recent = set(recent_severe_event_keys(entity["key"]))
+    fresh = [
+        event for event in eligible
+        if event["key"] not in recent and event["key"] not in used_event_keys
+    ]
+
+    if fresh:
+        eligible = fresh
+    else:
+        no_same_week = [
+            event for event in eligible
+            if event["key"] not in used_event_keys
+        ]
+        if no_same_week:
+            eligible = no_same_week
+
+    tiers = {}
+    for event in eligible:
+        tiers.setdefault(event.get("tier", "territory"), []).append(event)
+
+    tier_names = list(tiers.keys())
+    tier_weights = [SEVERE_TIER_WEIGHTS.get(tier, 1) for tier in tier_names]
+    chosen_tier = random.choices(tier_names, weights=tier_weights, k=1)[0]
+
+    return random.choice(tiers[chosen_tier])
+
+
+def event_effects_for_target(event, target_label, primary=True):
+    if not primary:
+        modifier = int(event.get("secondary_modifier", -1))
+        effect_type = event.get("secondary_type", "hunting")
+
+        if target_label == "TorrentClan" and event.get("key") in {
+            "severe_thunderstorms", "torrential_rain", "severe_blizzard"
+        }:
+            effect_type = "both"
+
+        return [{
+            "location": "Entire Territory",
+            "modifier": modifier,
+            "type": effect_type,
+            "note": event.get(
+                "secondary_note",
+                "The edge of the weather system reaches this territory."
+            )
+        }]
+
+    overrides = event.get("target_overrides", {})
+    if target_label in overrides:
+        return copy.deepcopy(overrides[target_label])
+
+    return copy.deepcopy(event.get("effects", []))
+
+
+def severe_spread_direct_count(eligible_count):
+    if eligible_count <= 1:
+        return 1
+
+    roll = random.randint(1, 100)
+    if roll <= 55:
+        count = 1
+    elif roll <= 85:
+        count = 2
+    elif roll <= 95:
+        count = 3
+    else:
+        count = eligible_count
+
+    return min(max(1, count), eligible_count)
+
+
+def make_severe_event_record(event, direct_entities, secondary_entities=None, now=None, manual=False, duration_days=None):
+    now = now or datetime.now(TZ)
+    duration_days = duration_days or SEVERE_WEATHER_DURATION_DAYS
+    event_id = f"SW{int(now.timestamp())}{random.randint(100, 999)}"
+    expires = now + timedelta(days=duration_days)
+
+    effects = []
+
+    for entity in direct_entities:
+        for effect in event_effects_for_target(event, entity["label"], primary=True):
+            effects.append({
+                "entity_key": entity["key"],
+                "target": entity["label"],
+                "kind": entity["kind"],
+                "primary": True,
+                **effect
+            })
+
+    for entity in secondary_entities or []:
+        for effect in event_effects_for_target(event, entity["label"], primary=False):
+            effects.append({
+                "entity_key": entity["key"],
+                "target": entity["label"],
+                "kind": entity["kind"],
+                "primary": False,
+                **effect
+            })
+
+    return {
+        "id": event_id,
+        "event_key": event["key"],
+        "name": event["name"],
+        "emoji": event.get("emoji", "⚠️"),
+        "description": event.get("description", ""),
+        "started_at": now.isoformat(),
+        "expires_at": expires.isoformat(),
+        "manual": bool(manual),
+        "effects": effects
+    }
+
+
+def build_manual_severe_event(
+    event_name,
+    description,
+    primary_entities,
+    primary_location,
+    primary_modifier,
+    primary_effect_type,
+    secondary_entities,
+    secondary_location,
+    secondary_modifier,
+    secondary_effect_type,
+    duration_days,
+    now=None
+):
+    now = now or datetime.now(TZ)
+    event_key = severe_event_key_from_name(event_name)
+
+    event = {
+        "key": event_key,
+        "name": event_name.strip(),
+        "emoji": "⚠️",
+        "description": description.strip() if description else (
+            "Staff have triggered a plot weather event. Exact story consequences are left to players and staff."
+        ),
+        "effects": [{
+            "location": primary_location.strip() or "Entire Territory",
+            "modifier": int(primary_modifier),
+            "type": primary_effect_type,
+            "note": "Staff-set severe weather modifier."
+        }],
+        "secondary_modifier": int(secondary_modifier),
+        "secondary_type": secondary_effect_type,
+        "secondary_note": "Staff-set secondary weather effect."
+    }
+
+    record = make_severe_event_record(
+        event,
+        direct_entities=primary_entities,
+        secondary_entities=[],
+        now=now,
+        manual=True,
+        duration_days=duration_days
+    )
+
+    for entity in secondary_entities:
+        record["effects"].append({
+            "entity_key": entity["key"],
+            "target": entity["label"],
+            "kind": entity["kind"],
+            "primary": False,
+            "location": secondary_location.strip() or "Entire Territory",
+            "modifier": int(secondary_modifier),
+            "type": secondary_effect_type,
+            "note": "Staff-set secondary weather effect."
+        })
+
+    return record
+
+
+def event_primary_targets(event_record):
+    targets = []
+    seen = set()
+
+    for effect in event_record.get("effects", []):
+        if not effect.get("primary"):
+            continue
+        key = effect.get("entity_key")
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(effect.get("target"))
+
+    return targets
+
+
+def event_secondary_targets(event_record):
+    targets = []
+    seen = set()
+
+    for effect in event_record.get("effects", []):
+        if effect.get("primary"):
+            continue
+        key = effect.get("entity_key")
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(effect.get("target"))
+
+    return targets
+
+
+def format_severe_modifier(modifier, effect_type):
+    if effect_type == "none" or int(modifier) == 0:
+        return "No hunting or fishing modifier"
+
+    sign = "+" if int(modifier) > 0 else ""
+    label = SEVERE_EFFECT_TYPE_LABELS.get(effect_type, "hunting rolls")
+    return f"{sign}{int(modifier)} to {label}"
+
+
+def format_severe_event(event_record):
+    lines = [
+        f"{event_record.get('emoji', '⚠️')} **{event_record.get('name', 'Severe Weather')}**",
+        "",
+        event_record.get("description", "").strip()
+    ]
+
+    effects_by_target = {}
+    target_order = []
+
+    for effect in event_record.get("effects", []):
+        target = effect.get("target", "Unknown")
+        if target not in effects_by_target:
+            effects_by_target[target] = []
+            target_order.append(target)
+        effects_by_target[target].append(effect)
+
+    for target in target_order:
+        target_effects = effects_by_target[target]
+        primary = any(effect.get("primary") for effect in target_effects)
+        tag = "DIRECT HIT" if primary else "OUTER EDGE"
+        lines.extend(["", f"**{target} - {tag}**"])
+
+        for effect in target_effects:
+            location = effect.get("location", "Entire Territory")
+            modifier_text = format_severe_modifier(
+                effect.get("modifier", 0),
+                effect.get("type", "hunting")
+            )
+            lines.append(f"• **{location}:** {modifier_text}")
+            note = effect.get("note")
+            if note:
+                lines.append(f"  {note}")
+
+    try:
+        expires = datetime.fromisoformat(event_record.get("expires_at"))
+        lines.extend([
+            "",
+            f"⏳ **Effects expire:** {expires.strftime('%A, %B %d at %I:%M %p')} Toronto time"
+        ])
+    except Exception:
+        pass
+
+    return "\n".join(lines)
+
+
+def format_severe_bulletin(event_records, forced=False):
+    lines = [
+        f"<@&{WEATHER_REPORT_ROLE_ID}>",
+        "⚠️ **SEVERE WEATHER ALERT**",
+        ""
+    ]
+
+    if forced:
+        lines.append(
+            "Echostone Mountain has not gone two full weeks without a severe event, so at least one eligible territory was selected this week."
+        )
+        lines.append("")
+
+    for index, event_record in enumerate(event_records):
+        if index:
+            lines.extend(["", "━━━━━━━━━━━━━━━━━━━━", ""])
+        lines.append(format_severe_event(event_record))
+
+    lines.extend([
+        "",
+        "No cats, kits, herbs, dens, or supplies are automatically injured, killed, or destroyed by these alerts. Any story consequences beyond the listed environmental effects are decided through RP and staff plot choices."
+    ])
+
+    return "\n".join(lines)
+
+
+def active_severe_events_snapshot(now=None):
+    now = now or datetime.now(TZ)
+    active = []
+
+    for event in data.get("active_severe_weather", []):
+        try:
+            expires = datetime.fromisoformat(event.get("expires_at"))
+        except Exception:
+            expires = None
+
+        if expires and expires <= now:
+            continue
+
+        active.append(copy.deepcopy(event))
+
+    return active
+
+
+def normalize_location_for_match(value):
+    return " ".join(str(value or "").casefold().split())
+
+
+def severe_weather_modifier_for(target, location, roll_type, now=None):
+    target_entity = resolve_severe_target_name(target)
+    if not target_entity:
+        return 0, []
+
+    location_norm = normalize_location_for_match(location or "Entire Territory")
+    matches = []
+
+    for event in active_severe_events_snapshot(now):
+        for effect in event.get("effects", []):
+            if effect.get("entity_key") != target_entity["key"]:
+                continue
+
+            effect_type = effect.get("type", "hunting")
+            if effect_type == "none":
+                continue
+            if effect_type not in {roll_type, "both"}:
+                continue
+
+            effect_location = normalize_location_for_match(effect.get("location", "Entire Territory"))
+            if effect_location not in {"entire territory", "all", "all territory"}:
+                if location_norm != effect_location:
+                    continue
+
+            matches.append({
+                "event": event.get("name", "Severe Weather"),
+                "location": effect.get("location", "Entire Territory"),
+                "modifier": int(effect.get("modifier", 0)),
+                "primary": bool(effect.get("primary"))
+            })
+
+    if not matches:
+        return 0, []
+
+    # Severe-weather effects do not stack with one another. Use the strongest penalty.
+    strongest = min(match["modifier"] for match in matches)
+    return strongest, matches
+
+
+def prune_severe_week_results():
+    results = data.setdefault("severe_weather_week_results", {})
+    if len(results) <= 16:
+        return
+
+    for old_key in sorted(results.keys())[:-16]:
+        results.pop(old_key, None)
+
+
+def add_automatic_severe_event(start_entity, all_entities, season, used_event_keys, now):
+    event = choose_severe_event_for_entity(start_entity, season, used_event_keys)
+    if event is None:
+        return None, []
+
+    monthly_hits = severe_monthly_hit_keys(now)
+    direct_entities = [start_entity]
+
+    if event.get("regional"):
+        available_direct = [
+            entity for entity in all_entities
+            if entity["key"] not in monthly_hits
+            and entity["key"] != start_entity["key"]
+        ]
+
+        desired_count = severe_spread_direct_count(len(available_direct) + 1)
+        additional_count = max(0, desired_count - 1)
+        if additional_count and available_direct:
+            direct_entities.extend(
+                random.sample(
+                    available_direct,
+                    k=min(additional_count, len(available_direct))
+                )
+            )
+
+    direct_keys = {entity["key"] for entity in direct_entities}
+    remaining = [
+        entity for entity in all_entities
+        if entity["key"] not in direct_keys
+    ]
+
+    secondary_entities = []
+    if event.get("regional") and remaining:
+        if random.randint(1, 100) <= SEVERE_WEATHER_SECONDARY_SPREAD_CHANCE:
+            secondary_count = 1
+            if len(remaining) > 1 and random.randint(1, 100) <= 30:
+                secondary_count = 2
+            secondary_entities = random.sample(
+                remaining,
+                k=min(secondary_count, len(remaining))
+            )
+
+    record = make_severe_event_record(
+        event,
+        direct_entities,
+        secondary_entities,
+        now=now,
+        manual=False,
+        duration_days=SEVERE_WEATHER_DURATION_DAYS
+    )
+
+    for entity in direct_entities:
+        record_severe_primary_hit(entity, event["key"], now)
+
+    data.setdefault("active_severe_weather", []).append(record)
+    used_event_keys.add(event["key"])
+    return record, direct_entities
+
+
+async def run_automatic_severe_weather(mark_week=True):
+    now = datetime.now(TZ)
+    week = severe_week_key(now)
+    season = data.get("season", get_current_season())
+
+    async with data_lock:
+        cleanup_expired_severe_weather(now)
+
+        if mark_week and data.get("last_severe_weather_week") == week:
+            existing = data.setdefault("severe_weather_week_results", {}).get(week, {})
+            return {
+                "already_handled": True,
+                "events": [],
+                "forced": False,
+                "had_primary": bool(existing.get("had_primary"))
+            }
+
+        all_entities = get_severe_entities(include_empty_outsider=False)
+        monthly_hits = severe_monthly_hit_keys(now)
+        eligible_entities = [
+            entity for entity in all_entities
+            if entity["key"] not in monthly_hits
+        ]
+
+        random.shuffle(eligible_entities)
+        events = []
+        used_event_keys = set()
+
+        for entity in list(eligible_entities):
+            if severe_has_monthly_hit(entity["key"], now):
+                continue
+
+            if random.randint(1, 100) > SEVERE_WEATHER_WEEKLY_CHANCE:
+                continue
+
+            record, _ = add_automatic_severe_event(
+                entity,
+                all_entities,
+                season,
+                used_event_keys,
+                now
+            )
+            if record:
+                events.append(record)
+
+        forced = False
+        quiet_streak = int(data.get("severe_weather_quiet_streak", 0) or 0)
+
+        if not events and quiet_streak >= 1:
+            forced_candidates = [
+                entity for entity in all_entities
+                if not severe_has_monthly_hit(entity["key"], now)
+            ]
+
+            random.shuffle(forced_candidates)
+            for entity in forced_candidates:
+                record, _ = add_automatic_severe_event(
+                    entity,
+                    all_entities,
+                    season,
+                    used_event_keys,
+                    now
+                )
+                if record:
+                    events.append(record)
+                    forced = True
+                    break
+
+        had_primary = bool(events)
+        data["severe_weather_quiet_streak"] = 0 if had_primary else 1
+
+        if mark_week:
+            data["last_severe_weather_week"] = week
+
+        data.setdefault("severe_weather_week_results", {})[week] = {
+            "had_primary": had_primary,
+            "manual": False,
+            "forced": forced,
+            "checked_at": now.isoformat()
+        }
+        prune_severe_week_results()
+        save_data(data)
+
+        snapshot = copy.deepcopy(events)
+
+    return {
+        "already_handled": False,
+        "events": snapshot,
+        "forced": forced,
+        "had_primary": had_primary
+    }
+
+
+async def post_severe_weather_events(event_records, forced=False):
+    if not event_records:
+        return False
+
+    channel = bot.get_channel(WEATHER_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(WEATHER_CHANNEL_ID)
+        except Exception:
+            channel = None
+
+    if channel is None:
+        print("Could not find severe weather announcement channel.")
+        return False
+
+    message = format_severe_bulletin(event_records, forced=forced)
+    await send_long_message(channel, message)
+    return True
+
+
+async def trigger_northern_lights(manual=False):
+    now = datetime.now(TZ)
+    week = severe_week_key(now)
+
+    async with data_lock:
+        if not manual:
+            if data.get("last_aurora_week") == week:
+                return False
+            if not aurora_date_allowed(now):
+                return False
+            if not current_weather_allows_aurora():
+                return False
+            if random.randint(1, 100) > NORTHERN_LIGHTS_WEEKLY_CHANCE:
+                return False
+
+        active_until = now + timedelta(hours=NORTHERN_LIGHTS_DURATION_HOURS)
+        data["aurora_active_until"] = active_until.isoformat()
+        data["last_aurora_week"] = week
+        save_data(data)
+
+    channel = bot.get_channel(WEATHER_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(WEATHER_CHANNEL_ID)
+        except Exception:
+            channel = None
+
+    if channel:
+        message = (
+            f"<@&{WEATHER_REPORT_ROLE_ID}>\n"
+            "🌌 **NORTHERN LIGHTS OVER ECHOSTONE MOUNTAIN**\n\n"
+            "Curtains of green, blue, and violet light ripple across the night sky. "
+            "The mountain feels unusually still, and the boundary between the living and the dead seems thinner than usual.\n\n"
+            "🌙 **StarClan feels closer than ever.** Medicine cats and leaders may feel their ancestors especially strongly beneath the lights.\n"
+            "✨ **Spirit Veil:** For this event, StarClan cats may walk the living territories in spirit form and converse with living cats.\n"
+            "⚠️ **Dark Forest beware:** The veil opens both ways. Dark Forest spirits may also cross into the living lands in spirit form.\n"
+            "🎯 **Prey Effect:** None. Hunting and fishing rolls are unchanged.\n\n"
+            f"⏳ The Spirit Veil remains open until **{active_until.strftime('%A, %B %d at %I:%M %p')} Toronto time**."
+        )
+        await send_long_message(channel, message)
+
+    return True
 
 # ─────────────────────────────
 # READY + ERROR HANDLING
@@ -3201,8 +4816,16 @@ async def on_ready():
     if not weekly_weather_report.is_running():
         weekly_weather_report.start()
 
-    if not biweekly_quest_report.is_running():
-        biweekly_quest_report.start()
+    if not severe_weather_report.is_running():
+        severe_weather_report.start()
+
+    try:
+        await migrate_active_quests_to_monthly_schedule()
+    except Exception as error:
+        print(f"Monthly quest schedule migration failed: {error}")
+
+    if not monthly_quest_report.is_running():
+        monthly_quest_report.start()
 
     if not quest_reminders.is_running():
         quest_reminders.start()
@@ -3507,11 +5130,17 @@ async def botinfo(interaction: discord.Interaction):
         "`/resetmoon` — Staff only. Resets moon count and adjusts living cat ages\n"
         "`/weatherreport` — Manually post or view this week's weather report\n"
         "`/setweather` — Staff only. Manually set custom weather\n"
+        "`/severeweather trigger` — Staff only. Trigger a custom event and choose primary/secondary groups, locations, modifiers, and duration\n"
+        "`/severeweather roll` — Staff only. Run the weekly severe-weather roll early\n"
+        "`/severeweather active` — View current severe-weather effects\n"
+        "`/severeweather modifier` — Check the severe-weather modifier for a territory/location\n"
+        "`/severeweather end` — Staff only. End an active event early\n"
+        "`/severeweather aurora` — Staff only. Trigger the Northern Lights and Spirit Veil\n"
         "`/prophecy post` — Staff only. Post a custom prophecy or omen\n`/prophecy pause` — Staff only. Pause new monthly prophecy rolls and keep the active prophecy\n`/prophecy unpause` — Staff only. Resume new monthly prophecy rolls\n"
         "`/revertmoon` — Staff only. Reverts to the saved state before the last moon advance\n\n"
 
         "📜 **Quest / Gathering Commands**\n"
-        "`/quest force` — Quest manager only. Clear and force-post a new 2-week quest/event cycle while keeping the Tuesday schedule\n"
+        "`/quest force` — Quest manager only. Clear and force-post replacement quests while keeping the monthly first-of-the-month schedule\n"
         "`/quest complete [Clan]` — Staff only. Mark a Clan or Outsider quest/event as complete and post the reward\n`/resetquest [Clan/Outsider/All]` — Staff only. Replace one or all active quests/events while keeping the current due date\n"
         "`/gatheringreport [ClanName]` — Generate a Clan-specific report including recent promotions, deaths, injuries, quest results, and major story changes\n"
         "`/rollhelp` — Helps calculate whether an OC caught their prey using their roll, modifiers, and required hunting number\n\n"
@@ -3523,7 +5152,7 @@ async def botinfo(interaction: discord.Interaction):
         "`/cattinder [Name] [Clan]` — Find age-appropriate romance options\n"
         "`/question` — Random OC question prompt system\n"
         "`/needsmentor` — View apprentices and medicine cat apprentices who do not currently have mentors\n"
-        "`/upcomingceremonies` — View cats eligible for apprentice ceremonies, warrior assessments, or elder retirement\n\n"
+        "`/upcomingceremonies [Clan]` — View eligible kits, apprentices, and elder candidates for all Clans or one Clan\n\n"
 
         "📜 **Plot Commands**\n"
         "`/plot member` — Add or update an existing cat on the plot roster\n"
@@ -3553,6 +5182,18 @@ async def botinfo(interaction: discord.Interaction):
         "`/freezecat` — Staff only. Freeze or unfreeze a cat's age and/or hunger, either indefinitely or for a set number of days\n"
         "`/frozenlist` — Staff only. View all cats with active age or hunger freezes\n\n"
         "`/cat clearhistorymoon` — Delete cat history entries from a specific moon\n\n"
+
+        "🐾 **NPC Commands**\n"
+        "`/npc add` — Staff only. Add a new living NPC cat that appears on Clan/Outsider rosters\n"
+        "`/npc adddead` — Staff only. Add an NPC who is already deceased and choose StarClan, Dark Forest, or Unknown Residence\n"
+        "`/npc convert` — Staff only. Change an existing cat into an NPC\n"
+        "`/npc markdead` — Staff only. Mark a living NPC dead and choose their afterlife\n"
+        "NPCs age every moon and can use normal rank, rename, relationship, and death records, but their hunger does not decay.\n\n"
+
+        "🌫️ **Outsider Group Commands**\n"
+        "`/outsidergroup add [Name]` — Staff only. Add a persistent Outsider group\n"
+        "`/outsidergroup assign [Cat] [Group]` — Staff only. Assign an existing Outsider to a saved group\n"
+        "`/outsidergroup list` — View all available Outsider groups\n\n"
 
         "🏅 **Honour Role Commands**\n"
         "`/honour role [Cat] [Role]` — Staff only. Name an eligible Warrior or Apprentice to a Clan Honour Role\n"
@@ -3599,8 +5240,10 @@ async def botinfo(interaction: discord.Interaction):
 
         "📌 **Important Notes**\n"
         "• Most staff commands only work in the designated bot command channel\n"
-        "• Quests automatically post every other Tuesday at 9 AM\n"
-        "• Weather updates post weekly\n"
+        "• Quests automatically post on the 1st of every month at 9 AM, with reminders at 14 days, 7 days, and 3 days remaining\n"
+        "• Normal weather updates post weekly\n"
+        "• Severe weather rolls automatically every Monday at 4 PM Toronto time unless staff already triggered/rolled an event that week\n"
+        "• Each Clan or populated Outsider group has a 20% weekly disaster chance, primary disasters are limited to once per calendar month, and there cannot be two fully quiet severe-weather weeks in a row\n"
         "• Moon progression is monthly unless manually advanced\n"
         "• Dead cats cannot be mentored, injured, or appear in Cat Tinder\n"
         "• Cat Tinder excludes dead cats, mates, exes, mentors, family, and hidden cats\n"
@@ -3636,6 +5279,370 @@ hiatus_group = app_commands.Group(name="hiatus", description="Manage member hiat
 honour_group = app_commands.Group(name="honour", description="Manage Clan Honour Roles")
 condition_group = app_commands.Group(name="condition", description="Manage permanent cat status conditions")
 plot_group = app_commands.Group(name="plot", description="Manage plot-member records")
+npc_group = app_commands.Group(name="npc", description="Manage NPC cat records")
+outsider_group = app_commands.Group(name="outsidergroup", description="Manage Outsider groups")
+
+
+@outsider_group.command(name="add", description="Add a new Outsider group")
+@app_commands.describe(name="Name of the new Outsider group")
+async def outsider_group_add_command(interaction: discord.Interaction, name: str):
+    if not await staff_command_check(interaction):
+        return
+
+    clean_name = name.strip()
+    if not clean_name:
+        await interaction.response.send_message(
+            "❌ Outsider group name cannot be blank.",
+            ephemeral=True
+        )
+        return
+
+    if len(clean_name) > 80:
+        await interaction.response.send_message(
+            "❌ Keep Outsider group names to 80 characters or fewer.",
+            ephemeral=True
+        )
+        return
+
+    async with data_lock:
+        existing = get_outsider_groups()
+        if any(group.casefold() == clean_name.casefold() for group in existing):
+            matched = next(group for group in existing if group.casefold() == clean_name.casefold())
+            await interaction.response.send_message(
+                f"❌ **{matched}** already exists as an Outsider group.",
+                ephemeral=True
+            )
+            return
+
+        groups = data.setdefault("outsider_groups", list(FACTIONS))
+        if not isinstance(groups, list):
+            groups = list(FACTIONS)
+            data["outsider_groups"] = groups
+        groups.append(clean_name)
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🌫️ Added **{clean_name}** as a new Outsider group. It can now be selected when adding Outsider cats or NPCs."
+    )
+
+
+@outsider_group.command(name="assign", description="Assign an existing Outsider cat to a group")
+@app_commands.describe(cat_name="Existing Outsider cat", group="Outsider group")
+@app_commands.autocomplete(group=outsider_group_autocomplete)
+async def outsider_group_assign_command(
+    interaction: discord.Interaction,
+    cat_name: str,
+    group: str
+):
+    if not await staff_command_check(interaction):
+        return
+
+    resolved_group = resolve_outsider_group(group)
+    if resolved_group is None:
+        await interaction.response.send_message(
+            "❌ That Outsider group does not exist. Add it first with `/outsidergroup add`.",
+            ephemeral=True
+        )
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+        if cat_name not in cats:
+            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            return
+
+        cat = cats[cat_name]
+        if cat.get("clan") != "Outsider":
+            await interaction.response.send_message(
+                f"❌ **{cat_name}** is not recorded as an Outsider.",
+                ephemeral=True
+            )
+            return
+
+        if cat.get("rank") == "Kittypet":
+            await interaction.response.send_message(
+                "❌ Kittypets cannot be assigned to an Outsider group.",
+                ephemeral=True
+            )
+            return
+
+        old_group = cat.get("faction")
+        cat["faction"] = resolved_group
+        add_history(cat, f"Outsider group changed from {old_group or 'None'} to {resolved_group}")
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🌫️ **{cat_name}** is now part of **{resolved_group}**."
+    )
+
+
+@outsider_group.command(name="list", description="List all available Outsider groups")
+async def outsider_group_list_command(interaction: discord.Interaction):
+    groups = get_outsider_groups()
+    await interaction.response.send_message(
+        "🌫️ **Outsider Groups**\n" + "\n".join(f"• {group}" for group in groups),
+        ephemeral=True
+    )
+
+
+@npc_group.command(name="add", description="Add a new NPC cat")
+@app_commands.describe(
+    name="NPC cat name",
+    age="Age in moons",
+    clan="Select Clan or Outsider",
+    rank="Select rank",
+    faction="Optional Outsider faction"
+)
+@app_commands.choices(clan=CLAN_CHOICES, rank=RANK_CHOICES)
+@app_commands.autocomplete(faction=outsider_group_autocomplete)
+async def npc_add_command(
+    interaction: discord.Interaction,
+    name: str,
+    age: int,
+    clan: app_commands.Choice[str],
+    rank: app_commands.Choice[str],
+    faction: str = None
+):
+    if not await staff_command_check(interaction):
+        return
+
+    if age < 0:
+        await interaction.response.send_message("❌ Age cannot be negative.", ephemeral=True)
+        return
+
+    faction_value = resolve_outsider_group(faction) if faction else None
+    if faction and faction_value is None:
+        await interaction.response.send_message(
+            "❌ That Outsider group does not exist. Add it first with `/outsidergroup add`.",
+            ephemeral=True
+        )
+        return
+
+    validation_error = validate_cat_rank(clan.value, rank.value, faction_value)
+    if validation_error:
+        await interaction.response.send_message(validation_error, ephemeral=True)
+        return
+
+    async with data_lock:
+        if name in data.get("cats", {}):
+            await interaction.response.send_message(
+                "❌ That cat already exists. Use `/npc convert` to turn an existing cat into an NPC.",
+                ephemeral=True
+            )
+            return
+
+        data.setdefault("cats", {})[name] = {
+            "clan": clan.value,
+            "age": age,
+            "rank": rank.value,
+            "faction": faction_value,
+            "status": "Alive",
+            "afterlife": None,
+            "death_moon": None,
+            "born_moon": max(0, data.get("moon", 0) - age),
+            "history": [f"Moon {data.get('moon', 0)}: Added to records as an NPC {rank.value}"],
+            "exclude_from_tinder": False,
+            "is_npc": True,
+            "hunger_level": "Satisfied",
+            "last_fed": None,
+            "last_hunger_update": None
+        }
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🐾 Added **{name} (NPC)** to **{clan.value}** as **{rank.value}** at **{age} moons**."
+    )
+
+
+@npc_group.command(name="adddead", description="Add an NPC cat who is already dead")
+@app_commands.describe(
+    name="NPC cat name",
+    age="Age at death in moons",
+    clan="Clan they belonged to, or Outsider",
+    rank="Rank at death",
+    afterlife="Afterlife destination",
+    group="Optional Outsider group",
+    cause="Optional cause of death"
+)
+@app_commands.choices(clan=CLAN_CHOICES, rank=RANK_CHOICES, afterlife=AFTERLIFE_CHOICES)
+@app_commands.autocomplete(group=outsider_group_autocomplete)
+async def npc_adddead_command(
+    interaction: discord.Interaction,
+    name: str,
+    age: int,
+    clan: app_commands.Choice[str],
+    rank: app_commands.Choice[str],
+    afterlife: app_commands.Choice[str],
+    group: str = None,
+    cause: str = None
+):
+    if not await staff_command_check(interaction):
+        return
+
+    if age < 0:
+        await interaction.response.send_message("❌ Age cannot be negative.", ephemeral=True)
+        return
+
+    group_value = resolve_outsider_group(group) if group else None
+    if group and group_value is None:
+        await interaction.response.send_message(
+            "❌ That Outsider group does not exist. Add it first with `/outsidergroup add`.",
+            ephemeral=True
+        )
+        return
+
+    validation_error = validate_cat_rank(clan.value, rank.value, group_value)
+    if validation_error:
+        await interaction.response.send_message(validation_error, ephemeral=True)
+        return
+
+    async with data_lock:
+        cats = data.setdefault("cats", {})
+        if name in cats:
+            await interaction.response.send_message(
+                "❌ That cat already exists. If they are a living NPC, use `/npc markdead` instead.",
+                ephemeral=True
+            )
+            return
+
+        history_text = f"Moon {data.get('moon', 0)}: Added to records as a deceased NPC. Died as {rank.value}"
+        if cause:
+            history_text += f" from {cause}"
+        history_text += f" and went to {afterlife.value}."
+
+        cats[name] = {
+            "clan": clan.value,
+            "age": age,
+            "rank": rank.value,
+            "faction": group_value,
+            "status": "Dead",
+            "afterlife": afterlife.value,
+            "death_moon": "Before records",
+            "cause_of_death": cause,
+            "born_moon": None,
+            "history": [history_text],
+            "exclude_from_tinder": True,
+            "is_npc": True,
+            "hunger_level": "Satisfied",
+            "last_fed": None,
+            "last_hunger_update": None
+        }
+        save_data(data)
+
+    group_line = f"\n🌫️ Outsider Group: {group_value}" if group_value else ""
+    cause_line = f"\n🩸 Cause of Death: {cause}" if cause else ""
+    await interaction.response.send_message(
+        f"💀 Added deceased NPC **{name} (NPC)**\n"
+        f"⛺ Clan: {clan.value}\n"
+        f"⚔ Rank at death: {rank.value}\n"
+        f"🌙 Age at death: {age} moons\n"
+        f"🌌 Afterlife: {afterlife.value}"
+        f"{group_line}{cause_line}"
+    )
+
+
+@npc_group.command(name="convert", description="Change an existing cat into an NPC")
+@app_commands.describe(cat_name="Existing cat to mark as an NPC")
+async def npc_convert_command(interaction: discord.Interaction, cat_name: str):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+        if cat_name not in cats:
+            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            return
+
+        cat = cats[cat_name]
+        prepare_cat_record(cat_name, cat)
+
+        if cat.get("is_npc"):
+            await interaction.response.send_message(
+                f"❌ **{cat_name}** is already an NPC.",
+                ephemeral=True
+            )
+            return
+
+        cat["is_npc"] = True
+        add_history(cat, "Changed to NPC status")
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🐾 **{cat_name}** is now marked as **{cat_name} (NPC)** on rosters. Their hunger will no longer decay."
+    )
+
+
+@npc_group.command(name="markdead", description="Mark an NPC as dead and choose their afterlife")
+@app_commands.describe(
+    cat_name="NPC cat name",
+    afterlife="Afterlife destination",
+    cause="Optional cause of death"
+)
+@app_commands.choices(afterlife=AFTERLIFE_CHOICES)
+async def npc_markdead_command(
+    interaction: discord.Interaction,
+    cat_name: str,
+    afterlife: app_commands.Choice[str],
+    cause: str = None
+):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+        if cat_name not in cats:
+            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            return
+
+        cat = cats[cat_name]
+        prepare_cat_record(cat_name, cat)
+
+        if not cat.get("is_npc"):
+            await interaction.response.send_message(
+                f"❌ **{cat_name}** is not marked as an NPC. Use `/cat markdead` for regular OCs.",
+                ephemeral=True
+            )
+            return
+
+        if cat_is_dead(cat):
+            await interaction.response.send_message(
+                f"❌ **{cat_name} (NPC)** is already deceased.",
+                ephemeral=True
+            )
+            return
+
+        had_honour_role = bool(cat.get("honour_role"))
+        cat["status"] = "Dead"
+        cat["afterlife"] = afterlife.value
+        cat["death_moon"] = data.get("moon", 0)
+        cat["cause_of_death"] = cause
+
+        if cause:
+            add_history(cat, f"Died from {cause} and went to {afterlife.value}")
+        else:
+            add_history(cat, f"Died and went to {afterlife.value}")
+
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"💀 **{cat_name} (NPC)** has died and gone to **{afterlife.value}**."
+    )
+
+    channel = bot.get_channel(DEATH_ANNOUNCEMENT_CHANNEL_ID)
+    if channel:
+        death_message = (
+            f"💀 **Death Announcement**\n"
+            f"**{cat_name} (NPC)** has died and now walks in **{afterlife.value}**."
+        )
+        if cause:
+            death_message += f"\n**Cause of Death:** {cause}"
+        await channel.send(death_message)
+
+    if had_honour_role:
+        try:
+            await update_honour_tracker_message()
+        except Exception as error:
+            print(f"Could not update Honour Role tracker after NPC death: {error}")
 
 
 @plot_group.command(name="member", description="Add or update an existing cat as a plot member")
@@ -4438,14 +6445,15 @@ def remove_relationship_history_between(cat, other_name):
     rank="Select rank",
     faction="Optional outsider faction"
 )
-@app_commands.choices(clan=CLAN_CHOICES, rank=RANK_CHOICES, faction=FACTION_CHOICES)
+@app_commands.choices(clan=CLAN_CHOICES, rank=RANK_CHOICES)
+@app_commands.autocomplete(faction=outsider_group_autocomplete)
 async def cat_add(
     interaction: discord.Interaction,
     name: str,
     age: int,
     clan: app_commands.Choice[str],
     rank: app_commands.Choice[str],
-    faction: app_commands.Choice[str] = None
+    faction: str = None
 ):
     if not await staff_command_check(interaction):
         return
@@ -4455,7 +6463,14 @@ async def cat_add(
             await interaction.response.send_message("That cat already exists.", ephemeral=True)
             return
 
-        faction_value = faction.value if faction else None
+        faction_value = resolve_outsider_group(faction) if faction else None
+
+        if faction and faction_value is None:
+            await interaction.response.send_message(
+                "❌ That Outsider group does not exist. Add it first with `/outsidergroup add`.",
+                ephemeral=True
+            )
+            return
 
         validation_error = validate_cat_rank(clan.value, rank.value, faction_value)
         if validation_error:
@@ -6056,30 +8071,653 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
 
 @tasks.loop(minutes=30)
 async def weekly_weather_report():
+    """Post the normal weekly weather on Sundays at 10 AM Toronto time."""
     now = datetime.now(TZ)
 
     if now.weekday() != 6 or now.hour != 10:
         return
 
-    this_week = f"{now.year}-W{now.isocalendar().week}"
+    this_week = severe_week_key(now)
 
     async with data_lock:
         if data.get("last_weather_week") == this_week:
             return
 
+        details = generate_weekly_weather_details()
+        details["week"] = this_week
         data["last_weather_week"] = this_week
+        data["current_weather"] = details
         save_data(data)
 
     channel = bot.get_channel(WEATHER_CHANNEL_ID)
     if channel:
-        report = generate_weekly_weather()
         await channel.send(
             content=f"<@&{WEATHER_REPORT_ROLE_ID}>",
             embed=discord.Embed(
-                description=report,
+                description=details["report"],
                 color=discord.Color.blue()
             )
         )
+
+
+severeweather_group = app_commands.Group(
+    name="severeweather",
+    description="Severe weather and environmental event commands"
+)
+
+
+@severeweather_group.command(
+    name="trigger",
+    description="Staff only. Trigger a custom severe weather event for one or more groups."
+)
+@app_commands.describe(
+    event_name="Event name, such as Severe Thunderstorms or Fire at Whispering Branches",
+    primary_targets="Comma-separated Clan or Outsider group names. You can also type All Clans, All Outsiders, or Everyone.",
+    primary_modifier="Primary roll modifier, such as -2 or -6",
+    location="Primary affected location. Use Entire Territory for a territory-wide event.",
+    primary_effect_type="Whether the primary modifier affects hunting, fishing, both, or neither",
+    secondary_targets="Optional comma-separated groups on the outer edge of the event",
+    secondary_modifier="Secondary modifier. Default is -1.",
+    secondary_location="Location affected for secondary targets",
+    secondary_effect_type="Whether the secondary modifier affects hunting, fishing, both, or neither",
+    duration_days="How many days the effects last. Default is 7.",
+    override_month_limit="Allow a primary target that already had a disaster this month",
+    description="Optional plot description. The bot will never invent injuries or destroyed supplies."
+)
+@app_commands.choices(
+    primary_effect_type=SEVERE_EFFECT_TYPE_CHOICES,
+    secondary_effect_type=SEVERE_EFFECT_TYPE_CHOICES
+)
+async def severeweather_trigger_command(
+    interaction: discord.Interaction,
+    event_name: str,
+    primary_targets: str,
+    primary_modifier: int,
+    location: str = "Entire Territory",
+    primary_effect_type: app_commands.Choice[str] = None,
+    secondary_targets: str = None,
+    secondary_modifier: int = -1,
+    secondary_location: str = "Entire Territory",
+    secondary_effect_type: app_commands.Choice[str] = None,
+    duration_days: int = SEVERE_WEATHER_DURATION_DAYS,
+    override_month_limit: bool = False,
+    description: str = None
+):
+    if not await staff_command_check(interaction):
+        return
+
+    if not event_name.strip():
+        await interaction.response.send_message(
+            "❌ Event name cannot be blank.",
+            ephemeral=True
+        )
+        return
+
+    if primary_modifier < -10 or primary_modifier > 0:
+        await interaction.response.send_message(
+            "❌ Primary modifier must be between **-10 and 0**.",
+            ephemeral=True
+        )
+        return
+
+    if secondary_modifier < -10 or secondary_modifier > 0:
+        await interaction.response.send_message(
+            "❌ Secondary modifier must be between **-10 and 0**.",
+            ephemeral=True
+        )
+        return
+
+    if duration_days < 1 or duration_days > 30:
+        await interaction.response.send_message(
+            "❌ Duration must be between **1 and 30 days**.",
+            ephemeral=True
+        )
+        return
+
+    try:
+        primary_entities = parse_severe_targets(
+            primary_targets,
+            include_empty_outsider=True
+        )
+        secondary_entities = parse_severe_targets(
+            secondary_targets,
+            include_empty_outsider=True
+        ) if secondary_targets else []
+    except ValueError as error:
+        await interaction.response.send_message(
+            f"❌ {error}",
+            ephemeral=True
+        )
+        return
+
+    if not primary_entities:
+        await interaction.response.send_message(
+            "❌ Choose at least one primary target.",
+            ephemeral=True
+        )
+        return
+
+    primary_keys = {entity["key"] for entity in primary_entities}
+    secondary_entities = [
+        entity for entity in secondary_entities
+        if entity["key"] not in primary_keys
+    ]
+
+    primary_type = (
+        primary_effect_type.value
+        if primary_effect_type
+        else "hunting"
+    )
+    secondary_type = (
+        secondary_effect_type.value
+        if secondary_effect_type
+        else "hunting"
+    )
+
+    await interaction.response.defer(ephemeral=True)
+    now = datetime.now(TZ)
+    week = severe_week_key(now)
+
+    async with data_lock:
+        cleanup_expired_severe_weather(now)
+
+        if not override_month_limit:
+            blocked = [
+                entity["label"]
+                for entity in primary_entities
+                if severe_has_monthly_hit(entity["key"], now)
+            ]
+
+            if blocked:
+                await interaction.edit_original_response(
+                    content=(
+                        "❌ These primary targets already had a disaster this calendar month: "
+                        f"**{', '.join(blocked)}**.\n"
+                        "Use `override_month_limit: True` only when plot requires another event."
+                    )
+                )
+                return
+
+        event_record = build_manual_severe_event(
+            event_name=event_name,
+            description=description,
+            primary_entities=primary_entities,
+            primary_location=location,
+            primary_modifier=primary_modifier,
+            primary_effect_type=primary_type,
+            secondary_entities=secondary_entities,
+            secondary_location=secondary_location,
+            secondary_modifier=secondary_modifier,
+            secondary_effect_type=secondary_type,
+            duration_days=duration_days,
+            now=now
+        )
+
+        data.setdefault("active_severe_weather", []).append(event_record)
+
+        for entity in primary_entities:
+            record_severe_primary_hit(
+                entity,
+                event_record["event_key"],
+                now
+            )
+
+        data["severe_weather_quiet_streak"] = 0
+        data["last_severe_weather_week"] = week
+        data.setdefault("severe_weather_week_results", {})[week] = {
+            "had_primary": True,
+            "manual": True,
+            "forced": False,
+            "checked_at": now.isoformat()
+        }
+        prune_severe_week_results()
+        save_data(data)
+
+    posted = await post_severe_weather_events([event_record], forced=False)
+
+    primary_text = ", ".join(entity["label"] for entity in primary_entities)
+    secondary_text = ", ".join(entity["label"] for entity in secondary_entities)
+
+    response = (
+        f"⚠️ Custom severe weather event **{event_record['name']}** created.\n"
+        f"**Event ID:** `{event_record['id']}`\n"
+        f"**Primary:** {primary_text}"
+    )
+
+    if secondary_text:
+        response += f"\n**Secondary:** {secondary_text}"
+
+    if override_month_limit:
+        response += "\n⚠️ Monthly disaster limit was overridden for this plot event."
+
+    response += (
+        "\n✅ The automatic severe-weather roll for this ISO week is now considered handled."
+        if posted
+        else "\n⚠️ Event was saved, but the weather announcement could not be posted."
+    )
+
+    await interaction.edit_original_response(content=response)
+
+
+@severeweather_group.command(
+    name="roll",
+    description="Staff only. Run this week's automatic severe-weather roll early."
+)
+async def severeweather_roll_command(interaction: discord.Interaction):
+    if not await staff_command_check(interaction):
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    result = await run_automatic_severe_weather(mark_week=True)
+
+    if result.get("already_handled"):
+        await interaction.edit_original_response(
+            content=(
+                "🌦️ This week's severe-weather check is already handled. "
+                "A manual event or the Monday automatic roll has already been recorded."
+            )
+        )
+        return
+
+    events = result.get("events", [])
+
+    if events:
+        posted = await post_severe_weather_events(
+            events,
+            forced=result.get("forced", False)
+        )
+        await interaction.edit_original_response(
+            content=(
+                f"⚠️ Severe-weather roll completed with **{len(events)} event(s)**."
+                + (" The alert was posted." if posted else " The events were saved, but the alert could not be posted.")
+            )
+        )
+    else:
+        aurora_triggered = await trigger_northern_lights(manual=False)
+        message = (
+            "🌤️ Severe-weather roll completed. No primary disasters triggered this week."
+        )
+        if aurora_triggered:
+            message += "\n🌌 The Northern Lights triggered instead as a separate celestial phenomenon."
+        await interaction.edit_original_response(content=message)
+
+
+@severeweather_group.command(
+    name="active",
+    description="View currently active severe-weather effects and the Northern Lights."
+)
+async def severeweather_active_command(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    now = datetime.now(TZ)
+
+    async with data_lock:
+        changed = cleanup_expired_severe_weather(now)
+        if changed:
+            save_data(data)
+
+        active = copy.deepcopy(data.get("active_severe_weather", []))
+        aurora_until = data.get("aurora_active_until")
+
+    if not active and not aurora_until:
+        await interaction.edit_original_response(
+            content="🌤️ There are no active severe-weather effects right now."
+        )
+        return
+
+    lines = ["⚠️ **Active Severe Weather**", ""]
+
+    for event in active:
+        lines.append(
+            f"`{event.get('id', '?')}` {event.get('emoji', '⚠️')} **{event.get('name', 'Severe Weather')}**"
+        )
+
+        primary = event_primary_targets(event)
+        secondary = event_secondary_targets(event)
+
+        if primary:
+            lines.append(f"Primary: {', '.join(primary)}")
+        if secondary:
+            lines.append(f"Outer edge: {', '.join(secondary)}")
+
+        try:
+            expires = datetime.fromisoformat(event.get("expires_at"))
+            lines.append(
+                f"Expires: {expires.strftime('%A, %B %d at %I:%M %p')} Toronto time"
+            )
+        except Exception:
+            pass
+
+        for effect in event.get("effects", []):
+            modifier_text = format_severe_modifier(
+                effect.get("modifier", 0),
+                effect.get("type", "hunting")
+            )
+            lines.append(
+                f"• {effect.get('target')} / {effect.get('location', 'Entire Territory')}: {modifier_text}"
+            )
+
+        lines.append("")
+
+    if aurora_until:
+        try:
+            aurora_expires = datetime.fromisoformat(aurora_until)
+            if aurora_expires > now:
+                lines.extend([
+                    "🌌 **Northern Lights / Spirit Veil Active**",
+                    f"Until {aurora_expires.strftime('%A, %B %d at %I:%M %p')} Toronto time",
+                    "No prey modifier. StarClan and Dark Forest spirits may walk the living lands in spirit form.",
+                    ""
+                ])
+        except Exception:
+            pass
+
+    message = "\n".join(lines).strip()
+    chunks = []
+
+    while len(message) > 1900:
+        split_at = message.rfind("\n", 0, 1900)
+        if split_at == -1:
+            split_at = 1900
+        chunks.append(message[:split_at])
+        message = message[split_at:].lstrip()
+
+    chunks.append(message)
+
+    await interaction.edit_original_response(content=chunks[0])
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk, ephemeral=True)
+
+
+@severeweather_group.command(
+    name="modifier",
+    description="Check the active severe-weather modifier for a territory and roll type."
+)
+@app_commands.describe(
+    target="Clan or Outsider group name",
+    location="Exact hunting location, such as Trout Run or Whispering Branches",
+    roll_type="Hunting or fishing"
+)
+@app_commands.choices(roll_type=SEVERE_ROLL_TYPE_CHOICES)
+async def severeweather_modifier_command(
+    interaction: discord.Interaction,
+    target: str,
+    location: str,
+    roll_type: app_commands.Choice[str]
+):
+    target_entity = resolve_severe_target_name(target)
+
+    if not target_entity:
+        await interaction.response.send_message(
+            "❌ Target not found. Use a Clan name or saved Outsider group name.",
+            ephemeral=True
+        )
+        return
+
+    modifier, matches = severe_weather_modifier_for(
+        target_entity["label"],
+        location,
+        roll_type.value
+    )
+
+    if not matches:
+        await interaction.response.send_message(
+            f"🌤️ No active severe-weather **{roll_type.value}** modifier applies to "
+            f"**{target_entity['label']}** at **{location}**.",
+            ephemeral=True
+        )
+        return
+
+    match_lines = [
+        f"• {match['event']} ({match['location']}): {match['modifier']:+d}"
+        for match in matches
+    ]
+
+    await interaction.response.send_message(
+        f"⚠️ **Severe Weather Modifier**\n"
+        f"**Target:** {target_entity['label']}\n"
+        f"**Location:** {location}\n"
+        f"**Roll Type:** {roll_type.value.title()}\n"
+        f"**Modifier to use:** {modifier:+d}\n\n"
+        + "\n".join(match_lines)
+        + "\n\nSevere-weather penalties do not stack with each other. Use the strongest applicable severe penalty.",
+        ephemeral=True
+    )
+
+
+
+@severeweather_group.command(
+    name="effect",
+    description="Staff only. Add another custom location/modifier to an active severe-weather event."
+)
+@app_commands.describe(
+    event_id="Event ID shown by /severeweather active",
+    target="Clan or Outsider group name",
+    location="Affected location, such as Trout Run or Whispering Branches",
+    modifier="Roll modifier, from -10 to 0",
+    effect_type="Hunting, fishing, both, or no roll modifier",
+    primary="True makes this a primary disaster hit; False makes it a secondary/spillover effect",
+    override_month_limit="Allow a new primary target that already had a disaster this month",
+    note="Optional explanation for this location-specific effect"
+)
+@app_commands.choices(effect_type=SEVERE_EFFECT_TYPE_CHOICES)
+async def severeweather_effect_command(
+    interaction: discord.Interaction,
+    event_id: str,
+    target: str,
+    location: str,
+    modifier: int,
+    effect_type: app_commands.Choice[str],
+    primary: bool = False,
+    override_month_limit: bool = False,
+    note: str = None
+):
+    if not await staff_command_check(interaction):
+        return
+
+    if modifier < -10 or modifier > 0:
+        await interaction.response.send_message(
+            "❌ Modifier must be between **-10 and 0**.",
+            ephemeral=True
+        )
+        return
+
+    entity = resolve_severe_target_name(target)
+    if not entity:
+        await interaction.response.send_message(
+            "❌ Target not found. Use a Clan name or saved Outsider group name.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    now = datetime.now(TZ)
+    week = severe_week_key(now)
+
+    async with data_lock:
+        cleanup_expired_severe_weather(now)
+        active = data.setdefault("active_severe_weather", [])
+        event_record = next(
+            (
+                event for event in active
+                if str(event.get("id", "")).casefold() == event_id.strip().casefold()
+            ),
+            None
+        )
+
+        if event_record is None:
+            await interaction.edit_original_response(
+                content="❌ Active severe-weather event not found."
+            )
+            return
+
+        already_primary = any(
+            effect.get("entity_key") == entity["key"] and effect.get("primary")
+            for effect in event_record.get("effects", [])
+        )
+
+        if primary and not already_primary:
+            if severe_has_monthly_hit(entity["key"], now) and not override_month_limit:
+                await interaction.edit_original_response(
+                    content=(
+                        f"❌ **{entity['label']}** already had a primary disaster this month. "
+                        "Use `override_month_limit: True` only if plot requires another."
+                    )
+                )
+                return
+
+            record_severe_primary_hit(
+                entity,
+                event_record.get("event_key", severe_event_key_from_name(event_record.get("name"))),
+                now
+            )
+
+        event_record.setdefault("effects", []).append({
+            "entity_key": entity["key"],
+            "target": entity["label"],
+            "kind": entity["kind"],
+            "primary": bool(primary),
+            "location": location.strip() or "Entire Territory",
+            "modifier": modifier,
+            "type": effect_type.value,
+            "note": note.strip() if note else "Staff-set location-specific severe weather effect."
+        })
+
+        if primary:
+            data["severe_weather_quiet_streak"] = 0
+            data["last_severe_weather_week"] = week
+            data.setdefault("severe_weather_week_results", {})[week] = {
+                "had_primary": True,
+                "manual": True,
+                "forced": False,
+                "checked_at": now.isoformat()
+            }
+            prune_severe_week_results()
+
+        save_data(data)
+
+    channel = bot.get_channel(WEATHER_CHANNEL_ID)
+    if channel:
+        update_message = (
+            f"<@&{WEATHER_REPORT_ROLE_ID}>\n"
+            f"⚠️ **SEVERE WEATHER UPDATE - {event_record.get('name', 'Weather Event')}**\n\n"
+            f"**{entity['label']} - {'DIRECT HIT' if primary else 'OUTER EDGE'}**\n"
+            f"• **{location.strip() or 'Entire Territory'}:** "
+            f"{format_severe_modifier(modifier, effect_type.value)}\n"
+            f"{note.strip() if note else 'Staff-set location-specific effect.'}\n\n"
+            "No automatic injuries, deaths, destroyed herbs, or destroyed dens are created by this update."
+        )
+        await send_long_message(channel, update_message)
+
+    await interaction.edit_original_response(
+        content=(
+            f"✅ Added the new effect to `{event_record.get('id')}`.\n"
+            f"**{entity['label']} / {location.strip() or 'Entire Territory'}:** "
+            f"{format_severe_modifier(modifier, effect_type.value)}"
+        )
+    )
+
+
+@severeweather_group.command(
+    name="end",
+    description="Staff only. End one active severe-weather event early."
+)
+@app_commands.describe(event_id="Event ID shown by /severeweather active")
+async def severeweather_end_command(
+    interaction: discord.Interaction,
+    event_id: str
+):
+    if not await staff_command_check(interaction):
+        return
+
+    async with data_lock:
+        active = data.setdefault("active_severe_weather", [])
+        matching = next(
+            (
+                event for event in active
+                if str(event.get("id", "")).casefold() == event_id.strip().casefold()
+            ),
+            None
+        )
+
+        if matching is None:
+            await interaction.response.send_message(
+                "❌ Active severe-weather event not found.",
+                ephemeral=True
+            )
+            return
+
+        data["active_severe_weather"] = [
+            event for event in active
+            if event is not matching
+        ]
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"✅ Ended **{matching.get('name', 'Severe Weather')}** early.\n"
+        "Its monthly disaster history remains recorded so the automatic system will not immediately replace it.",
+        ephemeral=True
+    )
+
+
+@severeweather_group.command(
+    name="aurora",
+    description="Staff only. Trigger the Northern Lights and open the Spirit Veil."
+)
+async def severeweather_aurora_command(interaction: discord.Interaction):
+    if not await staff_command_check(interaction):
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    triggered = await trigger_northern_lights(manual=True)
+
+    if triggered:
+        await interaction.edit_original_response(
+            content=(
+                "🌌 Northern Lights triggered. The Spirit Veil is open for 7 days, "
+                "with no hunting or fishing penalty."
+            )
+        )
+    else:
+        await interaction.edit_original_response(
+            content="⚠️ The Northern Lights could not be posted."
+        )
+
+
+@tasks.loop(minutes=15)
+async def severe_weather_report():
+    """Automatic severe-weather roll every Monday at 4 PM Toronto time."""
+    now = datetime.now(TZ)
+
+    if now.weekday() != 0:
+        return
+
+    if now.hour != SEVERE_WEATHER_AUTO_HOUR:
+        return
+
+    if now.minute < SEVERE_WEATHER_AUTO_MINUTE:
+        return
+
+    week = severe_week_key(now)
+
+    async with data_lock:
+        if data.get("last_severe_weather_week") == week:
+            return
+
+    result = await run_automatic_severe_weather(mark_week=True)
+    events = result.get("events", [])
+
+    if events:
+        await post_severe_weather_events(
+            events,
+            forced=result.get("forced", False)
+        )
+        return
+
+    # Northern Lights are a separate, non-disaster phenomenon. They never
+    # consume a Clan/group's monthly disaster slot and never reset the
+    # no-two-quiet-weeks safeguard.
+    await trigger_northern_lights(manual=False)
+
 
 # ─────────────────────────────
 # ─────────────────────────────
@@ -6088,12 +8726,13 @@ async def weekly_weather_report():
 
 QUEST_CHANNEL_ID = 1441502516591202394
 QUEST_FORCE_ROLE_ID = 1441507932369063957
-QUEST_DURATION_DAYS = 14
+# Quests run from the first day of one month until the first day of the next.
+# Reward/penalty effects still last 14 real-life days unless their own text says otherwise.
+QUEST_EFFECT_DURATION_DAYS = 14
 QUEST_FORCE_SKIP_DAYS = 5
 QUEST_SCHEDULE_HOUR = 9
 QUEST_SCHEDULE_MINUTE = 0
-QUEST_SCHEDULE_ANCHOR = datetime(2026, 7, 7, QUEST_SCHEDULE_HOUR, QUEST_SCHEDULE_MINUTE, tzinfo=TZ)
-QUEST_SYSTEM_VERSION = "v4_tuesday_weighted_events"
+QUEST_SYSTEM_VERSION = "v4_tuesday_weighted_events"  # kept for database compatibility
 
 CLAN_ROLE_IDS = {
     "BlizzardClan": 1445529729309605978,
@@ -6613,7 +9252,7 @@ validate_quest_database()
 
 
 def get_quest_expiry_iso():
-    return (datetime.now(TZ) + timedelta(days=QUEST_DURATION_DAYS)).isoformat()
+    return (datetime.now(TZ) + timedelta(days=QUEST_EFFECT_DURATION_DAYS)).isoformat()
 
 
 def clean_expired_quest_effects():
@@ -6691,7 +9330,7 @@ def select_new_quest(group, preferred_category=None):
     used_ids.append(quest["id"])
 
     issued_at = datetime.now(TZ)
-    due_at = issued_at + timedelta(days=QUEST_DURATION_DAYS)
+    due_at = next_regular_quest_cycle(issued_at)
 
     quest["group"] = group
     quest["status"] = "Pending"
@@ -6839,7 +9478,7 @@ def build_quest_announcement(due_at=None, apply_failures=True, forced=False, ski
             "🌙 **New quests have been forced...**",
             "",
             "The current active quests have been cleared and replaced. No failure penalties were applied for the cleared quests.",
-            f"These replacement quests are due by **{due_at.strftime('%B %d, %Y')}**, keeping the regular every-other-Tuesday quest schedule intact.",
+            f"These replacement quests are due by **{due_at.strftime('%B %d, %Y')}**, keeping the regular first-of-the-month quest schedule intact.",
             ""
         ]
 
@@ -6850,9 +9489,9 @@ def build_quest_announcement(due_at=None, apply_failures=True, forced=False, ski
             ])
     else:
         lines = [
-            "🌙 **A half moon has passed...**",
+            "🌙 **A new month of quests begins...**",
             "",
-            "New quests and story events are now available for every Clan and the Outsiders! This cycle can bring hunting, social scenes, herb patrols, sickness/crisis events, or wild animal trouble.",
+            "New quests and story events are now available for every Clan and the Outsiders! Each set stays active for the full month, until the next first-of-the-month reset.",
             f"These quests are due by **{due_at.strftime('%B %d, %Y')}**.",
             "",
             "Quest roll chances: **35% Hunting**, **20% Social**, **20% Herb Patrol**, **10% Sickness/Crisis**, **15% Wild Animal Event**. Social, herb patrol, and sickness/crisis events will not repeat twice in a row for the same group.",
@@ -6889,7 +9528,7 @@ def build_quest_reminder(days_remaining):
     lines = [
         f"⏳ **Quest Reminder: {days_remaining} days remaining!**",
         "",
-        "The current quest cycle is still active. Complete your group's quest or story event before the next Tuesday reset to earn the reward and avoid possible consequences.",
+        "The current monthly quest cycle is still active. Complete your group's quest or story event before the next first-of-the-month reset to earn the reward and avoid possible consequences.",
         ""
     ]
 
@@ -6938,7 +9577,7 @@ async def quest_reminders():
 
         days_remaining = (first_due.date() - now.date()).days
 
-        if days_remaining not in [7, 3]:
+        if days_remaining not in [14, 7, 3]:
             return
 
         reminder_key = f"{first_due.date().isoformat()}-{days_remaining}"
@@ -6958,39 +9597,67 @@ async def quest_reminders():
 
 
 def quest_period_key(dt):
-    return dt.date().isoformat()
+    return f"{dt.year}-{dt.month:02d}"
 
 
 def is_regular_quest_cycle(dt):
-    cycle_time = datetime.combine(
-        dt.date(),
-        time(hour=QUEST_SCHEDULE_HOUR, minute=QUEST_SCHEDULE_MINUTE),
-        tzinfo=TZ
-    )
-
-    if cycle_time < QUEST_SCHEDULE_ANCHOR:
-        return False
-
-    days_since_anchor = (cycle_time.date() - QUEST_SCHEDULE_ANCHOR.date()).days
-    return days_since_anchor % QUEST_DURATION_DAYS == 0
+    """The automatic quest reset happens on the first of every month."""
+    return dt.day == 1
 
 
 def next_regular_quest_cycle(after_time):
-    for days_ahead in range(0, 90):
-        candidate_date = after_time.date() + timedelta(days=days_ahead)
-        candidate = datetime.combine(
-            candidate_date,
-            time(hour=QUEST_SCHEDULE_HOUR, minute=QUEST_SCHEDULE_MINUTE),
-            tzinfo=TZ
-        )
+    """Return the next first-of-the-month quest reset at 9 AM Toronto time."""
+    this_month_start = datetime(
+        after_time.year,
+        after_time.month,
+        1,
+        QUEST_SCHEDULE_HOUR,
+        QUEST_SCHEDULE_MINUTE,
+        tzinfo=TZ
+    )
 
-        if candidate <= after_time:
-            continue
+    if this_month_start > after_time:
+        return this_month_start
 
-        if is_regular_quest_cycle(candidate):
-            return candidate
+    if after_time.month == 12:
+        next_year = after_time.year + 1
+        next_month = 1
+    else:
+        next_year = after_time.year
+        next_month = after_time.month + 1
 
-    return after_time + timedelta(days=QUEST_DURATION_DAYS)
+    return datetime(
+        next_year,
+        next_month,
+        1,
+        QUEST_SCHEDULE_HOUR,
+        QUEST_SCHEDULE_MINUTE,
+        tzinfo=TZ
+    )
+
+
+async def migrate_active_quests_to_monthly_schedule():
+    """One-time migration so already-active 2-week quests become due next month instead of on an old Tuesday."""
+    async with data_lock:
+        if data.get("monthly_quest_schedule_migrated_v1"):
+            return
+
+        reset_legacy_quest_data_if_needed()
+        next_due = next_regular_quest_cycle(datetime.now(TZ))
+        changed = False
+
+        for quest in data.get("active_quests_v2", {}).values():
+            if not quest or quest.get("status") != "Pending":
+                continue
+            quest["due_at"] = next_due.isoformat()
+            changed = True
+
+        data["quest_reminders_sent_v2"] = {}
+        data["monthly_quest_schedule_migrated_v1"] = True
+        save_data(data)
+
+        if changed:
+            print(f"Migrated active quests to the monthly schedule. New due date: {next_due.isoformat()}")
 
 
 def forced_quest_due_date(now):
@@ -7006,7 +9673,7 @@ def forced_quest_due_date(now):
 
 
 @tasks.loop(minutes=30)
-async def biweekly_quest_report():
+async def monthly_quest_report():
     now = datetime.now(TZ)
 
     if now.hour != QUEST_SCHEDULE_HOUR:
@@ -7041,7 +9708,7 @@ quest_group = app_commands.Group(
 )
 
 
-@quest_group.command(name="force", description="Force-post a new quest cycle and keep the regular Tuesday schedule")
+@quest_group.command(name="force", description="Force-post a new quest cycle and keep the monthly schedule")
 async def quest_force(interaction: discord.Interaction):
     if not await quest_force_check(interaction):
         return
@@ -7213,7 +9880,7 @@ async def resetquest(interaction: discord.Interaction, group: app_commands.Choic
 
     lines = [
         "🔄 **Quest Reset**",
-        f"The replacement quest{'s' if len(reset_results) != 1 else ''} will still be due on **{due_at.strftime('%B %d, %Y')}**, so the regular Tuesday 2-week schedule stays intact.",
+        f"The replacement quest{'s' if len(reset_results) != 1 else ''} will still be due on **{due_at.strftime('%B %d, %Y')}**, so the regular monthly first-of-the-month schedule stays intact.",
         ""
     ]
 
@@ -7819,7 +10486,8 @@ async def clan(interaction: discord.Interaction, clan: app_commands.Choice[str])
 
         for name, cat in ranked:
             faction = f" | {cat.get('faction')}" if cat.get("faction") else ""
-            lines.append(f"• {name} — {cat.get('age', 0)} moons{faction}")
+            shown_name = display_cat_name(name, cat)
+            lines.append(f"• {shown_name} — {cat.get('age', 0)} moons{faction}")
 
     await interaction.response.send_message("\n".join(lines)[:1900])
 
@@ -7893,7 +10561,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
 
         if cat.get("clan") == "Outsider":
             faction = cat.get("faction") or "None"
-            message += f"**Faction**: {faction}\n"
+            message += f"**Outsider Group**: {faction}\n"
 
         message += (
             f"**Age**: {age_text}\n"
@@ -8203,9 +10871,19 @@ async def feed_hunger_command(
 
 @bot.tree.command(
     name="upcomingceremonies",
-    description="View cats eligible for apprentice, warrior, or elder ceremonies"
+    description="View ceremony-eligible cats for all Clans or one Clan"
 )
-async def upcomingceremonies(interaction: discord.Interaction):
+@app_commands.describe(clan="Optional Clan filter")
+@app_commands.choices(clan=[
+    app_commands.Choice(name="All Clans", value="All"),
+    *CLAN_ONLY_CHOICES
+])
+async def upcomingceremonies(
+    interaction: discord.Interaction,
+    clan: app_commands.Choice[str] = None
+):
+    selected_clan = clan.value if clan else "All"
+
     async with data_lock:
         apprentice_ready = []
         warrior_ready = []
@@ -8217,75 +10895,91 @@ async def upcomingceremonies(interaction: discord.Interaction):
             if str(cat.get("status", "Alive")).lower() == "dead":
                 continue
 
-            clan = cat.get("clan", "Unknown Clan")
-            rank = cat.get("rank")
-            age = cat.get("age", 0)
+            cat_clan = cat.get("clan", "Unknown Clan")
 
+            # Upcoming Clan ceremonies only apply to the four Clans.
+            if cat_clan not in CLAN_NAMES_ONLY:
+                continue
+
+            if selected_clan != "All" and cat_clan != selected_clan:
+                continue
+
+            rank = cat.get("rank")
+            age = int(cat.get("age", 0) or 0)
+            shown_name = display_cat_name(name, cat)
+
+            # Older than 5 moons = 6 moons or older. Kits stay on this list until
+            # staff actually changes their rank after the RP ceremony.
             if rank == "Kit" and age >= 6:
-                apprentice_ready.append((clan, name, age))
+                apprentice_ready.append((cat_clan, shown_name, age))
 
             elif rank == "Apprentice" and age >= 11:
-                warrior_ready.append((clan, name, age))
+                warrior_ready.append((cat_clan, shown_name, age))
 
             elif rank in AGING_TO_ELDER_RANKS and age >= 95:
-                elder_ready.append((clan, name, age, rank))
+                elder_ready.append((cat_clan, shown_name, age, rank))
 
     def sort_key(item):
-        return (item[0], item[1])
+        return (item[0], item[1].casefold())
 
     apprentice_ready.sort(key=sort_key)
     warrior_ready.sort(key=sort_key)
     elder_ready.sort(key=sort_key)
 
+    filter_text = "all four Clans" if selected_clan == "All" else selected_clan
     lines = [
         "🌙 **Upcoming Ceremonies**",
         "",
-        "This shows cats who are currently eligible for rank-related ceremonies.",
+        f"Showing cats currently eligible for rank-related ceremonies in **{filter_text}**.",
         ""
     ]
 
     lines.append("### 🐾 Kits Eligible to Become Apprentices")
     if apprentice_ready:
         current_clan = None
-
-        for clan, name, age in apprentice_ready:
-            if clan != current_clan:
-                current_clan = clan
-                lines.append(f"\n**{clan}**")
-
-            lines.append(f"🐾 **{name}** — {age} moons")
+        for cat_clan, shown_name, age in apprentice_ready:
+            if selected_clan == "All" and cat_clan != current_clan:
+                current_clan = cat_clan
+                lines.append(f"\n**{cat_clan}**")
+            lines.append(f"🐾 **{shown_name}** — {age} moons")
     else:
         lines.append("No kits are currently eligible to become apprentices.")
 
-    lines.append("")
-    lines.append("### ⚔ Apprentices Eligible for Warrior Assessments")
+    lines.extend(["", "### ⚔ Apprentices Eligible for Warrior Assessments"])
     if warrior_ready:
         current_clan = None
-
-        for clan, name, age in warrior_ready:
-            if clan != current_clan:
-                current_clan = clan
-                lines.append(f"\n**{clan}**")
-
-            lines.append(f"⚔ **{name}** — {age} moons")
+        for cat_clan, shown_name, age in warrior_ready:
+            if selected_clan == "All" and cat_clan != current_clan:
+                current_clan = cat_clan
+                lines.append(f"\n**{cat_clan}**")
+            lines.append(f"⚔ **{shown_name}** — {age} moons")
     else:
         lines.append("No apprentices are currently eligible for warrior assessments.")
 
-    lines.append("")
-    lines.append("### 🍂 Warriors Eligible to Retire as Elders")
+    lines.extend(["", "### 🍂 Warriors Eligible to Retire as Elders"])
     if elder_ready:
         current_clan = None
-
-        for clan, name, age, rank in elder_ready:
-            if clan != current_clan:
-                current_clan = clan
-                lines.append(f"\n**{clan}**")
-
-            lines.append(f"🍂 **{name}** — {age} moons | Current Rank: {rank}")
+        for cat_clan, shown_name, age, rank in elder_ready:
+            if selected_clan == "All" and cat_clan != current_clan:
+                current_clan = cat_clan
+                lines.append(f"\n**{cat_clan}**")
+            lines.append(f"🍂 **{shown_name}** — {age} moons | Current Rank: {rank}")
     else:
         lines.append("No warriors are currently eligible to retire as elders.")
 
-    await interaction.response.send_message("\n".join(lines)[:1900])
+    message = "\n".join(lines)
+    chunks = []
+    while len(message) > 1900:
+        split_at = message.rfind("\n", 0, 1900)
+        if split_at == -1:
+            split_at = 1900
+        chunks.append(message[:split_at])
+        message = message[split_at:].lstrip()
+    chunks.append(message)
+
+    await interaction.response.send_message(chunks[0])
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk)
 
 # ─────────────────────────────
 # FROZEN LIST COMMAND
@@ -8520,8 +11214,9 @@ async def dead(interaction: discord.Interaction, clan: app_commands.Choice[str],
     lines = ["💀 Deceased Cats"]
 
     for name, cat in dead_cats:
+        shown_name = display_cat_name(name, cat)
         lines.append(
-            f"• {name} — {cat.get('clan')} — died as {cat.get('rank')} "
+            f"• {shown_name} — {cat.get('clan')} — died as {cat.get('rank')} "
             f"at {cat.get('age', 0)} moons → {cat.get('afterlife')}"
         )
 
@@ -8539,7 +11234,7 @@ async def bothelp(interaction: discord.Interaction):
         "`/cattinder [Name] [Clan]` — Find age-appropriate romance options\n"
         "`/question` — Random OC question prompt system\n"
         "`/needsmentor` — View apprentices and medicine cat apprentices who do not currently have mentors\n"
-        "`/upcomingceremonies` — View kits, apprentices, and older warriors eligible for ceremonies or assessments\n\n"
+        "`/upcomingceremonies [Clan]` — View kits, apprentices, and older warriors eligible for ceremonies or assessments, optionally filtered by Clan\n\n"
 
         "🍽️ **Feeding / Hunger Commands**\n"
         "`/feed cat [Name]` — Feed an OC normal prey and raise their hunger level by 1\n"
@@ -8548,10 +11243,13 @@ async def bothelp(interaction: discord.Interaction):
         "Hunger affects hunting rolls: Starving -2, Hungry -1, Satisfied no change, Full +1, Well Fed +2.\n\n"
 
         "🌦️ **Weather / World Commands**\n"
-        "`/weather` or `/weatherreport` — View the current weekly weather report, if available.\n\n"
+        "`/weather` or `/weatherreport` — View the current weekly weather report, if available.\n"
+        "`/severeweather active` — View active severe-weather events, locations, and penalties\n"
+        "`/severeweather modifier` — Check the severe-weather modifier for a specific territory/location and hunting or fishing roll\n"
+        "Severe weather rolls on Mondays at 4 PM Toronto time. Primary disaster effects last 7 days unless staff sets a different duration.\n\n"
 
         "📜 **Quest / Story Commands**\n"
-        "Current quests/events post every 2 real-life weeks on Tuesdays at 9 AM. The pool rolls 35% hunting, 20% social, 20% herb patrol, 10% sickness/crisis, and 15% wild animal events.\n"
+        "Current quests/events post on the 1st of every month at 9 AM and stay active until the next month. Reminders post with 14 days, 7 days, and 3 days remaining. The pool rolls 35% hunting, 20% social, 20% herb patrol, 10% sickness/crisis, and 15% wild animal events.\n"
         "`/gatheringreport [ClanName]` — View recent story updates, quest results, injuries, rank changes, and major events for a specific Clan.\n"
         "`/rollhelp` — Helps calculate whether an OC caught their prey by adding the roll, prey modifier, specialty prey bonus, weather modifier, quest modifier, hunger modifier, and any other modifier against the OC’s required hunting number.\n\n"
 
@@ -8592,6 +11290,9 @@ bot.tree.add_command(hiatus_group)
 bot.tree.add_command(honour_group)
 bot.tree.add_command(condition_group)
 bot.tree.add_command(plot_group)
+bot.tree.add_command(npc_group)
+bot.tree.add_command(outsider_group)
+bot.tree.add_command(severeweather_group)
 bot.tree.add_command(activity_group)
 bot.tree.add_command(membership_group)
 bot.tree.add_command(feed_group)
