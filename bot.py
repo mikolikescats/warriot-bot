@@ -1316,6 +1316,15 @@ def format_modifier(value):
 
     return str(value)
 
+
+def discord_expiry_timestamp(value):
+    """Format a datetime as Discord relative + full timestamps."""
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+
+    unix_time = int(value.timestamp())
+    return f"<t:{unix_time}:R> on <t:{unix_time}:f>"
+
 # ─────────────────────────────
 # HONOUR ROLE SYSTEM
 # ─────────────────────────────
@@ -4477,7 +4486,7 @@ def format_severe_event(event_record):
         expires = datetime.fromisoformat(event_record.get("expires_at"))
         lines.extend([
             "",
-            f"⏳ **Effects expire:** {expires.strftime('%A, %B %d at %I:%M %p')} Toronto time"
+            f"⏳ **Effects expire:** {discord_expiry_timestamp(expires)}"
         ])
     except Exception:
         pass
@@ -4790,7 +4799,7 @@ async def trigger_northern_lights(manual=False):
             "✨ **Spirit Veil:** For this event, StarClan cats may walk the living territories in spirit form and converse with living cats.\n"
             "⚠️ **Dark Forest beware:** The veil opens both ways. Dark Forest spirits may also cross into the living lands in spirit form.\n"
             "🎯 **Prey Effect:** None. Hunting and fishing rolls are unchanged.\n\n"
-            f"⏳ The Spirit Veil remains open until **{active_until.strftime('%A, %B %d at %I:%M %p')} Toronto time**."
+            f"⏳ The Spirit Veil remains open until **{discord_expiry_timestamp(active_until)}**."
         )
         await send_long_message(channel, message)
 
@@ -8382,7 +8391,7 @@ async def severeweather_active_command(interaction: discord.Interaction):
         try:
             expires = datetime.fromisoformat(event.get("expires_at"))
             lines.append(
-                f"Expires: {expires.strftime('%A, %B %d at %I:%M %p')} Toronto time"
+                f"Expires: {discord_expiry_timestamp(expires)}"
             )
         except Exception:
             pass
@@ -8404,7 +8413,7 @@ async def severeweather_active_command(interaction: discord.Interaction):
             if aurora_expires > now:
                 lines.extend([
                     "🌌 **Northern Lights / Spirit Veil Active**",
-                    f"Until {aurora_expires.strftime('%A, %B %d at %I:%M %p')} Toronto time",
+                    f"Until {discord_expiry_timestamp(aurora_expires)}",
                     "No prey modifier. StarClan and Dark Forest spirits may walk the living lands in spirit form.",
                     ""
                 ])
