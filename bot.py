@@ -83,6 +83,49 @@ MEDICAL_COMMAND_CHANNEL_ID = 1503486789900570784
 WEATHER_CHANNEL_ID = 1441502516591202394
 WEATHER_REPORT_ROLE_ID = 1500967820194877490
 
+# Automated allegiance boards.
+ALLEGIANCE_CHANNEL_IDS = {
+    "BlizzardClan": 1441545899229843678,
+    "TorrentClan": 1441546037368979466,
+    "FossilClan": 1441546099776294912,
+    "SpruceClan": 1441546176292720670,
+    "Outsider": 1441546421445857280
+}
+DECEASED_ALLEGIANCE_CHANNEL_ID = 1441546574697332787
+
+# Slot counts mirror the existing allegiance layout shown in the staff reference.
+ALLEGIANCE_SLOT_LIMITS = {
+    "Leader": 1,
+    "Deputy": 1,
+    "Medicine Cat": 2,
+    "Medicine Cat Apprentice": 1,
+    "Pathfinder": 4,
+    "Digger": 4,
+    "Sporekeeper": 4,
+    "River Guardian": 4,
+    "Healer": 2,
+    "Preymaster": 2,
+    "Warrior": 40,
+    "Apprentice": 20,
+    "Elder": 15,
+    "Queen/Den Dad": 10,
+    "Kit": 24
+}
+
+ALLEGIANCE_UNIQUE_MIDRANK = {
+    "BlizzardClan": "Pathfinder",
+    "TorrentClan": "River Guardian",
+    "FossilClan": "Digger",
+    "SpruceClan": "Sporekeeper"
+}
+
+ALLEGIANCE_CLAN_HEADERS = {
+    "BlizzardClan": "₊°｡❆ BLIZZARDCLAN ⋆⁺₊❅.",
+    "TorrentClan": "₊°｡🌊 TORRENTCLAN ⋆⁺₊🌊",
+    "FossilClan": "₊°｡🦴 FOSSILCLAN ⋆⁺₊🦴",
+    "SpruceClan": "₊°｡🌲 SPRUCECLAN ⋆⁺₊🌲"
+}
+
 # Severe weather rolls are separate from the normal weekly weather report.
 # Automatic severe-weather checks happen every Monday at 4 PM Toronto time.
 SEVERE_WEATHER_WEEKLY_CHANCE = 20
@@ -406,6 +449,7 @@ def fresh_default_data():
         "severe_weather_quiet_streak": 0,
         "aurora_active_until": None,
         "last_aurora_week": None,
+        "allegiance_message_ids": {},
         "last_moon_snapshot": None
     }
 
@@ -988,6 +1032,9 @@ def prepare_cat_record(name, cat):
     cat.setdefault("past_apprentices", [])
     cat.setdefault("honour_role", None)
     cat.setdefault("is_npc", False)
+    cat.setdefault("allegiance_owner_id", None)
+    cat.setdefault("allegiance_owner_name", None)
+    cat.setdefault("character_sheet_url", None)
     normalize_permanent_conditions(cat)
 
 
@@ -1324,6 +1371,573 @@ def discord_expiry_timestamp(value):
 
     unix_time = int(value.timestamp())
     return f"<t:{unix_time}:R> on <t:{unix_time}:f>"
+
+# ─────────────────────────────
+# AUTOMATED ALLEGIANCE SYSTEM
+# ─────────────────────────────
+
+allegiance_refresh_lock = asyncio.Lock()
+
+
+def allegiance_is_linked(cat):
+    """Only cats linked to a player + character sheet are published."""
+    return bool(cat.get("allegiance_owner_id")) and bool(cat.get("character_sheet_url"))
+
+
+def allegiance_has_any_linked_cats():
+    return any(allegiance_is_linked(cat) for cat in data.get("cats", {}).values())
+
+
+def allegiance_owner_mention(cat):
+    owner_id = cat.get("allegiance_owner_id")
+    if owner_id:
+        try:
+            return f"<@{int(owner_id)}>"
+        except (TypeError, ValueError):
+            pass
+
+    owner_name = str(cat.get("allegiance_owner_name") or "unknown").strip()
+    return f"@{owner_name}" if owner_name else "@unknown"
+
+
+def allegiance_sheet_link(cat):
+    url = str(cat.get("character_sheet_url") or "").strip()
+    if not url:
+        return "Character Sheet not linked"
+    return f"[Character Sheet]({url})"
+
+
+def allegiance_cat_entry(name, cat, deceased=False):
+    shown_name = display_cat_name(name, cat)
+    owner = allegiance_owner_mention(cat)
+    sheet = allegiance_sheet_link(cat)
+
+    if deceased:
+        clan_name = cat.get("clan", "Unknown")
+        if clan_name == "Outsider":
+            group_name = cat.get("faction") or "Outsider"
+            origin = f"{group_name} {cat.get('rank', 'Unknown Rank')}"
+        else:
+            origin = f"{clan_name} {cat.get('rank', 'Unknown Rank')}"
+        return f"● -{shown_name} - {origin} - {owner} - {sheet}"
+
+    return f"● -{shown_name} - {owner} - {sheet}"
+
+
+def allegiance_sorted(cats):
+    return sorted(cats, key=lambda item: item[0].casefold())
+
+
+def allegiance_rank_lines(label, cats, limit, show_mentor=False):
+    cats = allegiance_sorted(cats)
+    lines = [f"✦ **{label} {len(cats)}/{limit}**"]
+
+    for name, cat in cats:
+        lines.append(allegiance_cat_entry(name, cat))
+        if show_mentor:
+            mentor = cat.get("mentor")
+            if mentor:
+                mentor = clean_name_value(mentor)
+            else:
+                mentor = "unknown"
+            lines.append(f"  Mentor: {mentor}")
+
+    for _ in range(max(0, limit - len(cats))):
+        lines.append("● -")
+
+    return lines
+
+
+def allegiance_clan_cats(clan_name):
+    return [
+        (name, cat)
+        for name, cat in data.get("cats", {}).items()
+        if cat.get("clan") == clan_name
+        and str(cat.get("status", "Alive")).lower() != "dead"
+        and allegiance_is_linked(cat)
+    ]
+
+
+def build_clan_allegiance_text(clan_name):
+    clan_cats = allegiance_clan_cats(clan_name)
+    unique_midrank = ALLEGIANCE_UNIQUE_MIDRANK[clan_name]
+
+    def by_rank(rank):
+        return [(name, cat) for name, cat in clan_cats if cat.get("rank") == rank]
+
+    covered_ranks = {
+        "Leader", "Deputy", "Medicine Cat", "Medicine Cat Apprentice",
+        unique_midrank, "Healer", "Preymaster", "Warrior", "Apprentice",
+        "Elder", "Queen", "Den Dad", "Kit"
+    }
+
+    lines = [
+        ALLEGIANCE_CLAN_HEADERS.get(clan_name, f"🐾 {clan_name.upper()}"),
+        "────────── ⋆⋅ ✦ ⋅⋆ ──────────",
+        "⸝⸝ ⟡ **HIGHRANKS**"
+    ]
+
+    lines.extend(allegiance_rank_lines(
+        "Leader", by_rank("Leader"), ALLEGIANCE_SLOT_LIMITS["Leader"]
+    ))
+    lines.extend(allegiance_rank_lines(
+        "Deputy", by_rank("Deputy"), ALLEGIANCE_SLOT_LIMITS["Deputy"]
+    ))
+    lines.extend(allegiance_rank_lines(
+        "Medicine Cats", by_rank("Medicine Cat"), ALLEGIANCE_SLOT_LIMITS["Medicine Cat"]
+    ))
+    lines.extend(allegiance_rank_lines(
+        "Medicine Apprentice",
+        by_rank("Medicine Cat Apprentice"),
+        ALLEGIANCE_SLOT_LIMITS["Medicine Cat Apprentice"],
+        show_mentor=True
+    ))
+
+    lines.extend([
+        "────────── ⋆⋅ ✦ ⋅⋆ ──────────",
+        "⸝⸝ ⟡ **MIDRANKS**"
+    ])
+
+    unique_label = {
+        "Pathfinder": "Pathfinders",
+        "River Guardian": "River Guardians",
+        "Digger": "Diggers",
+        "Sporekeeper": "Sporekeepers"
+    }[unique_midrank]
+    lines.extend(allegiance_rank_lines(
+        unique_label,
+        by_rank(unique_midrank),
+        ALLEGIANCE_SLOT_LIMITS[unique_midrank]
+    ))
+    lines.extend(allegiance_rank_lines(
+        "Healers", by_rank("Healer"), ALLEGIANCE_SLOT_LIMITS["Healer"]
+    ))
+    lines.extend(allegiance_rank_lines(
+        "Prey Masters", by_rank("Preymaster"), ALLEGIANCE_SLOT_LIMITS["Preymaster"]
+    ))
+
+    lines.extend([
+        "────────── ⋆⋅ ✦ ⋅⋆ ──────────",
+        "⸝⸝ ⟡ **NORMAL RANKS**"
+    ])
+
+    lines.extend(allegiance_rank_lines(
+        "Warriors", by_rank("Warrior"), ALLEGIANCE_SLOT_LIMITS["Warrior"]
+    ))
+    lines.extend(allegiance_rank_lines(
+        "Apprentices",
+        by_rank("Apprentice"),
+        ALLEGIANCE_SLOT_LIMITS["Apprentice"],
+        show_mentor=True
+    ))
+    lines.extend(allegiance_rank_lines(
+        "Elders", by_rank("Elder"), ALLEGIANCE_SLOT_LIMITS["Elder"]
+    ))
+
+    queen_den_dad = [
+        (name, cat) for name, cat in clan_cats
+        if cat.get("rank") in {"Queen", "Den Dad"}
+    ]
+    lines.extend(allegiance_rank_lines(
+        "Queens and Den Dads",
+        queen_den_dad,
+        ALLEGIANCE_SLOT_LIMITS["Queen/Den Dad"]
+    ))
+    lines.extend(allegiance_rank_lines(
+        "Kits", by_rank("Kit"), ALLEGIANCE_SLOT_LIMITS["Kit"]
+    ))
+
+    other_ranks = allegiance_sorted([
+        (name, cat) for name, cat in clan_cats
+        if cat.get("rank") not in covered_ranks
+    ])
+    if other_ranks:
+        lines.extend([
+            "────────── ⋆⋅ ✦ ⋅⋆ ──────────",
+            "⸝⸝ ⟡ **OTHER RANKS**"
+        ])
+        for name, cat in other_ranks:
+            lines.append(f"**{cat.get('rank', 'Unknown Rank')}**")
+            lines.append(allegiance_cat_entry(name, cat))
+
+    return "\n".join(lines)
+
+
+def build_outsider_allegiance_text():
+    outsiders = [
+        (name, cat)
+        for name, cat in data.get("cats", {}).items()
+        if cat.get("clan") == "Outsider"
+        and str(cat.get("status", "Alive")).lower() != "dead"
+        and allegiance_is_linked(cat)
+    ]
+
+    lines = [
+        "🌫️ **OUTSIDER ALLEGIANCES**",
+        "────────── ⋆⋅ ✦ ⋅⋆ ──────────"
+    ]
+
+    if not outsiders:
+        lines.append("No linked Outsider characters yet.")
+        return "\n".join(lines)
+
+    group_order = get_outsider_groups()
+    used_groups = []
+    for _, cat in outsiders:
+        group = cat.get("faction") or "Unaffiliated Outsiders"
+        if group not in used_groups:
+            used_groups.append(group)
+
+    ordered_groups = [group for group in group_order if group in used_groups]
+    if "Unaffiliated Outsiders" in used_groups:
+        ordered_groups.append("Unaffiliated Outsiders")
+    for group in used_groups:
+        if group not in ordered_groups:
+            ordered_groups.append(group)
+
+    for group in ordered_groups:
+        group_cats = [
+            (name, cat) for name, cat in outsiders
+            if (cat.get("faction") or "Unaffiliated Outsiders") == group
+        ]
+        lines.extend(["", f"⸝⸝ ⟡ **{group.upper()}**"])
+
+        any_rank = False
+        for rank in OUTSIDER_RANK_ORDER:
+            ranked = allegiance_sorted([
+                (name, cat) for name, cat in group_cats
+                if cat.get("rank") == rank
+            ])
+            if not ranked:
+                continue
+            any_rank = True
+            lines.append(f"**{rank}s — {len(ranked)}**")
+            for name, cat in ranked:
+                lines.append(allegiance_cat_entry(name, cat))
+
+        unknown = allegiance_sorted([
+            (name, cat) for name, cat in group_cats
+            if cat.get("rank") not in OUTSIDER_RANK_ORDER
+        ])
+        if unknown:
+            any_rank = True
+            lines.append("**Other**")
+            for name, cat in unknown:
+                lines.append(allegiance_cat_entry(name, cat))
+
+        if not any_rank:
+            lines.append("● -")
+
+    return "\n".join(lines)
+
+
+def deceased_rank_bucket(rank):
+    if rank in {"Leader", "Deputy", "Medicine Cat", "Medicine Cat Apprentice"}:
+        return "high"
+    if rank in {"Preymaster", "Healer", "Digger", "Pathfinder", "Sporekeeper", "River Guardian"}:
+        return "mid"
+    return "low"
+
+
+def build_deceased_allegiance_text():
+    deceased = [
+        (name, cat)
+        for name, cat in data.get("cats", {}).items()
+        if str(cat.get("status", "Alive")).lower() == "dead"
+        and allegiance_is_linked(cat)
+    ]
+
+    headings = {
+        "StarClan": "‧͙⁺˚･༓☾ STARCLAN ☽༓･˚⁺‧͙",
+        "Unknown Residence": "-ˋˏ ༻ UNKNOWN RESIDENCE ༺ ˎˊ-",
+        "Dark Forest": "⋆༺ DARK FOREST ༻⋆"
+    }
+
+    lines = ["💀 **DECEASED ALLEGIANCES**"]
+
+    for afterlife in ["StarClan", "Unknown Residence", "Dark Forest"]:
+        cats_here = allegiance_sorted([
+            (name, cat) for name, cat in deceased
+            if (cat.get("afterlife") or "Unknown Residence") == afterlife
+        ])
+
+        lines.extend(["", headings[afterlife]])
+
+        high = [(name, cat) for name, cat in cats_here if deceased_rank_bucket(cat.get("rank")) == "high"]
+        mid = [(name, cat) for name, cat in cats_here if deceased_rank_bucket(cat.get("rank")) == "mid"]
+        low = [(name, cat) for name, cat in cats_here if deceased_rank_bucket(cat.get("rank")) == "low"]
+
+        lines.append("**HIGHRANKS**")
+        high_order = ["Leader", "Deputy", "Medicine Cat", "Medicine Cat Apprentice"]
+        any_high = False
+        for rank in high_order:
+            ranked = allegiance_sorted([(name, cat) for name, cat in high if cat.get("rank") == rank])
+            if not ranked:
+                continue
+            any_high = True
+            label = {
+                "Leader": "LEADERS",
+                "Deputy": "DEPUTIES",
+                "Medicine Cat": "MEDICINE CATS",
+                "Medicine Cat Apprentice": "MEDICINE APPRENTICES"
+            }[rank]
+            lines.append(f"**{label}**")
+            for name, cat in ranked:
+                lines.append(allegiance_cat_entry(name, cat, deceased=True))
+        if not any_high:
+            lines.append("● -")
+
+        lines.append("**MID RANKS**")
+        if mid:
+            for rank in ["Pathfinder", "Digger", "Sporekeeper", "River Guardian", "Healer", "Preymaster"]:
+                ranked = allegiance_sorted([(name, cat) for name, cat in mid if cat.get("rank") == rank])
+                if not ranked:
+                    continue
+                label = plural_rank(rank)
+                lines.append(f"**{label}**")
+                for name, cat in ranked:
+                    lines.append(allegiance_cat_entry(name, cat, deceased=True))
+        else:
+            lines.append("● -")
+
+        lines.append("**LOW RANKS**")
+        if low:
+            for name, cat in low:
+                lines.append(allegiance_cat_entry(name, cat, deceased=True))
+        else:
+            lines.append("● -")
+
+    return "\n".join(lines)
+
+
+def split_allegiance_text(text, max_length=1900):
+    chunks = []
+    current = []
+    current_len = 0
+
+    for raw_line in str(text).splitlines():
+        line = raw_line
+        if len(line) > max_length:
+            # This should be rare, but never let one malformed sheet link break posting.
+            line = line[:max_length - 3] + "..."
+
+        addition = len(line) + (1 if current else 0)
+        if current and current_len + addition > max_length:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_len = len(line)
+        else:
+            current.append(line)
+            current_len += addition
+
+    if current:
+        chunks.append("\n".join(current))
+
+    return chunks or ["No allegiance data."]
+
+
+async def get_allegiance_channel(channel_id):
+    channel = bot.get_channel(channel_id)
+    if channel is not None:
+        return channel
+
+    try:
+        return await bot.fetch_channel(channel_id)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return None
+
+
+async def update_allegiance_channel(channel_id, text, saved_message_ids):
+    channel = await get_allegiance_channel(channel_id)
+    if channel is None:
+        raise RuntimeError(f"Could not access allegiance channel {channel_id}.")
+
+    chunks = split_allegiance_text(text)
+    old_messages = []
+
+    for raw_id in saved_message_ids or []:
+        try:
+            message = await channel.fetch_message(int(raw_id))
+            old_messages.append(message)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, TypeError, ValueError):
+            continue
+
+    new_ids = []
+    allowed_mentions = discord.AllowedMentions.none()
+
+    for index, chunk in enumerate(chunks):
+        if index < len(old_messages):
+            message = old_messages[index]
+            await message.edit(content=chunk, allowed_mentions=allowed_mentions)
+        else:
+            message = await channel.send(chunk, allowed_mentions=allowed_mentions)
+        new_ids.append(message.id)
+
+    for old_message in old_messages[len(chunks):]:
+        try:
+            await old_message.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    return new_ids
+
+
+async def refresh_all_allegiances(force=False):
+    """Rebuild every managed allegiance board and edit the bot's existing messages in place."""
+    existing_map = data.get("allegiance_message_ids", {})
+    if not isinstance(existing_map, dict):
+        existing_map = {}
+
+    if not force and not existing_map and not allegiance_has_any_linked_cats():
+        return {"updated": 0, "errors": [], "skipped": True}
+
+    async with allegiance_refresh_lock:
+        board_text = {
+            ALLEGIANCE_CHANNEL_IDS["BlizzardClan"]: build_clan_allegiance_text("BlizzardClan"),
+            ALLEGIANCE_CHANNEL_IDS["TorrentClan"]: build_clan_allegiance_text("TorrentClan"),
+            ALLEGIANCE_CHANNEL_IDS["FossilClan"]: build_clan_allegiance_text("FossilClan"),
+            ALLEGIANCE_CHANNEL_IDS["SpruceClan"]: build_clan_allegiance_text("SpruceClan"),
+            ALLEGIANCE_CHANNEL_IDS["Outsider"]: build_outsider_allegiance_text(),
+            DECEASED_ALLEGIANCE_CHANNEL_ID: build_deceased_allegiance_text()
+        }
+
+        new_map = copy.deepcopy(existing_map)
+        updated = 0
+        errors = []
+
+        for channel_id, content in board_text.items():
+            key = str(channel_id)
+            try:
+                new_ids = await update_allegiance_channel(
+                    channel_id,
+                    content,
+                    existing_map.get(key, [])
+                )
+                new_map[key] = new_ids
+                updated += 1
+            except Exception as error:
+                errors.append(f"{channel_id}: {error}")
+                print(f"Allegiance refresh failed for channel {channel_id}: {error}")
+
+        async with data_lock:
+            data["allegiance_message_ids"] = new_map
+            save_data(data)
+
+        return {"updated": updated, "errors": errors, "skipped": False}
+
+
+async def refresh_allegiances_safely(reason=None, force=False):
+    try:
+        return await refresh_all_allegiances(force=force)
+    except Exception as error:
+        prefix = f" after {reason}" if reason else ""
+        print(f"Could not refresh allegiance boards{prefix}: {error}")
+        return {"updated": 0, "errors": [str(error)], "skipped": False}
+
+
+def allegiance_member_names(member):
+    names = []
+    for value in [
+        getattr(member, "display_name", None),
+        getattr(member, "global_name", None),
+        getattr(member, "name", None)
+    ]:
+        clean = str(value or "").strip()
+        if clean and clean.casefold() not in {name.casefold() for name in names}:
+            names.append(clean)
+    return names
+
+
+async def allegiance_user_autocomplete(interaction: discord.Interaction, current: str):
+    guild = interaction.guild
+    if guild is None:
+        return []
+
+    query = str(current or "").strip().casefold()
+    scored = []
+
+    for member in getattr(guild, "members", []):
+        if member.bot:
+            continue
+        names = allegiance_member_names(member)
+        if not names:
+            continue
+        searchable = " ".join(names).casefold()
+        if query and query not in searchable:
+            continue
+        starts = any(name.casefold().startswith(query) for name in names) if query else True
+        scored.append((0 if starts else 1, member.display_name.casefold(), member))
+
+    scored.sort(key=lambda item: (item[0], item[1]))
+    choices = []
+    for _, _, member in scored[:25]:
+        username = getattr(member, "name", member.display_name)
+        label = member.display_name
+        if username and username.casefold() != label.casefold():
+            label = f"{label} (@{username})"
+        choices.append(app_commands.Choice(name=label[:100], value=str(username)[:100]))
+    return choices
+
+
+async def resolve_allegiance_member(guild, raw_value):
+    if guild is None:
+        return None, "This command must be used inside the Discord server."
+
+    raw = str(raw_value or "").strip()
+    if not raw:
+        return None, "Enter the player's display name or Discord username."
+
+    numeric = raw
+    if raw.startswith("<@") and raw.endswith(">"):
+        numeric = raw[2:-1]
+        if numeric.startswith("!"):
+            numeric = numeric[1:]
+
+    if numeric.isdigit():
+        member = await fetch_member_by_id(guild, numeric)
+        if member:
+            return member, None
+
+    lookup = raw.lstrip("@").casefold()
+    members = [member for member in getattr(guild, "members", []) if not member.bot]
+
+    def exact_matches(pool):
+        return [
+            member for member in pool
+            if any(name.casefold() == lookup for name in allegiance_member_names(member))
+        ]
+
+    matches = exact_matches(members)
+
+    if not matches:
+        fetched = []
+        async for member in iter_fetch_guild_members(guild):
+            if not member.bot:
+                fetched.append(member)
+        if fetched:
+            matches = exact_matches(fetched)
+            members = fetched
+
+    if len(matches) == 1:
+        return matches[0], None
+
+    if len(matches) > 1:
+        names = ", ".join(f"{member.display_name} (@{member.name})" for member in matches[:5])
+        return None, f"More than one member matches that display name. Use their username instead: {names}"
+
+    partial = [
+        member for member in members
+        if any(lookup in name.casefold() for name in allegiance_member_names(member))
+    ]
+    if len(partial) == 1:
+        return partial[0], None
+
+    if len(partial) > 1:
+        names = ", ".join(f"{member.display_name} (@{member.name})" for member in partial[:5])
+        return None, f"That name matches multiple members. Be more specific or use the username: {names}"
+
+    return None, f"I could not find a server member matching **{raw}**. Try their display name or Discord username."
+
 
 # ─────────────────────────────
 # HONOUR ROLE SYSTEM
@@ -4857,6 +5471,15 @@ async def on_ready():
     except Exception as error:
         print(f"Honour Role tracker update failed: {error}")
 
+    # Once /allegiance add or /allegiance refresh has initialized the boards,
+    # reconcile them again on every restart without creating duplicate legacy boards.
+    if data.get("allegiance_message_ids"):
+        result = await refresh_allegiances_safely("bot startup")
+        if result.get("errors"):
+            print(f"Allegiance startup refresh had {len(result['errors'])} error(s).")
+        else:
+            print("Allegiance boards are up to date.")
+
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -5121,6 +5744,7 @@ async def advance_moon(interaction: discord.Interaction):
             "@everyone 🌙 A moon has been manually advanced across the Clans...\n\n" + story_message
         )
 
+    await refresh_allegiances_safely("manual moon advance")
     await interaction.followup.send("🌙 Moon advanced manually. Age records and story updates were sent to their separate channels.")
 
 # ─────────────────────────────
@@ -5203,6 +5827,12 @@ async def botinfo(interaction: discord.Interaction):
         "`/outsidergroup add [Name]` — Staff only. Add a persistent Outsider group\n"
         "`/outsidergroup assign [Cat] [Group]` — Staff only. Assign an existing Outsider to a saved group\n"
         "`/outsidergroup list` — View all available Outsider groups\n\n"
+
+        "📚 **Allegiance Commands**\n"
+        "`/allegiance add [Cat] [User] [Character Sheet]` — Staff only. Link an existing tracker cat to their player and sheet; the bot places them in the correct living/deceased allegiance section automatically\n"
+        "`/allegiance remove [Cat]` — Staff only. Remove a cat from the automated allegiance boards without deleting their tracker record\n"
+        "`/allegiance refresh` — Staff only. Rebuild all 4 Clan, Outsider, and deceased allegiance channels from the current tracker\n"
+        "Player can be entered by Discord display name or username; no User ID is required.\n\n"
 
         "🏅 **Honour Role Commands**\n"
         "`/honour role [Cat] [Role]` — Staff only. Name an eligible Warrior or Apprentice to a Clan Honour Role\n"
@@ -5290,6 +5920,127 @@ condition_group = app_commands.Group(name="condition", description="Manage perma
 plot_group = app_commands.Group(name="plot", description="Manage plot-member records")
 npc_group = app_commands.Group(name="npc", description="Manage NPC cat records")
 outsider_group = app_commands.Group(name="outsidergroup", description="Manage Outsider groups")
+allegiance_group = app_commands.Group(name="allegiance", description="Manage automated allegiance boards")
+
+
+@allegiance_group.command(name="add", description="Link a cat to their player and character sheet")
+@app_commands.describe(
+    cat_name="Existing cat in the tracker",
+    user="Player display name or Discord username",
+    character_sheet="Link to the cat's character form/sheet"
+)
+@app_commands.autocomplete(user=allegiance_user_autocomplete)
+async def allegiance_add_command(
+    interaction: discord.Interaction,
+    cat_name: str,
+    user: str,
+    character_sheet: str
+):
+    if not await staff_command_check(interaction):
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    member, member_error = await resolve_allegiance_member(interaction.guild, user)
+    if member_error:
+        await interaction.edit_original_response(content=f"❌ {member_error}")
+        return
+
+    sheet_url = str(character_sheet or "").strip()
+    if not (sheet_url.startswith("https://") or sheet_url.startswith("http://")):
+        await interaction.edit_original_response(
+            content="❌ Character sheet must be a full `http://` or `https://` link."
+        )
+        return
+
+    async with data_lock:
+        cats = data.get("cats", {})
+        if cat_name not in cats:
+            await interaction.edit_original_response(
+                content=f"❌ Cat **{cat_name}** was not found. Add them to the cat tracker first."
+            )
+            return
+
+        cat = cats[cat_name]
+        prepare_cat_record(cat_name, cat)
+        cat["allegiance_owner_id"] = str(member.id)
+        cat["allegiance_owner_name"] = member.display_name
+        cat["character_sheet_url"] = sheet_url
+        save_data(data)
+
+    result = await refresh_allegiances_safely("/allegiance add", force=True)
+    error_note = ""
+    if result.get("errors"):
+        error_note = "\n⚠️ The record saved, but one or more allegiance channels could not be updated. Send the error to the bot owner."
+
+    destination = "the deceased allegiances" if cat_is_dead(cat) else (
+        "the Outsider allegiances" if cat.get("clan") == "Outsider" else f"{cat.get('clan')} allegiances"
+    )
+    await interaction.edit_original_response(
+        content=(
+            f"✅ **{cat_name}** is linked to {member.mention} and their character sheet.\n"
+            f"They were placed automatically in **{destination}** based on their tracker record."
+            f"{error_note}"
+        )
+    )
+
+
+@allegiance_group.command(name="remove", description="Remove a cat from the automated allegiance boards")
+@app_commands.describe(cat_name="Cat to unlink from allegiances")
+async def allegiance_remove_command(interaction: discord.Interaction, cat_name: str):
+    if not await staff_command_check(interaction):
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    async with data_lock:
+        cats = data.get("cats", {})
+        if cat_name not in cats:
+            await interaction.edit_original_response(content="❌ Cat not found.")
+            return
+
+        cat = cats[cat_name]
+        if not allegiance_is_linked(cat) and not cat.get("allegiance_owner_id") and not cat.get("character_sheet_url"):
+            await interaction.edit_original_response(
+                content=f"❌ **{cat_name}** is not currently linked to the allegiance boards."
+            )
+            return
+
+        cat["allegiance_owner_id"] = None
+        cat["allegiance_owner_name"] = None
+        cat["character_sheet_url"] = None
+        save_data(data)
+
+    result = await refresh_allegiances_safely("/allegiance remove", force=True)
+    error_note = ""
+    if result.get("errors"):
+        error_note = " One or more allegiance channels could not be refreshed."
+
+    await interaction.edit_original_response(
+        content=f"🧹 **{cat_name}** was removed from the automated allegiance boards.{error_note}"
+    )
+
+
+@allegiance_group.command(name="refresh", description="Rebuild all living and deceased allegiance boards")
+async def allegiance_refresh_command(interaction: discord.Interaction):
+    if not await staff_command_check(interaction):
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    result = await refresh_allegiances_safely("/allegiance refresh", force=True)
+
+    if result.get("errors"):
+        await interaction.edit_original_response(
+            content=(
+                f"⚠️ Refreshed **{result.get('updated', 0)}/6** allegiance channels. "
+                "At least one channel could not be accessed or updated."
+            )
+        )
+        return
+
+    await interaction.edit_original_response(
+        content="✅ All **6 allegiance channels** were rebuilt from the current cat tracker."
+    )
 
 
 @outsider_group.command(name="add", description="Add a new Outsider group")
@@ -5383,6 +6134,7 @@ async def outsider_group_assign_command(
     await interaction.response.send_message(
         f"🌫️ **{cat_name}** is now part of **{resolved_group}**."
     )
+    await refresh_allegiances_safely("Outsider group change")
 
 
 @outsider_group.command(name="list", description="List all available Outsider groups")
@@ -5579,6 +6331,7 @@ async def npc_convert_command(interaction: discord.Interaction, cat_name: str):
     await interaction.response.send_message(
         f"🐾 **{cat_name}** is now marked as **{cat_name} (NPC)** on rosters. Their hunger will no longer decay."
     )
+    await refresh_allegiances_safely("NPC conversion")
 
 
 @npc_group.command(name="markdead", description="Mark an NPC as dead and choose their afterlife")
@@ -5652,6 +6405,8 @@ async def npc_markdead_command(
             await update_honour_tracker_message()
         except Exception as error:
             print(f"Could not update Honour Role tracker after NPC death: {error}")
+
+    await refresh_allegiances_safely("NPC death")
 
 
 @plot_group.command(name="member", description="Add or update an existing cat as a plot member")
@@ -6608,6 +7363,8 @@ async def cat_rank(interaction: discord.Interaction, name: str, rank: app_comman
         except Exception as error:
             print(f"Could not update Honour Role tracker after rank change: {error}")
 
+    await refresh_allegiances_safely("cat rank change")
+
 
 @bot.tree.command(
     name="changeclan",
@@ -6735,6 +7492,8 @@ async def changeclan(
         except Exception as error:
             print(f"Could not update Honour Role tracker after Clan change: {error}")
 
+    await refresh_allegiances_safely("Clan change")
+
 @cat_group.command(name="rename", description="Rename a cat")
 @app_commands.describe(old_name="Current name", new_name="New name")
 async def cat_rename(interaction: discord.Interaction, old_name: str, new_name: str):
@@ -6775,6 +7534,7 @@ async def cat_rename(interaction: discord.Interaction, old_name: str, new_name: 
         save_data(data)
 
     await interaction.response.send_message(f"✏️ Renamed **{old_name} → {new_name}**")
+    await refresh_allegiances_safely("cat rename")
 
 
 @cat_group.command(name="markdead", description="Mark a cat as dead")
@@ -6833,6 +7593,8 @@ async def cat_markdead(
             await update_honour_tracker_message()
         except Exception as error:
             print(f"Could not update Honour Role tracker after death: {error}")
+
+    await refresh_allegiances_safely("cat death")
 
 
 @cat_group.command(name="adddead", description="Add a cat who is already dead")
@@ -6936,6 +7698,8 @@ async def cat_delete(interaction: discord.Interaction, name: str):
             await update_honour_tracker_message()
         except Exception as error:
             print(f"Could not update Honour Role tracker after deleting cat: {error}")
+
+    await refresh_allegiances_safely("cat deletion")
 
 
 @cat_group.command(name="delayceremony", description="Delay a cat's automatic promotion")
@@ -7486,6 +8250,7 @@ async def mentor_assign(interaction: discord.Interaction, apprentice: str, mento
         save_data(data)
 
     await interaction.response.send_message(f"🐾 **{mentor}** is now mentoring **{apprentice}**.")
+    await refresh_allegiances_safely("mentor assignment")
 
 
 @mentor_group.command(name="previous", description="Add a previous mentor to a cat")
@@ -7589,6 +8354,7 @@ async def mentor_remove(interaction: discord.Interaction, apprentice: str, mento
     await interaction.response.send_message(
         f"🧹 Removed mentor records between **{apprentice}** and **{mentor}**."
     )
+    await refresh_allegiances_safely("mentor removal")
 
 
 # ─────────────────────────────
@@ -10444,6 +11210,8 @@ async def monthly_moon():
             "@everyone 🌙 A new moon has passed across the Clans...\n\n" + story_message
         )
 
+    await refresh_allegiances_safely("automatic moon advance")
+
 # ─────────────────────────────
 # PUBLIC COMMANDS
 # ─────────────────────────────
@@ -11301,6 +12069,7 @@ bot.tree.add_command(condition_group)
 bot.tree.add_command(plot_group)
 bot.tree.add_command(npc_group)
 bot.tree.add_command(outsider_group)
+bot.tree.add_command(allegiance_group)
 bot.tree.add_command(severeweather_group)
 bot.tree.add_command(activity_group)
 bot.tree.add_command(membership_group)
