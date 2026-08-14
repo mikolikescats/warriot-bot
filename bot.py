@@ -1539,16 +1539,16 @@ def allegiance_cat_entry(name, cat, deceased=False):
             origin = f"{clan_name} {rank_name}"
 
         if is_npc:
-            return f"• - {shown_name} - {origin}"
+            return f"• {shown_name} - {origin}"
 
         owner = allegiance_owner_mention(cat)
-        return f"• - {shown_name} - {origin} - {owner}"
+        return f"• {shown_name} - {origin} - **{owner}**"
 
     if is_npc:
-        return f"• - {shown_name}"
+        return f"• {shown_name}"
 
     owner = allegiance_owner_mention(cat)
-    return f"• - {shown_name} - {owner}"
+    return f"• {shown_name} - **{owner}**"
 
 
 def allegiance_sorted(cats):
