@@ -1408,6 +1408,64 @@ def discord_expiry_timestamp(value):
 allegiance_refresh_lock = asyncio.Lock()
 
 
+def allegiance_tracker_clan(cat):
+    """Return the canonical Clan stored on the same tracker record used by /catinfo."""
+    raw_clan = str(cat.get("clan") or "").strip()
+
+    for valid_clan in CLANS:
+        if raw_clan.casefold() == valid_clan.casefold():
+            return valid_clan
+
+    return None
+
+
+def allegiance_tracker_rank(cat):
+    """Return the tracker rank exactly as /catinfo reads it, with whitespace cleaned."""
+    return str(cat.get("rank") or "").strip()
+
+
+def allegiance_tracker_status(cat):
+    return str(cat.get("status", "Alive") or "Alive").strip()
+
+
+def allegiance_tracker_snapshot(name, cat):
+    """
+    Read allegiance placement from the canonical cat tracker record.
+
+    Allegiances never store a second Clan/rank value of their own. This means the
+    Clan, rank, status, mentor, faction, and afterlife shown by /catinfo are the
+    same values used to decide where the cat belongs on Allegiances.
+    """
+    return {
+        "name": name,
+        "clan": allegiance_tracker_clan(cat),
+        "rank": allegiance_tracker_rank(cat),
+        "status": allegiance_tracker_status(cat),
+        "mentor": cat.get("mentor"),
+        "faction": cat.get("faction"),
+        "afterlife": cat.get("afterlife"),
+        "is_npc": bool(cat.get("is_npc", False)),
+    }
+
+
+def allegiance_record_problem(name, cat):
+    """Return a placement problem instead of guessing where an invalid tracker cat belongs."""
+    snapshot = allegiance_tracker_snapshot(name, cat)
+    clan_name = snapshot["clan"]
+    rank = snapshot["rank"]
+
+    if clan_name is None:
+        return f"{name}: tracker Clan is missing or invalid ({cat.get('clan')!r})"
+
+    if clan_name == "Outsider":
+        if rank not in OUTSIDER_RANKS:
+            return f"{name}: Outsider has invalid tracker rank {rank!r}"
+    elif rank not in CLAN_RANKS:
+        return f"{name}: {clan_name} cat has invalid tracker rank {rank!r}"
+
+    return None
+
+
 def allegiance_is_linked(cat):
     """Return whether a cat should appear on the automated allegiance boards."""
     if bool(cat.get("is_npc", False)):
@@ -1466,12 +1524,13 @@ def allegiance_cat_entry(name, cat, deceased=False):
     is_npc = bool(cat.get("is_npc", False))
 
     if deceased:
-        clan_name = cat.get("clan", "Unknown")
+        clan_name = allegiance_tracker_clan(cat) or "Unknown"
+        rank_name = allegiance_tracker_rank(cat) or "Unknown Rank"
         if clan_name == "Outsider":
             group_name = cat.get("faction") or "Outsider"
-            origin = f"{group_name} {cat.get('rank', 'Unknown Rank')}"
+            origin = f"{group_name} {rank_name}"
         else:
-            origin = f"{clan_name} {cat.get('rank', 'Unknown Rank')}"
+            origin = f"{clan_name} {rank_name}"
 
         if is_npc:
             return f"• - {shown_name} - {origin}"
@@ -1523,13 +1582,26 @@ def allegiance_rank_lines(clan_name, label, cats, limit, show_mentor=False):
 
 
 def allegiance_clan_cats(clan_name):
-    return [
-        (name, cat)
-        for name, cat in data.get("cats", {}).items()
-        if cat.get("clan") == clan_name
-        and str(cat.get("status", "Alive")).lower() != "dead"
-        and allegiance_is_linked(cat)
-    ]
+    """Only return linked living cats whose /catinfo tracker Clan matches this board."""
+    clan_name = str(clan_name).strip()
+    matched = []
+
+    for name, cat in data.get("cats", {}).items():
+        if not allegiance_is_linked(cat):
+            continue
+
+        snapshot = allegiance_tracker_snapshot(name, cat)
+        if snapshot["status"].casefold() == "dead":
+            continue
+
+        # STRICT BOARD ISOLATION: a BlizzardClan record can only ever enter the
+        # BlizzardClan list, a FossilClan record only FossilClan, etc.
+        if snapshot["clan"] != clan_name:
+            continue
+
+        matched.append((name, cat))
+
+    return matched
 
 
 def build_clan_allegiance_text(clan_name):
@@ -1540,7 +1612,10 @@ def build_clan_allegiance_text(clan_name):
     divider = style.get("divider", "────────── ⋆⋅ ✦ ⋅⋆ ──────────")
 
     def by_rank(rank):
-        return [(name, cat) for name, cat in clan_cats if cat.get("rank") == rank]
+        return [
+            (name, cat) for name, cat in clan_cats
+            if allegiance_tracker_rank(cat) == rank
+        ]
 
     covered_ranks = {
         "Leader", "Deputy", "Medicine Cat", "Medicine Cat Apprentice",
@@ -1623,7 +1698,7 @@ def build_clan_allegiance_text(clan_name):
 
     queen_den_dad = [
         (name, cat) for name, cat in clan_cats
-        if cat.get("rank") in {"Queen", "Den Dad"}
+        if allegiance_tracker_rank(cat) in {"Queen", "Den Dad"}
     ]
     lines.extend(allegiance_rank_lines(
         clan_name,
@@ -1637,7 +1712,7 @@ def build_clan_allegiance_text(clan_name):
 
     other_ranks = allegiance_sorted([
         (name, cat) for name, cat in clan_cats
-        if cat.get("rank") not in covered_ranks
+        if allegiance_tracker_rank(cat) not in covered_ranks
     ])
     if other_ranks:
         lines.extend([
@@ -1647,7 +1722,7 @@ def build_clan_allegiance_text(clan_name):
             ""
         ])
         for name, cat in other_ranks:
-            lines.append(f"**{cat.get('rank', 'Unknown Rank')}**")
+            lines.append(f"**{allegiance_tracker_rank(cat) or 'Unknown Rank'}**")
             lines.append(allegiance_cat_entry(name, cat))
 
     return "\n".join(lines).rstrip()
@@ -1661,8 +1736,8 @@ def build_outsider_allegiance_text():
     outsiders = [
         (name, cat)
         for name, cat in data.get("cats", {}).items()
-        if cat.get("clan") == "Outsider"
-        and str(cat.get("status", "Alive")).lower() != "dead"
+        if allegiance_tracker_clan(cat) == "Outsider"
+        and allegiance_tracker_status(cat).casefold() != "dead"
         and allegiance_is_linked(cat)
     ]
 
@@ -1682,13 +1757,13 @@ def build_outsider_allegiance_text():
     extra_ranks = sorted({
         str(cat.get("rank") or "Other")
         for _, cat in outsiders
-        if cat.get("rank") not in ordered_ranks
+        if allegiance_tracker_rank(cat) not in ordered_ranks
     }, key=str.casefold)
 
     for rank in ordered_ranks + extra_ranks:
         ranked = allegiance_sorted([
             (name, cat) for name, cat in outsiders
-            if (cat.get("rank") or "Other") == rank
+            if (allegiance_tracker_rank(cat) or "Other") == rank
         ])
         if not ranked:
             continue
@@ -1739,7 +1814,7 @@ def build_deceased_allegiance_text():
     deceased = [
         (name, cat)
         for name, cat in data.get("cats", {}).items()
-        if str(cat.get("status", "Alive")).lower() == "dead"
+        if allegiance_tracker_status(cat).casefold() == "dead"
         and allegiance_is_linked(cat)
     ]
 
@@ -1759,15 +1834,15 @@ def build_deceased_allegiance_text():
 
         lines.extend(["", headings[afterlife], ""])
 
-        high = [(name, cat) for name, cat in cats_here if deceased_rank_bucket(cat.get("rank")) == "high"]
-        mid = [(name, cat) for name, cat in cats_here if deceased_rank_bucket(cat.get("rank")) == "mid"]
-        low = [(name, cat) for name, cat in cats_here if deceased_rank_bucket(cat.get("rank")) == "low"]
+        high = [(name, cat) for name, cat in cats_here if deceased_rank_bucket(allegiance_tracker_rank(cat)) == "high"]
+        mid = [(name, cat) for name, cat in cats_here if deceased_rank_bucket(allegiance_tracker_rank(cat)) == "mid"]
+        low = [(name, cat) for name, cat in cats_here if deceased_rank_bucket(allegiance_tracker_rank(cat)) == "low"]
 
         lines.append("⸝⸝ ◇ **HIGHRANKS**")
         high_order = ["Leader", "Deputy", "Medicine Cat", "Medicine Cat Apprentice"]
         any_high = False
         for rank in high_order:
-            ranked = allegiance_sorted([(name, cat) for name, cat in high if cat.get("rank") == rank])
+            ranked = allegiance_sorted([(name, cat) for name, cat in high if allegiance_tracker_rank(cat) == rank])
             if not ranked:
                 continue
             any_high = True
@@ -1786,7 +1861,7 @@ def build_deceased_allegiance_text():
         lines.extend(["", "‧͙⁺˚･༓☾ **MID RANKS** ☽༓･˚⁺‧͙"])
         if mid:
             for rank in ["Pathfinder", "Digger", "Sporekeeper", "River Guardian", "Healer", "Preymaster"]:
-                ranked = allegiance_sorted([(name, cat) for name, cat in mid if cat.get("rank") == rank])
+                ranked = allegiance_sorted([(name, cat) for name, cat in mid if allegiance_tracker_rank(cat) == rank])
                 if not ranked:
                     continue
                 lines.append(f"**{plural_rank(rank)}**")
@@ -1878,6 +1953,7 @@ async def update_allegiance_channel(channel_id, text, saved_message_ids):
 
 async def refresh_all_allegiances(force=False):
     """Rebuild every managed allegiance board and edit the bot's existing messages in place."""
+    global data
     existing_map = data.get("allegiance_message_ids", {})
     if not isinstance(existing_map, dict):
         existing_map = {}
@@ -1886,14 +1962,31 @@ async def refresh_all_allegiances(force=False):
         return {"updated": 0, "errors": [], "skipped": True}
 
     async with allegiance_refresh_lock:
-        board_text = {
-            ALLEGIANCE_CHANNEL_IDS["BlizzardClan"]: build_clan_allegiance_text("BlizzardClan"),
-            ALLEGIANCE_CHANNEL_IDS["TorrentClan"]: build_clan_allegiance_text("TorrentClan"),
-            ALLEGIANCE_CHANNEL_IDS["FossilClan"]: build_clan_allegiance_text("FossilClan"),
-            ALLEGIANCE_CHANNEL_IDS["SpruceClan"]: build_clan_allegiance_text("SpruceClan"),
-            ALLEGIANCE_CHANNEL_IDS["Outsider"]: build_outsider_allegiance_text(),
-            DECEASED_ALLEGIANCE_CHANNEL_ID: build_deceased_allegiance_text()
-        }
+        # Render all six boards from one consistent copy of the tracker. /catinfo and
+        # Allegiances therefore cannot disagree because a rank/Clan edit happened
+        # halfway through rendering multiple channels.
+        live_data = data
+        snapshot_data = copy.deepcopy(data)
+        data = snapshot_data
+        try:
+            board_text = {
+                ALLEGIANCE_CHANNEL_IDS["BlizzardClan"]: build_clan_allegiance_text("BlizzardClan"),
+                ALLEGIANCE_CHANNEL_IDS["TorrentClan"]: build_clan_allegiance_text("TorrentClan"),
+                ALLEGIANCE_CHANNEL_IDS["FossilClan"]: build_clan_allegiance_text("FossilClan"),
+                ALLEGIANCE_CHANNEL_IDS["SpruceClan"]: build_clan_allegiance_text("SpruceClan"),
+                ALLEGIANCE_CHANNEL_IDS["Outsider"]: build_outsider_allegiance_text(),
+                DECEASED_ALLEGIANCE_CHANNEL_ID: build_deceased_allegiance_text()
+            }
+        finally:
+            data = live_data
+
+        # Defensive validation: log linked records that could not be placed safely.
+        for cat_name, cat in live_data.get("cats", {}).items():
+            if not allegiance_is_linked(cat):
+                continue
+            problem = allegiance_record_problem(cat_name, cat)
+            if problem:
+                print(f"Allegiance placement warning: {problem}")
 
         new_map = copy.deepcopy(existing_map)
         updated = 0
@@ -3143,7 +3236,7 @@ async def build_age_report_text(report=None):
             ranked_cats = [
                 (name, cat)
                 for name, cat in clan_cats.items()
-                if cat.get("rank") == rank
+                if allegiance_tracker_rank(cat) == rank
             ]
 
             if not ranked_cats:
@@ -6059,6 +6152,17 @@ async def allegiance_add_command(
         cat = cats[cat_name]
         prepare_cat_record(cat_name, cat)
 
+        placement_problem = allegiance_record_problem(cat_name, cat)
+        if placement_problem:
+            await interaction.edit_original_response(
+                content=(
+                    f"❌ I cannot place **{cat_name}** on Allegiances because their tracker record is invalid.\n"
+                    f"`{placement_problem}`\n"
+                    "Check `/catinfo` and correct their Clan/rank first."
+                )
+            )
+            return
+
         if bool(cat.get("is_npc", False)):
             await interaction.edit_original_response(
                 content=f"❌ **{cat_name}** is an NPC. Use `/allegiance addnpc` instead; NPCs do not need a player or character sheet."
@@ -6077,7 +6181,7 @@ async def allegiance_add_command(
         error_note = "\n⚠️ The record saved, but one or more allegiance channels could not be updated. Send the error to the bot owner."
 
     destination = "the deceased allegiances" if cat_is_dead(cat) else (
-        "the Outsider allegiances" if cat.get("clan") == "Outsider" else f"{cat.get('clan')} allegiances"
+        "the Outsider allegiances" if allegiance_tracker_clan(cat) == "Outsider" else f"{allegiance_tracker_clan(cat)} allegiances"
     )
     await interaction.edit_original_response(
         content=(
@@ -6107,6 +6211,17 @@ async def allegiance_addnpc_command(interaction: discord.Interaction, cat_name: 
         cat = cats[cat_name]
         prepare_cat_record(cat_name, cat)
 
+        placement_problem = allegiance_record_problem(cat_name, cat)
+        if placement_problem:
+            await interaction.edit_original_response(
+                content=(
+                    f"❌ I cannot place **{cat_name}** on Allegiances because their tracker record is invalid.\n"
+                    f"`{placement_problem}`\n"
+                    "Check `/catinfo` and correct their Clan/rank first."
+                )
+            )
+            return
+
         if not bool(cat.get("is_npc", False)):
             await interaction.edit_original_response(
                 content=f"❌ **{cat_name}** is not marked as an NPC. Use `/allegiance add` for regular OCs."
@@ -6126,7 +6241,7 @@ async def allegiance_addnpc_command(interaction: discord.Interaction, cat_name: 
         error_note = "\n⚠️ The NPC was saved, but one or more allegiance channels could not be updated. Send the error to the bot owner."
 
     destination = "the deceased allegiances" if cat_is_dead(cat) else (
-        "the Outsider allegiances" if cat.get("clan") == "Outsider" else f"{cat.get('clan')} allegiances"
+        "the Outsider allegiances" if allegiance_tracker_clan(cat) == "Outsider" else f"{allegiance_tracker_clan(cat)} allegiances"
     )
     await interaction.edit_original_response(
         content=(
