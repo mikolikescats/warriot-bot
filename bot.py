@@ -1062,6 +1062,12 @@ def prepare_cat_record(name, cat):
     cat.setdefault("is_npc", False)
     cat.setdefault("allegiance_owner_id", None)
     cat.setdefault("allegiance_owner_name", None)
+    # OC ownership is kept separately from allegiance publication so /oclist can
+    # continue identifying a character's player even if staff temporarily removes
+    # that character from the automated allegiance boards. Older records fall back
+    # to the allegiance owner fields automatically.
+    cat.setdefault("oc_owner_id", cat.get("allegiance_owner_id"))
+    cat.setdefault("oc_owner_name", cat.get("allegiance_owner_name"))
     cat.setdefault("allegiance_npc", False)
     cat.setdefault("character_sheet_url", None)
     normalize_permanent_conditions(cat)
@@ -2099,6 +2105,207 @@ async def resolve_allegiance_member(guild, raw_value):
         return None, f"That name matches multiple members. Be more specific or use the username: {names}"
 
     return None, f"I could not find a server member matching **{raw}**. Try their display name or Discord username."
+
+
+def oc_owner_id(cat):
+    """Return the saved player ID for an OC, including older allegiance-only records."""
+    owner_id = cat.get("oc_owner_id") or cat.get("allegiance_owner_id")
+    if owner_id is None:
+        return None
+    return str(owner_id).strip() or None
+
+
+def oc_owner_name(cat):
+    """Return a readable saved player name when a Discord mention cannot be used."""
+    return str(
+        cat.get("oc_owner_name")
+        or cat.get("allegiance_owner_name")
+        or "Unknown Player"
+    ).strip()
+
+
+def oc_list_entry(cat_name, cat):
+    shown_name = allegiance_linked_cat_name(cat_name, cat)
+    clan_name = allegiance_tracker_clan(cat) or str(cat.get("clan") or "Unknown")
+    rank_name = allegiance_tracker_rank(cat) or "Unknown Rank"
+
+    if clan_name == "Outsider":
+        faction = str(cat.get("faction") or "").strip()
+        location = f"Outsider • {rank_name}"
+        if faction:
+            location += f" • {faction}"
+    else:
+        location = f"{clan_name} • {rank_name}"
+
+    if allegiance_tracker_status(cat).casefold() == "dead":
+        afterlife = str(cat.get("afterlife") or "Unknown Residence").strip()
+        location += f" • {afterlife}"
+
+    return f"• {shown_name} — {location}"
+
+
+def build_oc_list_for_owner(owner_id):
+    owner_id = str(owner_id)
+    owned = []
+
+    for cat_name, cat in data.get("cats", {}).items():
+        prepare_cat_record(cat_name, cat)
+
+        if bool(cat.get("is_npc", False)):
+            continue
+        if oc_owner_id(cat) != owner_id:
+            continue
+
+        owned.append((cat_name, cat))
+
+    owned = allegiance_sorted(owned)
+    living = [
+        (name, cat) for name, cat in owned
+        if allegiance_tracker_status(cat).casefold() != "dead"
+    ]
+    deceased = [
+        (name, cat) for name, cat in owned
+        if allegiance_tracker_status(cat).casefold() == "dead"
+    ]
+    return living, deceased
+
+
+def build_all_oc_owners():
+    owners = {}
+
+    for cat_name, cat in data.get("cats", {}).items():
+        prepare_cat_record(cat_name, cat)
+
+        if bool(cat.get("is_npc", False)):
+            continue
+
+        owner_id = oc_owner_id(cat)
+        if not owner_id:
+            continue
+
+        owner = owners.setdefault(owner_id, {
+            "name": oc_owner_name(cat),
+            "cats": []
+        })
+        # Prefer the most recently available saved display name over Unknown Player.
+        saved_name = oc_owner_name(cat)
+        if saved_name and saved_name != "Unknown Player":
+            owner["name"] = saved_name
+        owner["cats"].append((cat_name, cat))
+
+    return owners
+
+
+@bot.tree.command(name="oclist", description="View which player owns which OCs")
+@app_commands.describe(
+    user="Optional: display name or Discord username to show only that player's OCs"
+)
+@app_commands.autocomplete(user=allegiance_user_autocomplete)
+async def oc_list_command(interaction: discord.Interaction, user: str = None):
+    # This roster is made from the same player links used by /allegiance add.
+    # It is safe for members to view because that ownership is already public on Allegiances.
+    await interaction.response.defer(ephemeral=True)
+
+    allowed_mentions = discord.AllowedMentions.none()
+
+    if user:
+        member, member_error = await resolve_allegiance_member(interaction.guild, user)
+        if member_error:
+            await interaction.followup.send(f"❌ {member_error}", ephemeral=True)
+            return
+
+        living, deceased = build_oc_list_for_owner(member.id)
+        total = len(living) + len(deceased)
+
+        if total == 0:
+            await interaction.followup.send(
+                f"No OCs are currently linked to **{member.display_name}**. "
+                "OCs become associated with a player when staff uses `/allegiance add`.",
+                ephemeral=True
+            )
+            return
+
+        lines = [
+            f"# OC List — {member.display_name}",
+            "",
+            f"**Total: {total} OC{'s' if total != 1 else ''}**"
+        ]
+
+        if living:
+            lines.extend(["", f"## Living OCs — {len(living)}"] )
+            for cat_name, cat in living:
+                lines.append(oc_list_entry(cat_name, cat))
+
+        if deceased:
+            lines.extend(["", f"## Deceased OCs — {len(deceased)}"] )
+            for cat_name, cat in deceased:
+                lines.append(oc_list_entry(cat_name, cat))
+
+        chunks = split_allegiance_text("\n".join(lines), max_length=1850)
+        for chunk in chunks:
+            await interaction.followup.send(
+                chunk,
+                ephemeral=True,
+                allowed_mentions=allowed_mentions
+            )
+        return
+
+    owners = build_all_oc_owners()
+    if not owners:
+        await interaction.followup.send(
+            "No player-owned OCs are linked yet. Staff can link an OC to its player with `/allegiance add`.",
+            ephemeral=True
+        )
+        return
+
+    owner_rows = []
+    for owner_id, owner_info in owners.items():
+        cats = allegiance_sorted(owner_info["cats"])
+        living = [
+            (name, cat) for name, cat in cats
+            if allegiance_tracker_status(cat).casefold() != "dead"
+        ]
+        deceased = [
+            (name, cat) for name, cat in cats
+            if allegiance_tracker_status(cat).casefold() == "dead"
+        ]
+        owner_rows.append((
+            owner_info["name"].casefold(),
+            owner_id,
+            owner_info["name"],
+            living,
+            deceased
+        ))
+
+    owner_rows.sort(key=lambda row: row[0])
+    lines = ["# OC List"]
+
+    for _, owner_id, saved_name, living, deceased in owner_rows:
+        total = len(living) + len(deceased)
+        try:
+            owner_label = f"<@{int(owner_id)}>"
+        except (TypeError, ValueError):
+            owner_label = f"@{saved_name}"
+
+        lines.extend(["", f"## {owner_label} — {total} OC{'s' if total != 1 else ''}"] )
+
+        if living:
+            lines.append("### Living")
+            for cat_name, cat in living:
+                lines.append(oc_list_entry(cat_name, cat))
+
+        if deceased:
+            lines.append("### Deceased")
+            for cat_name, cat in deceased:
+                lines.append(oc_list_entry(cat_name, cat))
+
+    chunks = split_allegiance_text("\n".join(lines), max_length=1850)
+    for chunk in chunks:
+        await interaction.followup.send(
+            chunk,
+            ephemeral=True,
+            allowed_mentions=allowed_mentions
+        )
 
 
 # ─────────────────────────────
@@ -5942,6 +6149,7 @@ async def botinfo(interaction: discord.Interaction):
 
         "🐾 **General Member Commands**\n"
         "`/catinfo [Name]` — View full details about a cat\n"
+        "`/oclist [User]` — View OCs grouped by player, or search one player's living and deceased OCs\n"
         "`/cats [Clan]` — View all cats by clan or all clans\n"
         "`/clan [ClanName]` — View one clan roster\n"
         "`/cattinder [Name] [Clan]` — Find age-appropriate romance options\n"
@@ -6147,6 +6355,8 @@ async def allegiance_add_command(
         cat["allegiance_npc"] = False
         cat["allegiance_owner_id"] = str(member.id)
         cat["allegiance_owner_name"] = member.display_name
+        cat["oc_owner_id"] = str(member.id)
+        cat["oc_owner_name"] = member.display_name
         cat["character_sheet_url"] = sheet_url
         save_data(data)
 
@@ -6204,9 +6414,12 @@ async def allegiance_addnpc_command(interaction: discord.Interaction, cat_name: 
             return
 
         cat["allegiance_npc"] = True
-        # NPC allegiance entries intentionally have no player mention or sheet link.
+        # NPC allegiance entries intentionally have no player mention or sheet link,
+        # and NPCs are never counted on the player OC list.
         cat["allegiance_owner_id"] = None
         cat["allegiance_owner_name"] = None
+        cat["oc_owner_id"] = None
+        cat["oc_owner_name"] = None
         cat["character_sheet_url"] = None
         save_data(data)
 
@@ -6252,6 +6465,13 @@ async def allegiance_remove_command(interaction: discord.Interaction, cat_name: 
                 content=f"❌ **{cat_name}** is not currently linked to the allegiance boards."
             )
             return
+
+        # Preserve player ownership for /oclist even when the character is
+        # temporarily unpublished from the automated allegiance boards.
+        if not cat.get("oc_owner_id") and cat.get("allegiance_owner_id"):
+            cat["oc_owner_id"] = str(cat.get("allegiance_owner_id"))
+        if not cat.get("oc_owner_name") and cat.get("allegiance_owner_name"):
+            cat["oc_owner_name"] = cat.get("allegiance_owner_name")
 
         cat["allegiance_owner_id"] = None
         cat["allegiance_owner_name"] = None
