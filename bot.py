@@ -119,11 +119,39 @@ ALLEGIANCE_UNIQUE_MIDRANK = {
     "SpruceClan": "Sporekeeper"
 }
 
-ALLEGIANCE_CLAN_HEADERS = {
-    "BlizzardClan": "₊°｡❆ BLIZZARDCLAN ⋆⁺₊❅.",
-    "TorrentClan": "₊°｡🌊 TORRENTCLAN ⋆⁺₊🌊",
-    "FossilClan": "₊°｡🦴 FOSSILCLAN ⋆⁺₊🦴",
-    "SpruceClan": "₊°｡🌲 SPRUCECLAN ⋆⁺₊🌲"
+# Each Clan keeps its own decorative Messagestar-inspired allegiance style.
+# These are plain Unicode/Discord markdown, so the bot can edit the boards normally.
+ALLEGIANCE_CLAN_STYLES = {
+    "BlizzardClan": {
+        "header": "₊°｡❆ BLIZZARDCLAN ⋆⁺₊❅.",
+        "divider": "────────── ⋆⋅ ❆ ⋅⋆ ──────────",
+        "rank_prefix": "⋆⁺₊❅.",
+    },
+    "TorrentClan": {
+        "header": "₊°｡๑ ⋆⁺₊TORRENTCLAN ⋆⁺₊๑｡°₊",
+        "divider": "────────── ⋆⋅ ๑ ⋅⋆ ──────────",
+        "rank_prefix": "⋆⁺₊๑.",
+    },
+    "FossilClan": {
+        "header": "₊°｡⊰ ⋆⁺₊FOSSILCLAN ⋆⁺₊⊱｡°₊",
+        "divider": "────────── ⋆⋅ ⊰⊱ ⋅⋆ ──────────",
+        "rank_prefix": "⋆⁺₊⊰.",
+    },
+    "SpruceClan": {
+        "header": "₊°｡𖥧 ⋆⁺₊SPRUCECLAN ⋆⁺₊𖥧｡°₊",
+        "divider": "────────── ⋆⋅ 𖥧 ⋅⋆ ──────────",
+        "rank_prefix": "⋆⁺₊𖥧.",
+    }
+}
+
+ALLEGIANCE_OUTSIDER_STYLE = {
+    "header": "₊°｡✧ ⋆⁺₊OUTSIDERS ⋆⁺₊✧｡°₊",
+    "divider": "────────── ⋆⋅ ✧ ⋅⋆ ──────────",
+    "Rogue": "˙˚ʚ ROGUES ɞ˚˙",
+    "Kittypet": "₊˚｡୨୧ KITTYPETS ୨୧｡˚₊",
+    "Loner": "₊˚｡☾ (LONERS) ☽｡˚₊",
+    "Wanderer": "˗ˏˋ ✿ WANDERERS ✿ ˎˊ˗",
+    "Other": "₊˚｡✧ OTHER OUTSIDERS ✧｡˚₊",
 }
 
 # Severe weather rolls are separate from the normal weekly weather report.
@@ -1034,6 +1062,7 @@ def prepare_cat_record(name, cat):
     cat.setdefault("is_npc", False)
     cat.setdefault("allegiance_owner_id", None)
     cat.setdefault("allegiance_owner_name", None)
+    cat.setdefault("allegiance_npc", False)
     cat.setdefault("character_sheet_url", None)
     normalize_permanent_conditions(cat)
 
@@ -1380,7 +1409,15 @@ allegiance_refresh_lock = asyncio.Lock()
 
 
 def allegiance_is_linked(cat):
-    """Only cats linked to a player + character sheet are published."""
+    """Return whether a cat should appear on the automated allegiance boards."""
+    if bool(cat.get("is_npc", False)):
+        # NPCs can be published without a player or character sheet.
+        # The owner/sheet fallback keeps already-linked cats visible if they are
+        # later converted into NPCs before staff uses /allegiance addnpc.
+        return bool(cat.get("allegiance_npc", False)) or (
+            bool(cat.get("allegiance_owner_id")) and bool(cat.get("character_sheet_url"))
+        )
+
     return bool(cat.get("allegiance_owner_id")) and bool(cat.get("character_sheet_url"))
 
 
@@ -1403,14 +1440,30 @@ def allegiance_owner_mention(cat):
 def allegiance_sheet_link(cat):
     url = str(cat.get("character_sheet_url") or "").strip()
     if not url:
-        return "Character Sheet not linked"
-    return f"[Character Sheet]({url})"
+        return None
+    return url
+
+
+def allegiance_linked_cat_name(name, cat):
+    """Make playable OC names clickable; NPC names always stay plain text."""
+    shown_name = display_cat_name(name, cat)
+
+    if bool(cat.get("is_npc", False)):
+        return shown_name
+
+    url = allegiance_sheet_link(cat)
+
+    if not url:
+        return shown_name
+
+    # A closing square bracket would break Discord link markdown.
+    safe_name = str(shown_name).replace("\\", "\\\\").replace("]", "\\]")
+    return f"[{safe_name}]({url})"
 
 
 def allegiance_cat_entry(name, cat, deceased=False):
-    shown_name = display_cat_name(name, cat)
-    owner = allegiance_owner_mention(cat)
-    sheet = allegiance_sheet_link(cat)
+    shown_name = allegiance_linked_cat_name(name, cat)
+    is_npc = bool(cat.get("is_npc", False))
 
     if deceased:
         clan_name = cat.get("clan", "Unknown")
@@ -1419,18 +1472,37 @@ def allegiance_cat_entry(name, cat, deceased=False):
             origin = f"{group_name} {cat.get('rank', 'Unknown Rank')}"
         else:
             origin = f"{clan_name} {cat.get('rank', 'Unknown Rank')}"
-        return f"● -{shown_name} - {origin} - {owner} - {sheet}"
 
-    return f"● -{shown_name} - {owner} - {sheet}"
+        if is_npc:
+            return f"• - {shown_name} - {origin}"
+
+        owner = allegiance_owner_mention(cat)
+        return f"• - {shown_name} - {origin} - {owner}"
+
+    if is_npc:
+        return f"• - {shown_name}"
+
+    owner = allegiance_owner_mention(cat)
+    return f"• - {shown_name} - {owner}"
 
 
 def allegiance_sorted(cats):
     return sorted(cats, key=lambda item: item[0].casefold())
 
 
-def allegiance_rank_lines(label, cats, limit, show_mentor=False):
+def allegiance_slot_limit(clan_name, rank_key):
+    # The reference boards use two Medicine Cat slots for BlizzardClan and one
+    # for TorrentClan, FossilClan, and SpruceClan.
+    if rank_key == "Medicine Cat" and clan_name != "BlizzardClan":
+        return 1
+    return ALLEGIANCE_SLOT_LIMITS[rank_key]
+
+
+def allegiance_rank_lines(clan_name, label, cats, limit, show_mentor=False):
     cats = allegiance_sorted(cats)
-    lines = [f"✦ **{label} {len(cats)}/{limit}**"]
+    style = ALLEGIANCE_CLAN_STYLES.get(clan_name, {})
+    prefix = style.get("rank_prefix", "⋆⁺₊.")
+    lines = [f"{prefix} **{label} {len(cats)}/{limit}**"]
 
     for name, cat in cats:
         lines.append(allegiance_cat_entry(name, cat))
@@ -1440,11 +1512,13 @@ def allegiance_rank_lines(label, cats, limit, show_mentor=False):
                 mentor = clean_name_value(mentor)
             else:
                 mentor = "unknown"
-            lines.append(f"  Mentor: {mentor}")
+            lines.append(f"Mentor: {mentor}")
 
     for _ in range(max(0, limit - len(cats))):
-        lines.append("● -")
+        lines.append("• -")
 
+    # Match the airy spacing of the old Messagestar boards.
+    lines.append("")
     return lines
 
 
@@ -1461,6 +1535,9 @@ def allegiance_clan_cats(clan_name):
 def build_clan_allegiance_text(clan_name):
     clan_cats = allegiance_clan_cats(clan_name)
     unique_midrank = ALLEGIANCE_UNIQUE_MIDRANK[clan_name]
+    style = ALLEGIANCE_CLAN_STYLES.get(clan_name, {})
+    header = style.get("header", f"₊°｡✧ {clan_name.upper()} ✧｡°₊")
+    divider = style.get("divider", "────────── ⋆⋅ ✦ ⋅⋆ ──────────")
 
     def by_rank(rank):
         return [(name, cat) for name, cat in clan_cats if cat.get("rank") == rank]
@@ -1472,66 +1549,76 @@ def build_clan_allegiance_text(clan_name):
     }
 
     lines = [
-        ALLEGIANCE_CLAN_HEADERS.get(clan_name, f"🐾 {clan_name.upper()}"),
-        "────────── ⋆⋅ ✦ ⋅⋆ ──────────",
-        "⸝⸝ ⟡ **HIGHRANKS**"
+        header,
+        "",
+        divider,
+        "",
+        "⸝⸝ ◇ **HIGHRANKS**",
+        ""
     ]
 
     lines.extend(allegiance_rank_lines(
-        "Leader", by_rank("Leader"), ALLEGIANCE_SLOT_LIMITS["Leader"]
+        clan_name, "Leader", by_rank("Leader"), allegiance_slot_limit(clan_name, "Leader")
     ))
     lines.extend(allegiance_rank_lines(
-        "Deputy", by_rank("Deputy"), ALLEGIANCE_SLOT_LIMITS["Deputy"]
+        clan_name, "Deputy", by_rank("Deputy"), allegiance_slot_limit(clan_name, "Deputy")
     ))
     lines.extend(allegiance_rank_lines(
-        "Medicine Cats", by_rank("Medicine Cat"), ALLEGIANCE_SLOT_LIMITS["Medicine Cat"]
+        clan_name, "Medicine Cats", by_rank("Medicine Cat"), allegiance_slot_limit(clan_name, "Medicine Cat")
     ))
     lines.extend(allegiance_rank_lines(
+        clan_name,
         "Medicine Apprentice",
         by_rank("Medicine Cat Apprentice"),
-        ALLEGIANCE_SLOT_LIMITS["Medicine Cat Apprentice"],
+        allegiance_slot_limit(clan_name, "Medicine Cat Apprentice"),
         show_mentor=True
     ))
 
     lines.extend([
-        "────────── ⋆⋅ ✦ ⋅⋆ ──────────",
-        "⸝⸝ ⟡ **MIDRANKS**"
+        divider,
+        "",
+        "⸝⸝ ◇ **MIDRANKS**",
+        ""
     ])
 
     unique_label = {
         "Pathfinder": "Pathfinders",
         "River Guardian": "River Guardians",
         "Digger": "Diggers",
-        "Sporekeeper": "Sporekeepers"
+        "Sporekeeper": "Spore Keepers"
     }[unique_midrank]
     lines.extend(allegiance_rank_lines(
+        clan_name,
         unique_label,
         by_rank(unique_midrank),
-        ALLEGIANCE_SLOT_LIMITS[unique_midrank]
+        allegiance_slot_limit(clan_name, unique_midrank)
     ))
     lines.extend(allegiance_rank_lines(
-        "Healers", by_rank("Healer"), ALLEGIANCE_SLOT_LIMITS["Healer"]
+        clan_name, "Healers", by_rank("Healer"), allegiance_slot_limit(clan_name, "Healer")
     ))
     lines.extend(allegiance_rank_lines(
-        "Prey Masters", by_rank("Preymaster"), ALLEGIANCE_SLOT_LIMITS["Preymaster"]
+        clan_name, "Prey Masters", by_rank("Preymaster"), allegiance_slot_limit(clan_name, "Preymaster")
     ))
 
     lines.extend([
-        "────────── ⋆⋅ ✦ ⋅⋆ ──────────",
-        "⸝⸝ ⟡ **NORMAL RANKS**"
+        divider,
+        "",
+        "⸝⸝ ◇ **NORMAL RANKS**",
+        ""
     ])
 
     lines.extend(allegiance_rank_lines(
-        "Warriors", by_rank("Warrior"), ALLEGIANCE_SLOT_LIMITS["Warrior"]
+        clan_name, "Warriors", by_rank("Warrior"), allegiance_slot_limit(clan_name, "Warrior")
     ))
     lines.extend(allegiance_rank_lines(
+        clan_name,
         "Apprentices",
         by_rank("Apprentice"),
-        ALLEGIANCE_SLOT_LIMITS["Apprentice"],
+        allegiance_slot_limit(clan_name, "Apprentice"),
         show_mentor=True
     ))
     lines.extend(allegiance_rank_lines(
-        "Elders", by_rank("Elder"), ALLEGIANCE_SLOT_LIMITS["Elder"]
+        clan_name, "Elders", by_rank("Elder"), allegiance_slot_limit(clan_name, "Elder")
     ))
 
     queen_den_dad = [
@@ -1539,12 +1626,13 @@ def build_clan_allegiance_text(clan_name):
         if cat.get("rank") in {"Queen", "Den Dad"}
     ]
     lines.extend(allegiance_rank_lines(
+        clan_name,
         "Queens and Den Dads",
         queen_den_dad,
-        ALLEGIANCE_SLOT_LIMITS["Queen/Den Dad"]
+        allegiance_slot_limit(clan_name, "Queen/Den Dad")
     ))
     lines.extend(allegiance_rank_lines(
-        "Kits", by_rank("Kit"), ALLEGIANCE_SLOT_LIMITS["Kit"]
+        clan_name, "Kits", by_rank("Kit"), allegiance_slot_limit(clan_name, "Kit")
     ))
 
     other_ranks = allegiance_sorted([
@@ -1553,14 +1641,20 @@ def build_clan_allegiance_text(clan_name):
     ])
     if other_ranks:
         lines.extend([
-            "────────── ⋆⋅ ✦ ⋅⋆ ──────────",
-            "⸝⸝ ⟡ **OTHER RANKS**"
+            divider,
+            "",
+            "⸝⸝ ◇ **OTHER RANKS**",
+            ""
         ])
         for name, cat in other_ranks:
             lines.append(f"**{cat.get('rank', 'Unknown Rank')}**")
             lines.append(allegiance_cat_entry(name, cat))
 
-    return "\n".join(lines)
+    return "\n".join(lines).rstrip()
+
+
+def outsider_rank_header(rank):
+    return ALLEGIANCE_OUTSIDER_STYLE.get(rank, ALLEGIANCE_OUTSIDER_STYLE["Other"])
 
 
 def build_outsider_allegiance_text():
@@ -1573,62 +1667,64 @@ def build_outsider_allegiance_text():
     ]
 
     lines = [
-        "🌫️ **OUTSIDER ALLEGIANCES**",
-        "────────── ⋆⋅ ✦ ⋅⋆ ──────────"
+        ALLEGIANCE_OUTSIDER_STYLE["header"],
+        "",
+        ALLEGIANCE_OUTSIDER_STYLE["divider"]
     ]
 
     if not outsiders:
-        lines.append("No linked Outsider characters yet.")
+        lines.extend(["", "No linked Outsider characters yet."])
         return "\n".join(lines)
 
-    group_order = get_outsider_groups()
-    used_groups = []
-    for _, cat in outsiders:
-        group = cat.get("faction") or "Unaffiliated Outsiders"
-        if group not in used_groups:
-            used_groups.append(group)
+    # The old board is organized first by Rogue / Kittypet / Loner / Wanderer.
+    # Saved Outsider groups are then shown as smaller labels inside that category.
+    ordered_ranks = ["Rogue", "Kittypet", "Loner", "Wanderer"]
+    extra_ranks = sorted({
+        str(cat.get("rank") or "Other")
+        for _, cat in outsiders
+        if cat.get("rank") not in ordered_ranks
+    }, key=str.casefold)
 
-    ordered_groups = [group for group in group_order if group in used_groups]
-    if "Unaffiliated Outsiders" in used_groups:
-        ordered_groups.append("Unaffiliated Outsiders")
-    for group in used_groups:
-        if group not in ordered_groups:
-            ordered_groups.append(group)
-
-    for group in ordered_groups:
-        group_cats = [
+    for rank in ordered_ranks + extra_ranks:
+        ranked = allegiance_sorted([
             (name, cat) for name, cat in outsiders
-            if (cat.get("faction") or "Unaffiliated Outsiders") == group
-        ]
-        lines.extend(["", f"⸝⸝ ⟡ **{group.upper()}**"])
-
-        any_rank = False
-        for rank in OUTSIDER_RANK_ORDER:
-            ranked = allegiance_sorted([
-                (name, cat) for name, cat in group_cats
-                if cat.get("rank") == rank
-            ])
-            if not ranked:
-                continue
-            any_rank = True
-            lines.append(f"**{rank}s — {len(ranked)}**")
-            for name, cat in ranked:
-                lines.append(allegiance_cat_entry(name, cat))
-
-        unknown = allegiance_sorted([
-            (name, cat) for name, cat in group_cats
-            if cat.get("rank") not in OUTSIDER_RANK_ORDER
+            if (cat.get("rank") or "Other") == rank
         ])
-        if unknown:
-            any_rank = True
-            lines.append("**Other**")
-            for name, cat in unknown:
+        if not ranked:
+            continue
+
+        lines.extend(["", outsider_rank_header(rank), ""])
+
+        # Preserve custom Outsider groups without losing the rank-first look.
+        buckets = {}
+        bucket_order = []
+        for name, cat in ranked:
+            group = str(cat.get("faction") or "").strip()
+            bucket = group if group else "__unaffiliated__"
+            if bucket not in buckets:
+                buckets[bucket] = []
+                bucket_order.append(bucket)
+            buckets[bucket].append((name, cat))
+
+        # Unaffiliated/lone cats should appear first, like the reference board.
+        bucket_order.sort(key=lambda value: (value != "__unaffiliated__", value.casefold()))
+
+        for bucket in bucket_order:
+            group_cats = allegiance_sorted(buckets[bucket])
+            if bucket == "__unaffiliated__":
+                if rank == "Rogue":
+                    lines.append("lone rogues")
+                elif len(bucket_order) > 1:
+                    lines.append("unaffiliated")
+            else:
+                lines.append(f"**{bucket}**")
+
+            for name, cat in group_cats:
                 lines.append(allegiance_cat_entry(name, cat))
 
-        if not any_rank:
-            lines.append("● -")
+            lines.append("")
 
-    return "\n".join(lines)
+    return "\n".join(lines).rstrip()
 
 
 def deceased_rank_bucket(rank):
@@ -1653,7 +1749,7 @@ def build_deceased_allegiance_text():
         "Dark Forest": "⋆༺ DARK FOREST ༻⋆"
     }
 
-    lines = ["💀 **DECEASED ALLEGIANCES**"]
+    lines = ["₊˚｡☾ **DECEASED ALLEGIANCES** ☽｡˚₊"]
 
     for afterlife in ["StarClan", "Unknown Residence", "Dark Forest"]:
         cats_here = allegiance_sorted([
@@ -1661,13 +1757,13 @@ def build_deceased_allegiance_text():
             if (cat.get("afterlife") or "Unknown Residence") == afterlife
         ])
 
-        lines.extend(["", headings[afterlife]])
+        lines.extend(["", headings[afterlife], ""])
 
         high = [(name, cat) for name, cat in cats_here if deceased_rank_bucket(cat.get("rank")) == "high"]
         mid = [(name, cat) for name, cat in cats_here if deceased_rank_bucket(cat.get("rank")) == "mid"]
         low = [(name, cat) for name, cat in cats_here if deceased_rank_bucket(cat.get("rank")) == "low"]
 
-        lines.append("**HIGHRANKS**")
+        lines.append("⸝⸝ ◇ **HIGHRANKS**")
         high_order = ["Leader", "Deputy", "Medicine Cat", "Medicine Cat Apprentice"]
         any_high = False
         for rank in high_order:
@@ -1685,30 +1781,28 @@ def build_deceased_allegiance_text():
             for name, cat in ranked:
                 lines.append(allegiance_cat_entry(name, cat, deceased=True))
         if not any_high:
-            lines.append("● -")
+            lines.append("• -")
 
-        lines.append("**MID RANKS**")
+        lines.extend(["", "‧͙⁺˚･༓☾ **MID RANKS** ☽༓･˚⁺‧͙"])
         if mid:
             for rank in ["Pathfinder", "Digger", "Sporekeeper", "River Guardian", "Healer", "Preymaster"]:
                 ranked = allegiance_sorted([(name, cat) for name, cat in mid if cat.get("rank") == rank])
                 if not ranked:
                     continue
-                label = plural_rank(rank)
-                lines.append(f"**{label}**")
+                lines.append(f"**{plural_rank(rank)}**")
                 for name, cat in ranked:
                     lines.append(allegiance_cat_entry(name, cat, deceased=True))
         else:
-            lines.append("● -")
+            lines.append("• -")
 
-        lines.append("**LOW RANKS**")
+        lines.extend(["", "‧͙⁺˚･༓☾ **LOW RANKS** ☽༓･˚⁺‧͙"])
         if low:
             for name, cat in low:
                 lines.append(allegiance_cat_entry(name, cat, deceased=True))
         else:
-            lines.append("● -")
+            lines.append("• -")
 
-    return "\n".join(lines)
-
+    return "\n".join(lines).rstrip()
 
 def split_allegiance_text(text, max_length=1900):
     chunks = []
@@ -5819,6 +5913,7 @@ async def botinfo(interaction: discord.Interaction):
         "🐾 **NPC Commands**\n"
         "`/npc add` — Staff only. Add a new living NPC cat that appears on Clan/Outsider rosters\n"
         "`/npc adddead` — Staff only. Add an NPC who is already deceased and choose StarClan, Dark Forest, or Unknown Residence\n"
+        "`/allegiance addnpc [Cat]` — Staff only. Add an NPC to Allegiances without a player mention or character-sheet link\n"
         "`/npc convert` — Staff only. Change an existing cat into an NPC\n"
         "`/npc markdead` — Staff only. Mark a living NPC dead and choose their afterlife\n"
         "NPCs age every moon and can use normal rank, rename, relationship, and death records, but their hunger does not decay.\n\n"
@@ -5963,6 +6058,14 @@ async def allegiance_add_command(
 
         cat = cats[cat_name]
         prepare_cat_record(cat_name, cat)
+
+        if bool(cat.get("is_npc", False)):
+            await interaction.edit_original_response(
+                content=f"❌ **{cat_name}** is an NPC. Use `/allegiance addnpc` instead; NPCs do not need a player or character sheet."
+            )
+            return
+
+        cat["allegiance_npc"] = False
         cat["allegiance_owner_id"] = str(member.id)
         cat["allegiance_owner_name"] = member.display_name
         cat["character_sheet_url"] = sheet_url
@@ -5985,6 +6088,55 @@ async def allegiance_add_command(
     )
 
 
+@allegiance_group.command(name="addnpc", description="Add an NPC to the automated allegiance boards")
+@app_commands.describe(cat_name="Existing NPC cat in the tracker")
+async def allegiance_addnpc_command(interaction: discord.Interaction, cat_name: str):
+    if not await staff_command_check(interaction):
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    async with data_lock:
+        cats = data.get("cats", {})
+        if cat_name not in cats:
+            await interaction.edit_original_response(
+                content=f"❌ NPC **{cat_name}** was not found. Add them to the cat tracker first with `/npc add` or `/npc adddead`."
+            )
+            return
+
+        cat = cats[cat_name]
+        prepare_cat_record(cat_name, cat)
+
+        if not bool(cat.get("is_npc", False)):
+            await interaction.edit_original_response(
+                content=f"❌ **{cat_name}** is not marked as an NPC. Use `/allegiance add` for regular OCs."
+            )
+            return
+
+        cat["allegiance_npc"] = True
+        # NPC allegiance entries intentionally have no player mention or sheet link.
+        cat["allegiance_owner_id"] = None
+        cat["allegiance_owner_name"] = None
+        cat["character_sheet_url"] = None
+        save_data(data)
+
+    result = await refresh_allegiances_safely("/allegiance addnpc", force=True)
+    error_note = ""
+    if result.get("errors"):
+        error_note = "\n⚠️ The NPC was saved, but one or more allegiance channels could not be updated. Send the error to the bot owner."
+
+    destination = "the deceased allegiances" if cat_is_dead(cat) else (
+        "the Outsider allegiances" if cat.get("clan") == "Outsider" else f"{cat.get('clan')} allegiances"
+    )
+    await interaction.edit_original_response(
+        content=(
+            f"✅ **{display_cat_name(cat_name, cat)}** was added to **{destination}**.\n"
+            "NPC allegiance entries show only the NPC's name, with no player mention or character-sheet link."
+            f"{error_note}"
+        )
+    )
+
+
 @allegiance_group.command(name="remove", description="Remove a cat from the automated allegiance boards")
 @app_commands.describe(cat_name="Cat to unlink from allegiances")
 async def allegiance_remove_command(interaction: discord.Interaction, cat_name: str):
@@ -6000,7 +6152,12 @@ async def allegiance_remove_command(interaction: discord.Interaction, cat_name: 
             return
 
         cat = cats[cat_name]
-        if not allegiance_is_linked(cat) and not cat.get("allegiance_owner_id") and not cat.get("character_sheet_url"):
+        if (
+            not allegiance_is_linked(cat)
+            and not cat.get("allegiance_owner_id")
+            and not cat.get("character_sheet_url")
+            and not cat.get("allegiance_npc")
+        ):
             await interaction.edit_original_response(
                 content=f"❌ **{cat_name}** is not currently linked to the allegiance boards."
             )
@@ -6009,6 +6166,7 @@ async def allegiance_remove_command(interaction: discord.Interaction, cat_name: 
         cat["allegiance_owner_id"] = None
         cat["allegiance_owner_name"] = None
         cat["character_sheet_url"] = None
+        cat["allegiance_npc"] = False
         save_data(data)
 
     result = await refresh_allegiances_safely("/allegiance remove", force=True)
