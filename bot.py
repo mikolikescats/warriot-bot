@@ -1561,7 +1561,9 @@ def allegiance_rank_lines(clan_name, label, cats, limit, show_mentor=False):
     cats = allegiance_sorted(cats)
     style = ALLEGIANCE_CLAN_STYLES.get(clan_name, {})
     prefix = style.get("rank_prefix", "⋆⁺₊.")
-    lines = [f"{prefix} **{label} {len(cats)}/{limit}**"]
+    # Discord markdown hierarchy: Clan = #, section = ##, individual rank = ###.
+    # The x/y count shows capacity; only real cats are listed underneath.
+    lines = [f"### {prefix} **{label} {len(cats)}/{limit}**"]
 
     for name, cat in cats:
         lines.append(allegiance_cat_entry(name, cat))
@@ -1573,10 +1575,7 @@ def allegiance_rank_lines(clan_name, label, cats, limit, show_mentor=False):
                 mentor = "unknown"
             lines.append(f"Mentor: {mentor}")
 
-    for _ in range(max(0, limit - len(cats))):
-        lines.append("• -")
-
-    # Match the airy spacing of the old Messagestar boards.
+    # Keep the spacing without filling unused slots with placeholder bullets.
     lines.append("")
     return lines
 
@@ -1607,9 +1606,6 @@ def allegiance_clan_cats(clan_name):
 def build_clan_allegiance_text(clan_name):
     clan_cats = allegiance_clan_cats(clan_name)
     unique_midrank = ALLEGIANCE_UNIQUE_MIDRANK[clan_name]
-    style = ALLEGIANCE_CLAN_STYLES.get(clan_name, {})
-    header = style.get("header", f"₊°｡✧ {clan_name.upper()} ✧｡°₊")
-    divider = style.get("divider", "────────── ⋆⋅ ✦ ⋅⋆ ──────────")
 
     def by_rank(rank):
         return [
@@ -1623,12 +1619,11 @@ def build_clan_allegiance_text(clan_name):
         "Elder", "Queen", "Den Dad", "Kit"
     }
 
+    # Use real Discord headings instead of decorative divider lines.
     lines = [
-        header,
+        f"# {clan_name}",
         "",
-        divider,
-        "",
-        "⸝⸝ ◇ **HIGHRANKS**",
+        "## High ranks",
         ""
     ]
 
@@ -1650,9 +1645,7 @@ def build_clan_allegiance_text(clan_name):
     ))
 
     lines.extend([
-        divider,
-        "",
-        "⸝⸝ ◇ **MIDRANKS**",
+        "## Mid ranks",
         ""
     ])
 
@@ -1676,9 +1669,7 @@ def build_clan_allegiance_text(clan_name):
     ))
 
     lines.extend([
-        divider,
-        "",
-        "⸝⸝ ◇ **NORMAL RANKS**",
+        "## Normal ranks",
         ""
     ])
 
@@ -1716,14 +1707,13 @@ def build_clan_allegiance_text(clan_name):
     ])
     if other_ranks:
         lines.extend([
-            divider,
-            "",
-            "⸝⸝ ◇ **OTHER RANKS**",
+            "## Other ranks",
             ""
         ])
         for name, cat in other_ranks:
-            lines.append(f"**{allegiance_tracker_rank(cat) or 'Unknown Rank'}**")
+            lines.append(f"### **{allegiance_tracker_rank(cat) or 'Unknown Rank'}**")
             lines.append(allegiance_cat_entry(name, cat))
+            lines.append("")
 
     return "\n".join(lines).rstrip()
 
@@ -1741,21 +1731,15 @@ def build_outsider_allegiance_text():
         and allegiance_is_linked(cat)
     ]
 
-    lines = [
-        ALLEGIANCE_OUTSIDER_STYLE["header"],
-        "",
-        ALLEGIANCE_OUTSIDER_STYLE["divider"]
-    ]
+    lines = ["# Outsiders"]
 
     if not outsiders:
         lines.extend(["", "No linked Outsider characters yet."])
         return "\n".join(lines)
 
-    # The old board is organized first by Rogue / Kittypet / Loner / Wanderer.
-    # Saved Outsider groups are then shown as smaller labels inside that category.
     ordered_ranks = ["Rogue", "Kittypet", "Loner", "Wanderer"]
     extra_ranks = sorted({
-        str(cat.get("rank") or "Other")
+        str(allegiance_tracker_rank(cat) or "Other")
         for _, cat in outsiders
         if allegiance_tracker_rank(cat) not in ordered_ranks
     }, key=str.casefold)
@@ -1768,9 +1752,8 @@ def build_outsider_allegiance_text():
         if not ranked:
             continue
 
-        lines.extend(["", outsider_rank_header(rank), ""])
+        lines.extend(["", f"## {outsider_rank_header(rank)}", ""])
 
-        # Preserve custom Outsider groups without losing the rank-first look.
         buckets = {}
         bucket_order = []
         for name, cat in ranked:
@@ -1781,18 +1764,22 @@ def build_outsider_allegiance_text():
                 bucket_order.append(bucket)
             buckets[bucket].append((name, cat))
 
-        # Unaffiliated/lone cats should appear first, like the reference board.
         bucket_order.sort(key=lambda value: (value != "__unaffiliated__", value.casefold()))
 
         for bucket in bucket_order:
             group_cats = allegiance_sorted(buckets[bucket])
             if bucket == "__unaffiliated__":
                 if rank == "Rogue":
-                    lines.append("lone rogues")
+                    subgroup = "Lone rogues"
                 elif len(bucket_order) > 1:
-                    lines.append("unaffiliated")
+                    subgroup = "Unaffiliated"
+                else:
+                    subgroup = None
             else:
-                lines.append(f"**{bucket}**")
+                subgroup = bucket
+
+            if subgroup:
+                lines.append(f"### {subgroup}")
 
             for name, cat in group_cats:
                 lines.append(allegiance_cat_entry(name, cat))
@@ -1818,13 +1805,7 @@ def build_deceased_allegiance_text():
         and allegiance_is_linked(cat)
     ]
 
-    headings = {
-        "StarClan": "‧͙⁺˚･༓☾ STARCLAN ☽༓･˚⁺‧͙",
-        "Unknown Residence": "-ˋˏ ༻ UNKNOWN RESIDENCE ༺ ˎˊ-",
-        "Dark Forest": "⋆༺ DARK FOREST ༻⋆"
-    }
-
-    lines = ["₊˚｡☾ **DECEASED ALLEGIANCES** ☽｡˚₊"]
+    lines = ["# Deceased Allegiances"]
 
     for afterlife in ["StarClan", "Unknown Residence", "Dark Forest"]:
         cats_here = allegiance_sorted([
@@ -1832,13 +1813,13 @@ def build_deceased_allegiance_text():
             if (cat.get("afterlife") or "Unknown Residence") == afterlife
         ])
 
-        lines.extend(["", headings[afterlife], ""])
+        lines.extend(["", f"## {afterlife}", ""])
 
         high = [(name, cat) for name, cat in cats_here if deceased_rank_bucket(allegiance_tracker_rank(cat)) == "high"]
         mid = [(name, cat) for name, cat in cats_here if deceased_rank_bucket(allegiance_tracker_rank(cat)) == "mid"]
         low = [(name, cat) for name, cat in cats_here if deceased_rank_bucket(allegiance_tracker_rank(cat)) == "low"]
 
-        lines.append("⸝⸝ ◇ **HIGHRANKS**")
+        lines.append("### High ranks")
         high_order = ["Leader", "Deputy", "Medicine Cat", "Medicine Cat Apprentice"]
         any_high = False
         for rank in high_order:
@@ -1847,18 +1828,15 @@ def build_deceased_allegiance_text():
                 continue
             any_high = True
             label = {
-                "Leader": "LEADERS",
-                "Deputy": "DEPUTIES",
-                "Medicine Cat": "MEDICINE CATS",
-                "Medicine Cat Apprentice": "MEDICINE APPRENTICES"
+                "Leader": "Leaders",
+                "Deputy": "Deputies",
+                "Medicine Cat": "Medicine Cats",
+                "Medicine Cat Apprentice": "Medicine Apprentices"
             }[rank]
             lines.append(f"**{label}**")
             for name, cat in ranked:
                 lines.append(allegiance_cat_entry(name, cat, deceased=True))
-        if not any_high:
-            lines.append("• -")
-
-        lines.extend(["", "‧͙⁺˚･༓☾ **MID RANKS** ☽༓･˚⁺‧͙"])
+        lines.extend(["", "### Mid ranks"])
         if mid:
             for rank in ["Pathfinder", "Digger", "Sporekeeper", "River Guardian", "Healer", "Preymaster"]:
                 ranked = allegiance_sorted([(name, cat) for name, cat in mid if allegiance_tracker_rank(cat) == rank])
@@ -1867,17 +1845,14 @@ def build_deceased_allegiance_text():
                 lines.append(f"**{plural_rank(rank)}**")
                 for name, cat in ranked:
                     lines.append(allegiance_cat_entry(name, cat, deceased=True))
-        else:
-            lines.append("• -")
 
-        lines.extend(["", "‧͙⁺˚･༓☾ **LOW RANKS** ☽༓･˚⁺‧͙"])
+        lines.extend(["", "### Low ranks"])
         if low:
             for name, cat in low:
                 lines.append(allegiance_cat_entry(name, cat, deceased=True))
-        else:
-            lines.append("• -")
 
     return "\n".join(lines).rstrip()
+
 
 def split_allegiance_text(text, max_length=1900):
     chunks = []
