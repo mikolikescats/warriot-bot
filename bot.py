@@ -468,6 +468,7 @@ def fresh_default_data():
         "honour_tracker_message_id": None,
         "plot_members": {},
         "outsider_groups": list(FACTIONS),
+        "deleted_outsider_groups": [],
         "current_weather": None,
         "last_severe_weather_week": None,
         "severe_weather_week_results": {},
@@ -528,10 +529,19 @@ data_lock = asyncio.Lock()
 
 
 def get_outsider_groups():
-    """Return the built-in and staff-created Outsider groups in a stable order."""
+    """Return active built-in and staff-created Outsider groups in a stable order."""
     saved_groups = data.get("outsider_groups", [])
     if not isinstance(saved_groups, list):
         saved_groups = []
+
+    deleted_groups = data.get("deleted_outsider_groups", [])
+    if not isinstance(deleted_groups, list):
+        deleted_groups = []
+    deleted_keys = {
+        str(value).strip().casefold()
+        for value in deleted_groups
+        if str(value).strip()
+    }
 
     groups = []
     seen = set()
@@ -540,7 +550,7 @@ def get_outsider_groups():
         if not clean_value:
             continue
         key = clean_value.casefold()
-        if key in seen:
+        if key in deleted_keys or key in seen:
             continue
         seen.add(key)
         groups.append(clean_value)
@@ -573,6 +583,181 @@ async def outsider_group_autocomplete(
         app_commands.Choice(name=group_name, value=group_name)
         for group_name in matches[:25]
     ]
+
+
+def normalize_outsider_group_storage():
+    """Keep saved and deleted Outsider-group lists clean and de-duplicated."""
+    groups = data.setdefault("outsider_groups", list(FACTIONS))
+    if not isinstance(groups, list):
+        groups = list(FACTIONS)
+        data["outsider_groups"] = groups
+
+    deleted = data.setdefault("deleted_outsider_groups", [])
+    if not isinstance(deleted, list):
+        deleted = []
+        data["deleted_outsider_groups"] = deleted
+
+    clean_groups = []
+    seen_groups = set()
+    for value in groups:
+        clean = str(value).strip()
+        if not clean:
+            continue
+        key = clean.casefold()
+        if key in seen_groups:
+            continue
+        seen_groups.add(key)
+        clean_groups.append(clean)
+
+    clean_deleted = []
+    seen_deleted = set()
+    for value in deleted:
+        clean = str(value).strip()
+        if not clean:
+            continue
+        key = clean.casefold()
+        if key in seen_deleted:
+            continue
+        seen_deleted.add(key)
+        clean_deleted.append(clean)
+
+    data["outsider_groups"] = clean_groups
+    data["deleted_outsider_groups"] = clean_deleted
+    return clean_groups, clean_deleted
+
+
+def outsider_group_is_builtin(group_name):
+    key = str(group_name or "").strip().casefold()
+    return any(str(value).casefold() == key for value in FACTIONS)
+
+
+def retire_outsider_group_name(group_name):
+    """Hide a group name, including built-in groups that otherwise come from FACTIONS."""
+    clean_name = str(group_name or "").strip()
+    key = clean_name.casefold()
+    groups, deleted = normalize_outsider_group_storage()
+
+    data["outsider_groups"] = [
+        value for value in groups
+        if str(value).strip().casefold() != key
+    ]
+
+    if not any(str(value).strip().casefold() == key for value in deleted):
+        deleted.append(clean_name)
+    data["deleted_outsider_groups"] = deleted
+
+
+def activate_outsider_group_name(group_name):
+    """Ensure a group name is active again, even if that built-in name was deleted before."""
+    clean_name = str(group_name or "").strip()
+    key = clean_name.casefold()
+    groups, deleted = normalize_outsider_group_storage()
+
+    data["deleted_outsider_groups"] = [
+        value for value in deleted
+        if str(value).strip().casefold() != key
+    ]
+
+    # Built-ins already come from FACTIONS; custom names must be stored explicitly.
+    if not outsider_group_is_builtin(clean_name):
+        if not any(str(value).strip().casefold() == key for value in groups):
+            groups.append(clean_name)
+        data["outsider_groups"] = groups
+
+
+def update_outsider_group_weather_references(old_group, new_group=None):
+    """Keep severe-weather records consistent when an Outsider group is renamed or deleted."""
+    old_group = str(old_group or "").strip()
+    old_key = severe_entity_key(old_group, "outsider")
+    new_group = str(new_group or "").strip() or None
+    new_key = severe_entity_key(new_group, "outsider") if new_group else None
+
+    # Active severe-weather effects target group names directly.
+    for event in data.get("active_severe_weather", []) or []:
+        effects = event.get("effects", []) if isinstance(event, dict) else []
+        if not isinstance(effects, list):
+            continue
+        kept = []
+        for effect in effects:
+            if not isinstance(effect, dict):
+                kept.append(effect)
+                continue
+            matches = (
+                str(effect.get("entity_key") or "") == old_key
+                or (
+                    str(effect.get("kind") or "").casefold() == "outsider"
+                    and str(effect.get("target") or "").casefold() == old_group.casefold()
+                )
+            )
+            if not matches:
+                kept.append(effect)
+                continue
+            if new_group:
+                effect["entity_key"] = new_key
+                effect["target"] = new_group
+                kept.append(effect)
+        event["effects"] = kept
+
+    # Monthly direct-hit markers use the entity key.
+    monthly_hits = data.get("severe_weather_monthly_hits", {})
+    if isinstance(monthly_hits, dict):
+        for month, raw_hits in list(monthly_hits.items()):
+            if not isinstance(raw_hits, list):
+                continue
+            updated = []
+            for value in raw_hits:
+                value = new_key if str(value) == old_key and new_key else value
+                if str(value) == old_key and not new_key:
+                    continue
+                if value not in updated:
+                    updated.append(value)
+            monthly_hits[month] = updated
+
+    # Historical weather records are keyed by the same outsider entity key.
+    history = data.get("severe_weather_history", {})
+    if isinstance(history, dict) and old_key in history:
+        old_history = history.pop(old_key)
+        if new_key:
+            merged = list(history.get(new_key, []) or []) + list(old_history or [])
+            history[new_key] = merged[-12:]
+
+
+def rename_outsider_group_records(old_group, new_group):
+    """Rename a group everywhere it is referenced and return the affected cat count."""
+    old_group = str(old_group).strip()
+    new_group = str(new_group).strip()
+    changed_cats = 0
+
+    for cat_name, cat in data.get("cats", {}).items():
+        current = str(cat.get("faction") or "").strip()
+        if current.casefold() != old_group.casefold():
+            continue
+        cat["faction"] = new_group
+        add_history(cat, f"Outsider group renamed from {old_group} to {new_group}")
+        changed_cats += 1
+
+    retire_outsider_group_name(old_group)
+    activate_outsider_group_name(new_group)
+    update_outsider_group_weather_references(old_group, new_group)
+    return changed_cats
+
+
+def delete_outsider_group_records(group_name):
+    """Delete a group and make all of its cats unaffiliated. Return affected cat count."""
+    group_name = str(group_name).strip()
+    changed_cats = 0
+
+    for cat_name, cat in data.get("cats", {}).items():
+        current = str(cat.get("faction") or "").strip()
+        if current.casefold() != group_name.casefold():
+            continue
+        cat["faction"] = None
+        add_history(cat, f"Outsider group {group_name} was deleted; became unaffiliated")
+        changed_cats += 1
+
+    retire_outsider_group_name(group_name)
+    update_outsider_group_weather_references(group_name, None)
+    return changed_cats
 
 # ─────────────────────────────
 # PERMISSION HELPERS
@@ -6196,7 +6381,10 @@ async def botinfo(interaction: discord.Interaction):
 
         "🌫️ **Outsider Group Commands**\n"
         "`/outsidergroup add [Name]` — Staff only. Add a persistent Outsider group\n"
-        "`/outsidergroup assign [Cat] [Group]` — Staff only. Assign an existing Outsider to a saved group\n"
+        "`/outsidergroup assign [Cat] [Group]` — Staff only. Assign or move an existing Outsider to a saved group\n"
+        "`/outsidergroup change [Cat] [Group]` — Staff only. Move an Outsider from one group to another\n"
+        "`/outsidergroup rename [Group] [New Name]` — Staff only. Rename a group and automatically update every cat in it\n"
+        "`/outsidergroup delete [Group]` — Staff only. Delete a group; cats in it become unaffiliated\n"
         "`/outsidergroup list` — View all available Outsider groups\n\n"
 
         "📚 **Allegiance Commands**\n"
@@ -6542,11 +6730,8 @@ async def outsider_group_add_command(interaction: discord.Interaction, name: str
             )
             return
 
-        groups = data.setdefault("outsider_groups", list(FACTIONS))
-        if not isinstance(groups, list):
-            groups = list(FACTIONS)
-            data["outsider_groups"] = groups
-        groups.append(clean_name)
+        # This also un-retires a previously deleted built-in group with the same name.
+        activate_outsider_group_name(clean_name)
         save_data(data)
 
     await interaction.response.send_message(
@@ -6554,17 +6739,8 @@ async def outsider_group_add_command(interaction: discord.Interaction, name: str
     )
 
 
-@outsider_group.command(name="assign", description="Assign an existing Outsider cat to a group")
-@app_commands.describe(cat_name="Existing Outsider cat", group="Outsider group")
-@app_commands.autocomplete(group=outsider_group_autocomplete)
-async def outsider_group_assign_command(
-    interaction: discord.Interaction,
-    cat_name: str,
-    group: str
-):
-    if not await staff_command_check(interaction):
-        return
-
+async def change_outsider_cat_group(interaction, cat_name, group, command_label):
+    """Shared implementation for /outsidergroup assign and /outsidergroup change."""
     resolved_group = resolve_outsider_group(group)
     if resolved_group is None:
         await interaction.response.send_message(
@@ -6594,15 +6770,146 @@ async def outsider_group_assign_command(
             )
             return
 
-        old_group = cat.get("faction")
+        old_group = str(cat.get("faction") or "").strip() or None
+        if old_group and old_group.casefold() == resolved_group.casefold():
+            await interaction.response.send_message(
+                f"ℹ️ **{cat_name}** is already part of **{resolved_group}**.",
+                ephemeral=True
+            )
+            return
+
         cat["faction"] = resolved_group
         add_history(cat, f"Outsider group changed from {old_group or 'None'} to {resolved_group}")
         save_data(data)
 
     await interaction.response.send_message(
-        f"🌫️ **{cat_name}** is now part of **{resolved_group}**."
+        f"🌫️ **{cat_name}** moved from **{old_group or 'Unaffiliated'}** to **{resolved_group}**."
     )
-    await refresh_allegiances_safely("Outsider group change")
+    await refresh_allegiances_safely(command_label)
+
+
+@outsider_group.command(name="assign", description="Assign or move an Outsider cat to a saved group")
+@app_commands.describe(cat_name="Existing Outsider cat", group="Outsider group")
+@app_commands.autocomplete(group=outsider_group_autocomplete)
+async def outsider_group_assign_command(
+    interaction: discord.Interaction,
+    cat_name: str,
+    group: str
+):
+    if not await staff_command_check(interaction):
+        return
+    await change_outsider_cat_group(interaction, cat_name, group, "/outsidergroup assign")
+
+
+@outsider_group.command(name="change", description="Move an Outsider cat from one group to another")
+@app_commands.describe(cat_name="Existing Outsider cat", group="New Outsider group")
+@app_commands.autocomplete(group=outsider_group_autocomplete)
+async def outsider_group_change_command(
+    interaction: discord.Interaction,
+    cat_name: str,
+    group: str
+):
+    if not await staff_command_check(interaction):
+        return
+    await change_outsider_cat_group(interaction, cat_name, group, "/outsidergroup change")
+
+
+@outsider_group.command(name="rename", description="Rename an Outsider group and update all cats in it")
+@app_commands.describe(group="Existing Outsider group", new_name="New name for the group")
+@app_commands.autocomplete(group=outsider_group_autocomplete)
+async def outsider_group_rename_command(
+    interaction: discord.Interaction,
+    group: str,
+    new_name: str
+):
+    if not await staff_command_check(interaction):
+        return
+
+    resolved_group = resolve_outsider_group(group)
+    if resolved_group is None:
+        await interaction.response.send_message(
+            "❌ That Outsider group does not exist.",
+            ephemeral=True
+        )
+        return
+
+    clean_new_name = str(new_name or "").strip()
+    if not clean_new_name:
+        await interaction.response.send_message(
+            "❌ The new group name cannot be blank.",
+            ephemeral=True
+        )
+        return
+    if len(clean_new_name) > 80:
+        await interaction.response.send_message(
+            "❌ Keep Outsider group names to 80 characters or fewer.",
+            ephemeral=True
+        )
+        return
+    if resolved_group.casefold() == clean_new_name.casefold():
+        await interaction.response.send_message(
+            f"ℹ️ **{resolved_group}** already has that name.",
+            ephemeral=True
+        )
+        return
+
+    existing = get_outsider_groups()
+    duplicate = next(
+        (value for value in existing if value.casefold() == clean_new_name.casefold()),
+        None
+    )
+    if duplicate:
+        await interaction.response.send_message(
+            f"❌ **{duplicate}** already exists. Use `/outsidergroup change` to move individual cats into it instead.",
+            ephemeral=True
+        )
+        return
+
+    async with data_lock:
+        affected = rename_outsider_group_records(resolved_group, clean_new_name)
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"✏️ Renamed **{resolved_group}** to **{clean_new_name}**. "
+        f"Updated **{affected}** cat{'s' if affected != 1 else ''} automatically."
+    )
+    await refresh_allegiances_safely("Outsider group rename", force=True)
+
+
+@outsider_group.command(name="delete", description="Delete an Outsider group and make its cats unaffiliated")
+@app_commands.describe(group="Outsider group to delete")
+@app_commands.autocomplete(group=outsider_group_autocomplete)
+async def outsider_group_delete_command(
+    interaction: discord.Interaction,
+    group: str
+):
+    if not await staff_command_check(interaction):
+        return
+
+    resolved_group = resolve_outsider_group(group)
+    if resolved_group is None:
+        await interaction.response.send_message(
+            "❌ That Outsider group does not exist.",
+            ephemeral=True
+        )
+        return
+
+    async with data_lock:
+        affected = delete_outsider_group_records(resolved_group)
+        save_data(data)
+
+    if affected:
+        cat_note = (
+            f" **{affected}** cat{'s were' if affected != 1 else ' was'} made unaffiliated. "
+            "You can move them into another group with `/outsidergroup change`."
+        )
+    else:
+        cat_note = " No cats were assigned to it."
+
+    await interaction.response.send_message(
+        f"🗑️ Deleted the Outsider group **{resolved_group}**.{cat_note}"
+    )
+    await refresh_allegiances_safely("Outsider group deletion", force=True)
 
 
 @outsider_group.command(name="list", description="List all available Outsider groups")
