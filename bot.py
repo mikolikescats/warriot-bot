@@ -168,6 +168,15 @@ NORTHERN_LIGHTS_DURATION_HOURS = 24 * 7
 HIATUS_CHANNEL_ID = 1441505660905984120
 HIATUS_ROLE_ID = 1463773050242728049
 MEMBER_ROLE_ID = 1441508526504808561
+
+# Rules verification / onboarding.
+RULES_VERIFICATION_MESSAGE_ID = 1542923923165806592
+NEW_MEMBER_ROLE_ID = 1441509553001730098
+RULES_CHANNEL_ID = 1441202727672877076
+RULES_LINK = "https://discord.com/channels/1441200937514434563/1441202727672877076"
+RULES_REMINDER_AFTER_DAYS = 3
+NEW_MEMBER_ROLE_REMOVE_AFTER_DAYS = 7
+
 DEATH_ANNOUNCEMENT_CHANNEL_ID = 1441498271842304183
 ACTIVITY_WARNING_CHANNEL_ID = 1500705057207746610
 ACTIVITY_WARNING_USER_ID = 1440182563674132490
@@ -479,7 +488,13 @@ def fresh_default_data():
         "aurora_active_until": None,
         "last_aurora_week": None,
         "allegiance_message_ids": {},
-        "last_moon_snapshot": None
+        "last_moon_snapshot": None,
+        "rules_onboarding_reminders": {},
+        "active_role_quest": None,
+        "role_quest_history": [],
+        "used_role_quests": [],
+        "role_quest_rollout_v1": False,
+        "broad_hunting_quest_migration_v1": False
     }
 
 
@@ -1255,6 +1270,10 @@ def prepare_cat_record(name, cat):
     cat.setdefault("oc_owner_name", cat.get("allegiance_owner_name"))
     cat.setdefault("allegiance_npc", False)
     cat.setdefault("character_sheet_url", None)
+    # Optional role-specific quest rewards are stored on the individual OC.
+    cat.setdefault("role_quest_hunting_bonus", None)
+    cat.setdefault("role_quest_injury_reduction_charges", 0)
+    cat.setdefault("role_quest_hunger_pause_until", None)
     normalize_permanent_conditions(cat)
 
 
@@ -2326,7 +2345,8 @@ def oc_list_entry(cat_name, cat):
         afterlife = str(cat.get("afterlife") or "Unknown Residence").strip()
         location += f" • {afterlife}"
 
-    return f"• {shown_name} — {location}"
+    hunger = get_hunger_status(cat) if allegiance_tracker_status(cat).casefold() != "dead" else "N/A"
+    return f"• {shown_name} — {location} — 🍽️ Hunger: {hunger}"
 
 
 def build_oc_list_for_owner(owner_id):
@@ -2389,14 +2409,14 @@ def build_all_oc_owners():
 async def oc_list_command(interaction: discord.Interaction, user: str = None):
     # This roster is made from the same player links used by /allegiance add.
     # It is safe for members to view because that ownership is already public on Allegiances.
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
 
     allowed_mentions = discord.AllowedMentions.none()
 
     if user:
         member, member_error = await resolve_allegiance_member(interaction.guild, user)
         if member_error:
-            await interaction.followup.send(f"❌ {member_error}", ephemeral=True)
+            await interaction.followup.send(f"❌ {member_error}")
             return
 
         living, deceased = build_oc_list_for_owner(member.id)
@@ -2406,7 +2426,6 @@ async def oc_list_command(interaction: discord.Interaction, user: str = None):
             await interaction.followup.send(
                 f"No OCs are currently linked to **{member.display_name}**. "
                 "OCs become associated with a player when staff uses `/allegiance add`.",
-                ephemeral=True
             )
             return
 
@@ -2430,7 +2449,6 @@ async def oc_list_command(interaction: discord.Interaction, user: str = None):
         for chunk in chunks:
             await interaction.followup.send(
                 chunk,
-                ephemeral=True,
                 allowed_mentions=allowed_mentions
             )
         return
@@ -2438,8 +2456,7 @@ async def oc_list_command(interaction: discord.Interaction, user: str = None):
     owners = build_all_oc_owners()
     if not owners:
         await interaction.followup.send(
-            "No player-owned OCs are linked yet. Staff can link an OC to its player with `/allegiance add`.",
-            ephemeral=True
+            "No player-owned OCs are linked yet. Staff can link an OC to its player with `/allegiance add`."
         )
         return
 
@@ -2488,9 +2505,54 @@ async def oc_list_command(interaction: discord.Interaction, user: str = None):
     for chunk in chunks:
         await interaction.followup.send(
             chunk,
-            ephemeral=True,
             allowed_mentions=allowed_mentions
         )
+
+
+
+def resolve_cat_name_casefold(raw_name):
+    lookup = str(raw_name or "").strip().casefold()
+    if not lookup:
+        return None
+
+    for cat_name in data.get("cats", {}):
+        if cat_name.casefold() == lookup:
+            return cat_name
+    return None
+
+
+@bot.tree.command(name="ocowner", description="Find which Discord user owns an OC")
+@app_commands.describe(cat_name="Name of the OC")
+async def ocowner_command(interaction: discord.Interaction, cat_name: str):
+    resolved_name = resolve_cat_name_casefold(cat_name)
+    if not resolved_name:
+        await interaction.response.send_message(f"❌ I could not find an OC named **{cat_name}**.")
+        return
+
+    cat = data["cats"][resolved_name]
+    prepare_cat_record(resolved_name, cat)
+
+    if bool(cat.get("is_npc", False)):
+        await interaction.response.send_message(
+            f"🐾 **{display_cat_name(resolved_name, cat)}** is an NPC and does not have a player owner."
+        )
+        return
+
+    owner_id = oc_owner_id(cat)
+    if not owner_id:
+        await interaction.response.send_message(
+            f"❓ **{resolved_name}** does not currently have a saved player owner. Staff can link them with `/allegiance add`."
+        )
+        return
+
+    member = await fetch_member_by_id(interaction.guild, owner_id) if interaction.guild else None
+    owner_label = member.mention if member else f"<@{owner_id}>"
+    shown_name = allegiance_linked_cat_name(resolved_name, cat)
+
+    await interaction.response.send_message(
+        f"🐾 {shown_name} is owned by **{owner_label}**.",
+        allowed_mentions=discord.AllowedMentions.none()
+    )
 
 
 # ─────────────────────────────
@@ -2653,6 +2715,72 @@ async def announce_new_honour_role(cat_name, clan_name, display_role, role_categ
     return True
 
 # ─────────────────────────────
+# INDIVIDUAL ROLE-QUEST BONUS HELPERS
+# ─────────────────────────────
+
+def get_role_quest_hunting_modifier(cat):
+    """Return an OC's role-quest hunting bonus if it belongs to the current moon."""
+    bonus = cat.get("role_quest_hunting_bonus")
+    if not isinstance(bonus, dict):
+        return 0
+
+    try:
+        bonus_moon = int(bonus.get("moon"))
+        modifier = int(bonus.get("modifier", 0))
+    except (TypeError, ValueError):
+        return 0
+
+    if bonus_moon != int(data.get("moon", 0)):
+        return 0
+
+    return modifier
+
+
+def role_quest_hunger_pause_remaining(cat, now=None):
+    now = now or datetime.now(TZ)
+    raw_until = cat.get("role_quest_hunger_pause_until")
+    if not raw_until:
+        return None
+
+    try:
+        until = datetime.fromisoformat(raw_until)
+    except Exception:
+        cat["role_quest_hunger_pause_until"] = None
+        return None
+
+    if until <= now:
+        cat["last_hunger_update"] = until.isoformat()
+        cat["role_quest_hunger_pause_until"] = None
+        return None
+
+    return until
+
+
+def role_quest_bonus_summary(cat):
+    bonuses = []
+
+    hunting_bonus = get_role_quest_hunting_modifier(cat)
+    if hunting_bonus:
+        bonuses.append(
+            f"{format_modifier(hunting_bonus)} hunting rolls for the remainder of Moon {data.get('moon', 0)}"
+        )
+
+    try:
+        injury_charges = int(cat.get("role_quest_injury_reduction_charges", 0) or 0)
+    except (TypeError, ValueError):
+        injury_charges = 0
+    if injury_charges > 0:
+        charge_word = "use" if injury_charges == 1 else "uses"
+        bonuses.append(f"-1 severity on the next injury/illness ({injury_charges} {charge_word} saved)")
+
+    pause_until = role_quest_hunger_pause_remaining(cat)
+    if pause_until:
+        bonuses.append(f"hunger decay paused until {discord_expiry_timestamp(pause_until)}")
+
+    return "; ".join(bonuses) if bonuses else "None"
+
+
+# ─────────────────────────────
 # HUNGER / FEEDING SYSTEM
 # ─────────────────────────────
 
@@ -2708,6 +2836,12 @@ def update_hunger_decay(cat):
 
     # NPCs still have a stored hunger value for compatibility, but it never decays.
     if bool(cat.get("is_npc", False)):
+        cat["hunger_level"] = hunger
+        return hunger
+
+    # A role-specific quest can temporarily pause hunger decay without changing
+    # staff-managed freeze settings.
+    if role_quest_hunger_pause_remaining(cat, now):
         cat["hunger_level"] = hunger
         return hunger
 
@@ -5974,6 +6108,100 @@ async def trigger_northern_lights(manual=False):
     return True
 
 # ─────────────────────────────
+# RULES VERIFICATION / ONBOARDING
+# ─────────────────────────────
+
+async def get_rules_guild():
+    if len(bot.guilds) == 1:
+        return bot.guilds[0]
+    for guild in bot.guilds:
+        if guild.get_role(MEMBER_ROLE_ID) and guild.get_role(NEW_MEMBER_ROLE_ID):
+            return guild
+    return None
+
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.message_id != RULES_VERIFICATION_MESSAGE_ID or str(payload.emoji) != "✅":
+        return
+    if payload.user_id == getattr(bot.user, "id", None):
+        return
+    guild = bot.get_guild(payload.guild_id) if payload.guild_id else None
+    if guild is None:
+        return
+    member = payload.member or await fetch_member_by_id(guild, payload.user_id)
+    if member is None or member.bot:
+        return
+    member_role = guild.get_role(MEMBER_ROLE_ID)
+    if member_role is None:
+        print("Rules verification failed: Member role could not be found.")
+        return
+    # Existing verified members do not change when they react.
+    if member_role in member.roles:
+        return
+    try:
+        await member.add_roles(member_role, reason="Member accepted the Echostone Mountain rules via the verification reaction.")
+        print(f"Rules verification: added Member role to {member} ({member.id}).")
+    except discord.Forbidden:
+        print("Rules verification failed: bot lacks permission or role hierarchy to add the Member role.")
+    except discord.HTTPException as error:
+        print(f"Rules verification failed for {member.id}: {error}")
+
+
+@tasks.loop(hours=12)
+async def check_rules_onboarding():
+    guild = await get_rules_guild()
+    if guild is None:
+        return
+    member_role = guild.get_role(MEMBER_ROLE_ID)
+    new_member_role = guild.get_role(NEW_MEMBER_ROLE_ID)
+    if member_role is None or new_member_role is None:
+        return
+
+    rules_channel = bot.get_channel(RULES_CHANNEL_ID)
+    if rules_channel is None:
+        try:
+            rules_channel = await bot.fetch_channel(RULES_CHANNEL_ID)
+        except Exception:
+            rules_channel = None
+
+    now = datetime.now(TZ)
+    changed = False
+    async with data_lock:
+        reminders = data.setdefault("rules_onboarding_reminders", {})
+        async for member in iter_fetch_guild_members(guild):
+            if member.bot or new_member_role not in member.roles or member.joined_at is None:
+                continue
+            joined_at = member.joined_at.astimezone(TZ)
+            days_in_server = (now.date() - joined_at.date()).days
+            user_key = str(member.id)
+            record = reminders.setdefault(user_key, {})
+
+            if days_in_server >= RULES_REMINDER_AFTER_DAYS and days_in_server < NEW_MEMBER_ROLE_REMOVE_AFTER_DAYS and member_role not in member.roles and not record.get("three_day_reminder_sent"):
+                if rules_channel:
+                    try:
+                        await rules_channel.send(f"{member.mention} please read the server rules and react with ✅ to verify: {RULES_LINK}")
+                        record["three_day_reminder_sent"] = True
+                        record["three_day_reminder_sent_at"] = now.isoformat()
+                        changed = True
+                    except discord.HTTPException as error:
+                        print(f"Could not send rules reminder for {member.id}: {error}")
+
+            if days_in_server >= NEW_MEMBER_ROLE_REMOVE_AFTER_DAYS:
+                try:
+                    await member.remove_roles(new_member_role, reason="7-day Echostone onboarding period completed.")
+                    record["new_member_role_removed_at"] = now.isoformat()
+                    changed = True
+                except discord.Forbidden:
+                    print("Rules onboarding failed: bot lacks permission or role hierarchy to remove the New Member role.")
+                except discord.HTTPException as error:
+                    print(f"Could not remove New Member role from {member.id}: {error}")
+
+        if changed:
+            save_data(data)
+
+
+# ─────────────────────────────
 # READY + ERROR HANDLING
 # ─────────────────────────────
 
@@ -6001,6 +6229,27 @@ async def on_ready():
     except Exception as error:
         print(f"Monthly quest schedule migration failed: {error}")
 
+    # Apply the Aug. 28 quest updates to already-active quests instead of waiting
+    # until the next first-of-the-month reset.
+    try:
+        async with data_lock:
+            broadened_quests = broaden_current_hunting_quests_once()
+            rollout_role_quest = ensure_role_quest_rollout_once()
+            if broadened_quests or rollout_role_quest:
+                save_data(data)
+
+        quest_channel = bot.get_channel(QUEST_CHANNEL_ID)
+        if quest_channel and broadened_quests:
+            lines = ["🎯 **Hunting Quest Update**", "Active hunting quests have been broadened so they no longer depend on one exact prey species spawning.", ""]
+            for group, old_title, new_quest in broadened_quests:
+                lines.extend([clan_mention(group), f"~~{old_title}~~ → **{new_quest.get('title', 'Broad Hunting Quest')}**", new_quest.get("objective", ""), ""])
+            await send_long_message(quest_channel, "\n".join(lines))
+
+        if quest_channel and rollout_role_quest:
+            await send_long_message(quest_channel, "🌟 **New Optional Role-Specific Quest!**\n\n" + format_role_quest_block(rollout_role_quest))
+    except Exception as error:
+        print(f"Aug. 28 quest update migration failed: {error}")
+
     if not monthly_quest_report.is_running():
         monthly_quest_report.start()
 
@@ -6015,6 +6264,9 @@ async def on_ready():
 
     if not check_activity_reminders.is_running():
         check_activity_reminders.start()
+
+    if not check_rules_onboarding.is_running():
+        check_rules_onboarding.start()
 
     try:
         await asyncio.wait_for(
@@ -6328,13 +6580,14 @@ async def botinfo(interaction: discord.Interaction):
 
         "📜 **Quest / Gathering Commands**\n"
         "`/quest force` — Quest manager only. Clear and force-post replacement quests while keeping the monthly first-of-the-month schedule\n"
-        "`/quest complete [Clan]` — Staff only. Mark a Clan or Outsider quest/event as complete and post the reward\n`/resetquest [Clan/Outsider/All]` — Staff only. Replace one or all active quests/events while keeping the current due date\n"
+        "`/quest complete [Clan]` — Staff only. Mark a Clan or Outsider quest/event as complete and post the reward\n`/quest role` — View the current optional role-specific quest\n`/quest rolecomplete [Cat]` — Staff only. Complete the role quest with an eligible OC and award a random personal bonus\n`/quest rolereroll` — Staff only. Replace the current optional role quest\n`/resetquest [Clan/Outsider/All]` — Staff only. Replace one or all active quests/events while keeping the current due date\n"
         "`/gatheringreport [ClanName]` — Generate a Clan-specific report including recent promotions, deaths, injuries, quest results, and major story changes\n"
         "`/rollhelp` — Helps calculate whether an OC caught their prey using their roll, modifiers, and required hunting number\n\n"
 
         "🐾 **General Member Commands**\n"
         "`/catinfo [Name]` — View full details about a cat\n"
-        "`/oclist [User]` — View OCs grouped by player, or search one player's living and deceased OCs\n"
+        "`/oclist [User]` — Public OC list grouped by player, including each living OC's hunger\n"
+        "`/ocowner [Cat]` — Find which Discord user owns a specific OC\n"
         "`/cats [Clan]` — View all cats by clan or all clans\n"
         "`/clan [ClanName]` — View one clan roster\n"
         "`/cattinder [Name] [Clan]` — Find age-appropriate romance options\n"
@@ -8649,6 +8902,18 @@ async def injury_add(
 
         injury_moon = moon if moon is not None else data.get("moon", 0)
 
+        original_severity = severity
+        role_quest_reduction_applied = False
+        try:
+            saved_reductions = int(cat.get("role_quest_injury_reduction_charges", 0) or 0)
+        except (TypeError, ValueError):
+            saved_reductions = 0
+
+        if saved_reductions > 0:
+            severity = max(1, severity - 1)
+            cat["role_quest_injury_reduction_charges"] = saved_reductions - 1
+            role_quest_reduction_applied = severity < original_severity
+
         cat["injury"] = {
             "type": injury,
             "severity": severity,
@@ -8659,10 +8924,15 @@ async def injury_add(
         add_history(cat, f"Injured/ill: {injury} | Severity {severity}/10 | Moon {injury_moon}")
         save_data(data)
 
+    reduction_note = ""
+    if role_quest_reduction_applied:
+        reduction_note = f"\n🌟 Role Quest reward applied: severity reduced from **{original_severity}** to **{severity}**."
+
     await interaction.response.send_message(
         f"🩹 **{name}** now has **{injury}**.\n"
         f"Severity: **{severity}/10, {severity_label(severity)}**\n"
         f"Injury Moon: **Moon {injury_moon}**"
+        f"{reduction_note}"
     )
 
 
@@ -10419,6 +10689,9 @@ def reset_legacy_quest_data_if_needed():
     data.setdefault("quest_history_v2", [])
     data.setdefault("quest_reminders_sent_v2", {})
     data.setdefault("last_quest_categories_v2", {})
+    data.setdefault("active_role_quest", None)
+    data.setdefault("role_quest_history", [])
+    data.setdefault("used_role_quests", [])
 
     if data.get("quest_system_version") == QUEST_SYSTEM_VERSION:
         ensure_quest_category_tracking()
@@ -10633,6 +10906,22 @@ def make_quest_id(group, category, number):
     return f"{group.lower().replace(' ', '-')}-{category}-{number:02d}"
 
 
+def broad_hunting_target(site):
+    """Turn species-specific prey into broad goals that are less dependent on prey-bot RNG."""
+    prey = str(site.get("prey", "")).casefold()
+    bonus = str(site.get("bonus", "")).casefold()
+    combined = f"{prey} {bonus}"
+
+    bird_words = ["bird", "sparrow", "pigeon", "ptarmigan", "gull", "duck"]
+    fish_words = ["fish", "trout", "perch", "minnow"]
+
+    if any(word in combined for word in bird_words):
+        return "birds"
+    if any(word in combined for word in fish_words):
+        return "fish"
+    return "small prey"
+
+
 def hunting_reward_for(group, amount, target):
     modifier = 2 if amount >= 5 else 1
     reward_text = f"If completed, {group} earns **{format_modifier(modifier)} to all {target} hunting rolls** for the next 2 real-life weeks."
@@ -10656,25 +10945,30 @@ def build_quest_database():
             "wild_attack": []
         }
 
-        hunt_amounts = [3, 3, 4, 4, 5, 6, 3, 4, 5, 3, 4, 6]
+        # Hunting goals intentionally use broad prey categories instead of exact
+        # species. This keeps the monthly quest attainable even when the separate
+        # prey-trigger bot does not happen to spawn one specific animal.
+        hunt_amounts = [3, 4, 3, 4, 3, 4, 3, 4, 3, 4, 3, 4]
         for index, style_title in enumerate(HUNTING_SCENARIOS):
             site = lore["sites"][index % len(lore["sites"])]
             amount = hunt_amounts[index % len(hunt_amounts)]
-            reward_text, failure_text, effect, penalty = hunting_reward_for(group, amount, site["bonus"])
+            broad_target = broad_hunting_target(site)
+            reward_text, failure_text, effect, penalty = hunting_reward_for(group, amount, broad_target)
 
             quest_db[group]["hunting"].append({
                 "id": make_quest_id(group, "hunting", index + 1),
                 "category": "hunting",
-                "title": f"{style_title}: Catch {amount} {site['prey'].title()}",
-                "objective": f"Catch **{amount} {site['prey']}** at **{site['name']}**.",
+                "broad_hunting": True,
+                "title": f"{style_title}: Catch {amount} {broad_target.title()}",
+                "objective": f"Catch **{amount} {broad_target}** at **{site['name']}**. Any prey that fits the category counts.",
                 "description": (
                     f"Travel to **{site['name']}** ({site['channel']}) where {site['danger']} make the patrol feel alive. "
-                    f"This is meant to be attainable, so the goal stays small and focused: a quick hunt, a mentor lesson, or a compact fresh-kill pile scene."
+                    f"The prey goal is deliberately broad so the patrol can use whatever fitting prey actually appears instead of waiting on one exact species."
                 ),
                 "reward_text": reward_text,
                 "failure_text": failure_text,
-                "success_result": f"For the next **2 real-life weeks**, {group} gets **{format_modifier(effect['modifier'])} to all {site['bonus']} hunting rolls**.",
-                "failure_result": f"For the next **2 real-life weeks**, {group} has **-1 to all {site['bonus']} hunting rolls** because the failed hunt scattered prey signs.",
+                "success_result": f"For the next **2 real-life weeks**, {group} gets **{format_modifier(effect['modifier'])} to all {broad_target} hunting rolls**.",
+                "failure_result": f"For the next **2 real-life weeks**, {group} has **-1 to all {broad_target} hunting rolls** because the failed hunt scattered prey signs.",
                 "effect": effect,
                 "penalty": penalty
             })
@@ -10974,6 +11268,128 @@ def complete_pending_failures():
     return failed_results
 
 
+ROLE_QUEST_PROMPTS = [
+    {"id": "kit-mossball", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Moss-Ball Mayhem", "objective": "Start a game of moss-ball and convince at least one other Clanmate to join in."},
+    {"id": "kit-story", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Story Seeker", "objective": "Ask an older Clanmate for a story, legend, or embarrassing tale from their younger moons."},
+    {"id": "kit-helper", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Tiny Helper", "objective": "Try to help with a harmless camp chore, even if the grown cats have to supervise."},
+    {"id": "kit-den-game", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Nursery Game", "objective": "Invent a new game in camp and teach the rules to another cat."},
+    {"id": "app-moss", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Fresh Moss Run", "objective": "Gather fresh moss or bedding for a Clan den and bring it back to camp."},
+    {"id": "app-lesson", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Ask for a Lesson", "objective": "Ask a mentor or experienced warrior to teach or review one useful Clan skill in RP."},
+    {"id": "app-elder", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Elder Errand", "objective": "Help an Elder with prey, bedding, grooming, or another small everyday task."},
+    {"id": "app-practice", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Practice Makes Progress", "objective": "Roleplay a short training session focused on hunting, tracking, climbing, swimming, or battle practice."},
+    {"id": "warrior-border", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Mark the Borders", "objective": "Take part in a border patrol and refresh at least one stretch of scent markers."},
+    {"id": "warrior-checkin", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Clanmate Check-In", "objective": "Notice a Clanmate who is alone, stressed, or bored and start a meaningful conversation with them."},
+    {"id": "warrior-den", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Camp Upkeep", "objective": "Repair, clean, reinforce, or gather materials for one of the Clan's dens."},
+    {"id": "warrior-share", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Share the Catch", "objective": "Bring prey back to camp and deliberately share a meal or conversation with another Clanmate."},
+    {"id": "elder-gossip", "role": "Elders", "eligible_ranks": ["Elder"], "title": "A Little Clan Gossip", "objective": "Start a harmless gossip session, dramatic retelling, or opinionated conversation about recent Clan life."},
+    {"id": "elder-story", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Old Story, New Ears", "objective": "Tell a younger cat a story from the past, whether it is wise, ridiculous, or suspiciously exaggerated."},
+    {"id": "elder-advice", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Unsolicited Wisdom", "objective": "Give a younger Clanmate advice about something they are dealing with, useful or otherwise."},
+    {"id": "elder-gamejudge", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Official Judge", "objective": "Get roped into judging a kit or apprentice game, contest, story, or petty disagreement."},
+    {"id": "med-sort", "role": "Medicine Team", "eligible_ranks": ["Medicine Cat", "Medicine Cat Apprentice", "Healer"], "title": "Herb Shelf Check", "objective": "Sort, count, replace, or discuss the condition of the Clan's herb stores."},
+    {"id": "med-checkup", "role": "Medicine Team", "eligible_ranks": ["Medicine Cat", "Medicine Cat Apprentice", "Healer"], "title": "Routine Check-In", "objective": "Check on a Clanmate's health, recovery, stress, or general wellbeing in a casual medical RP."},
+    {"id": "med-teach", "role": "Medicine Team", "eligible_ranks": ["Medicine Cat", "Medicine Cat Apprentice", "Healer"], "title": "Teach One Herb", "objective": "Teach another cat one useful herb fact, treatment tip, or piece of medical knowledge."},
+    {"id": "med-moss", "role": "Medicine Team", "eligible_ranks": ["Medicine Cat", "Medicine Cat Apprentice", "Healer"], "title": "Medicine Den Refresh", "objective": "Refresh moss, nests, water, cobwebs, or another basic medicine-den supply."},
+    {"id": "lead-patrol", "role": "Leadership", "eligible_ranks": ["Leader", "Deputy"], "title": "Patrol Planning", "objective": "Roleplay assigning, discussing, or adjusting a patrol based on what the Clan currently needs."},
+    {"id": "lead-checkin", "role": "Leadership", "eligible_ranks": ["Leader", "Deputy"], "title": "Open Ears", "objective": "Check in with a Clanmate you do not usually speak to and hear what is on their mind."},
+    {"id": "lead-camp", "role": "Leadership", "eligible_ranks": ["Leader", "Deputy"], "title": "Camp Walkthrough", "objective": "Inspect camp, notice one small problem, and talk with another cat about fixing or improving it."},
+    {"id": "mid-teach", "role": "Midranks", "eligible_ranks": ["Preymaster", "Pathfinder", "Digger", "Sporekeeper", "River Guardian"], "title": "Pass It On", "objective": "Use your specialty in RP to teach, advise, or demonstrate something to another Clanmate."},
+    {"id": "mid-duty", "role": "Midranks", "eligible_ranks": ["Preymaster", "Pathfinder", "Digger", "Sporekeeper", "River Guardian"], "title": "Specialist Duty", "objective": "Complete a casual scene centered on your midrank's normal Clan responsibility."},
+    {"id": "mid-help", "role": "Midranks", "eligible_ranks": ["Preymaster", "Pathfinder", "Digger", "Sporekeeper", "River Guardian"], "title": "Specialist Assist", "objective": "Use your role's skills to help another patrol or Clanmate with a small everyday problem."},
+    {"id": "nursery-bedding", "role": "Queens and Den Dads", "eligible_ranks": ["Queen", "Den Dad"], "title": "Nest Refresh", "objective": "Refresh nursery bedding or organize a small nursery chore while interacting with another cat."},
+    {"id": "nursery-entertain", "role": "Queens and Den Dads", "eligible_ranks": ["Queen", "Den Dad"], "title": "Keep Them Busy", "objective": "Entertain, distract, teach, or settle a restless kit in a casual nursery scene."},
+    {"id": "nursery-checkin", "role": "Queens and Den Dads", "eligible_ranks": ["Queen", "Den Dad"], "title": "Nursery Check-In", "objective": "Share a quiet conversation with another nursery cat about kits, Clan life, or how everyone is coping."}
+]
+
+ROLE_QUEST_REWARDS = ["full_hunger", "hunting_bonus", "injury_reduction", "hunger_pause"]
+
+
+def select_new_role_quest(due_at=None):
+    data.setdefault("used_role_quests", [])
+    used = set(data["used_role_quests"])
+    available = [quest for quest in ROLE_QUEST_PROMPTS if quest["id"] not in used]
+    if not available:
+        data["used_role_quests"] = []
+        available = ROLE_QUEST_PROMPTS.copy()
+
+    quest = copy.deepcopy(random.choice(available))
+    data["used_role_quests"].append(quest["id"])
+    issued_at = datetime.now(TZ)
+    due_at = due_at or next_regular_quest_cycle(issued_at)
+    quest.update({"status": "Pending", "issued_at": issued_at.isoformat(), "due_at": due_at.isoformat()})
+    return quest
+
+
+def archive_active_role_quest(reason="Expired"):
+    data.setdefault("role_quest_history", [])
+    active = data.get("active_role_quest")
+    if not active or active.get("status") == "Completed":
+        # Completed role quests are already added to history when staff completes them.
+        return
+    archived = copy.deepcopy(active)
+    archived["status"] = reason
+    archived["ended_at"] = datetime.now(TZ).isoformat()
+    archived["result"] = "No penalty. Role-specific quests are always optional."
+    data["role_quest_history"].append(archived)
+    data["role_quest_history"] = data["role_quest_history"][-40:]
+
+
+def format_role_quest_block(quest):
+    if not quest:
+        return ""
+    ranks = ", ".join(quest.get("eligible_ranks", []))
+    return "\n".join([
+        "━━━━━━━━━━━━━━━",
+        "🌟 **OPTIONAL ROLE-SPECIFIC QUEST**",
+        f"### {quest.get('role', 'Clan Cats')}: {quest.get('title', 'Role Quest')}",
+        f"**Eligible ranks:** {ranks}",
+        quest.get("objective", "Complete a casual Clan-life RP prompt."),
+        "",
+        "Any eligible living OC from **any Clan** may complete this quest.",
+        "🎁 **Reward:** The OC who completes it receives one random small personal bonus.",
+        "✅ Possible bonuses: hunger set to **Full**, **+2 hunting** for the remainder of the current moon, **-1 severity** on their next injury/illness, or **7 days with hunger decay paused**.",
+        "💚 **Optional:** Nothing bad happens if nobody completes this quest."
+    ])
+
+
+def role_quest_cat_is_eligible(cat, quest):
+    if str(cat.get("status", "Alive")).casefold() == "dead":
+        return False
+    if cat.get("clan") not in CLAN_NAMES_ONLY:
+        return False
+    return cat.get("rank") in set(quest.get("eligible_ranks", []))
+
+
+def apply_role_quest_reward(cat_name, cat, quest):
+    reward = random.choice(ROLE_QUEST_REWARDS)
+    now = datetime.now(TZ)
+    if reward == "full_hunger":
+        old_hunger = get_hunger_status(cat)
+        cat["hunger_level"] = "Full"
+        cat["last_fed"] = now.isoformat()
+        cat["last_hunger_update"] = now.isoformat()
+        text = f"🍽️ **Full Belly:** {cat_name}'s hunger was set from **{old_hunger}** to **Full**."
+    elif reward == "hunting_bonus":
+        cat["role_quest_hunting_bonus"] = {"modifier": 2, "moon": int(data.get("moon", 0)), "source": quest.get("title", "Role Quest")}
+        text = f"🎯 **Hunter's Edge:** {cat_name} gets **+2 to hunting rolls** for the remainder of **Moon {data.get('moon', 0)}**."
+    elif reward == "injury_reduction":
+        try:
+            charges = int(cat.get("role_quest_injury_reduction_charges", 0) or 0)
+        except (TypeError, ValueError):
+            charges = 0
+        cat["role_quest_injury_reduction_charges"] = charges + 1
+        text = f"🩹 **Protective Luck:** The next injury or illness {cat_name} receives is automatically **1 severity lower** (minimum 1)."
+    else:
+        pause_until = now + timedelta(days=7)
+        existing_until = role_quest_hunger_pause_remaining(cat, now)
+        if existing_until and existing_until > pause_until:
+            pause_until = existing_until
+        cat["role_quest_hunger_pause_until"] = pause_until.isoformat()
+        text = f"🌙 **Rested Stomach:** {cat_name}'s hunger decay is paused for **7 days**, until {discord_expiry_timestamp(pause_until)}."
+
+    add_history(cat, f"Completed optional role quest: {quest.get('title', 'Role Quest')}")
+    return text
+
+
 def format_quest_block(group, quest):
     category = quest.get("category", "quest")
     icon = QUEST_CATEGORY_ICONS.get(category, "📜")
@@ -11069,6 +11485,13 @@ def build_quest_announcement(due_at=None, apply_failures=True, forced=False, ski
         data["active_quests_v2"][group] = quest
         lines.append(format_quest_block(group, quest))
 
+    # One optional role-specific prompt runs alongside the monthly group quests.
+    # It never creates a failure consequence if nobody completes it.
+    archive_active_role_quest("Cleared" if forced else "Expired")
+    role_quest = select_new_role_quest(due_at)
+    data["active_role_quest"] = role_quest
+    lines.extend(["", format_role_quest_block(role_quest)])
+
     return "\n".join(lines)
 
 
@@ -11096,6 +11519,10 @@ def build_quest_reminder(days_remaining):
             quest.get("objective", "Complete the current quest."),
             ""
         ])
+
+    role_quest = data.get("active_role_quest")
+    if role_quest and role_quest.get("status") == "Pending":
+        lines.extend(["", format_role_quest_block(role_quest), ""])
 
     return "\n".join(lines)
 
@@ -11184,6 +11611,46 @@ def next_regular_quest_cycle(after_time):
         QUEST_SCHEDULE_MINUTE,
         tzinfo=TZ
     )
+
+
+def broaden_current_hunting_quests_once():
+    """Replace already-active species-specific hunting quests with broad equivalents once."""
+    if data.get("broad_hunting_quest_migration_v1"):
+        return []
+    reset_legacy_quest_data_if_needed()
+    changed = []
+    for group, old_quest in list(data.get("active_quests_v2", {}).items()):
+        if not old_quest or old_quest.get("status") != "Pending":
+            continue
+        if old_quest.get("category") != "hunting" or old_quest.get("broad_hunting"):
+            continue
+        due_at = old_quest.get("due_at")
+        issued_at = old_quest.get("issued_at")
+        old_title = old_quest.get("title", "Old Hunting Quest")
+        new_quest = select_new_quest(group, preferred_category="hunting")
+        if due_at:
+            new_quest["due_at"] = due_at
+        if issued_at:
+            new_quest["issued_at"] = issued_at
+        new_quest["migrated_from"] = old_title
+        data["active_quests_v2"][group] = new_quest
+        changed.append((group, old_title, copy.deepcopy(new_quest)))
+    data["broad_hunting_quest_migration_v1"] = True
+    return changed
+
+
+def ensure_role_quest_rollout_once():
+    """Introduce the optional role quest immediately after this update, even mid-month."""
+    if data.get("role_quest_rollout_v1"):
+        return None
+    reset_legacy_quest_data_if_needed()
+    data["role_quest_rollout_v1"] = True
+    if data.get("active_role_quest"):
+        return None
+    due_at = get_current_quest_cycle_due_at()
+    quest = select_new_role_quest(due_at)
+    data["active_role_quest"] = quest
+    return copy.deepcopy(quest)
 
 
 async def migrate_active_quests_to_monthly_schedule():
@@ -11361,6 +11828,83 @@ async def quest_complete(
             "Quest channel not found. The quest was saved as complete, but no announcement was posted.",
             ephemeral=True
         )
+
+
+@quest_group.command(name="role", description="View the current optional role-specific quest")
+async def quest_role_view(interaction: discord.Interaction):
+    async with data_lock:
+        reset_legacy_quest_data_if_needed()
+        quest = copy.deepcopy(data.get("active_role_quest"))
+    if not quest:
+        await interaction.response.send_message("🌟 There is no active role-specific quest right now.")
+        return
+    lines = [format_role_quest_block(quest), "", f"**Status:** {quest.get('status', 'Pending')}"]
+    if quest.get("completed_by"):
+        lines.append(f"**Completed by:** {quest['completed_by']}")
+    if quest.get("reward_result"):
+        lines.append(f"**Reward:** {quest['reward_result']}")
+    await interaction.response.send_message("\n".join(lines)[:1900])
+
+
+@quest_group.command(name="rolecomplete", description="Staff only. Complete the optional role quest with one eligible OC")
+@app_commands.describe(cat_name="Eligible OC who completed the role-specific quest")
+async def quest_role_complete(interaction: discord.Interaction, cat_name: str):
+    if not await staff_command_check(interaction):
+        return
+    async with data_lock:
+        reset_legacy_quest_data_if_needed()
+        quest = data.get("active_role_quest")
+        if not quest:
+            await interaction.response.send_message("❌ There is no active role-specific quest.", ephemeral=True)
+            return
+        if quest.get("status") == "Completed":
+            await interaction.response.send_message(f"❌ This role quest was already completed by **{quest.get('completed_by', 'another OC')}**.", ephemeral=True)
+            return
+        resolved_name = resolve_cat_name_casefold(cat_name)
+        if not resolved_name:
+            await interaction.response.send_message(f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
+            return
+        cat = data["cats"][resolved_name]
+        prepare_cat_record(resolved_name, cat)
+        if bool(cat.get("is_npc", False)):
+            await interaction.response.send_message("❌ Role-specific quest rewards are for player OCs, not NPCs.", ephemeral=True)
+            return
+        if not role_quest_cat_is_eligible(cat, quest):
+            eligible = ", ".join(quest.get("eligible_ranks", []))
+            await interaction.response.send_message(f"❌ **{resolved_name}** is not eligible for this quest. Eligible ranks: **{eligible}** from any Clan.", ephemeral=True)
+            return
+        reward_text = apply_role_quest_reward(resolved_name, cat, quest)
+        quest["status"] = "Completed"
+        quest["completed_at"] = datetime.now(TZ).isoformat()
+        quest["completed_by"] = resolved_name
+        quest["completed_by_owner_id"] = oc_owner_id(cat)
+        quest["reward_result"] = reward_text
+        data["active_role_quest"] = quest
+        data.setdefault("role_quest_history", []).append(copy.deepcopy(quest))
+        data["role_quest_history"] = data["role_quest_history"][-40:]
+        save_data(data)
+
+    channel = bot.get_channel(QUEST_CHANNEL_ID)
+    if channel:
+        await send_long_message(channel, "🌟 **Role-Specific Quest Complete!**\n\n" + f"**{resolved_name}** completed **{quest.get('title', 'the role quest')}**.\n🎁 {reward_text}")
+    await interaction.response.send_message(f"✅ Marked the role quest complete for **{resolved_name}** and applied their random bonus.", ephemeral=True)
+
+
+@quest_group.command(name="rolereroll", description="Staff only. Replace the optional role-specific quest with a new one")
+async def quest_role_reroll(interaction: discord.Interaction):
+    if not await staff_command_check(interaction):
+        return
+    async with data_lock:
+        reset_legacy_quest_data_if_needed()
+        due_at = get_current_quest_cycle_due_at()
+        archive_active_role_quest("Replaced")
+        quest = select_new_role_quest(due_at)
+        data["active_role_quest"] = quest
+        save_data(data)
+    channel = bot.get_channel(QUEST_CHANNEL_ID)
+    if channel:
+        await send_long_message(channel, "🔄 **Role Quest Rerolled**\n\n" + format_role_quest_block(quest))
+    await interaction.response.send_message("✅ Posted a new optional role-specific quest.", ephemeral=True)
 
 
 RESET_QUEST_CHOICES = [
@@ -12066,6 +12610,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
         apprentices_text = format_apprentices_display(cat)
         injury_text = format_injury(cat)
         hunger_text = format_hunger_status(cat)
+        role_bonus_text = role_quest_bonus_summary(cat)
 
         age_text = f"{cat.get('age', 0)} moons"
         age_freeze_text = freeze_remaining_text(cat, "freeze_age", "freeze_age_until")
@@ -12120,6 +12665,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
             f"**Status**: {status}\n"
             f"**Current Health**: {injury_text}\n"
             f"**Hunger**: {hunger_text}\n"
+            f"**Role Quest Bonus**: {role_bonus_text}\n"
             f"**Mentor**: {mentor}\n"
             f"**Apprentices**: {apprentices_text}\n"
             f"**Afterlife**: {afterlife}\n\n"
@@ -12780,7 +13326,9 @@ async def bothelp(interaction: discord.Interaction):
         "📘 **ECHOSTONE MOUNTAIN BOT HELP** 📘\n\n"
 
                 "🐾 **General Member Commands**\n"
-        "`/catinfo [Name]` — View full details about a cat, including hunger status\n"
+        "`/catinfo [Name]` — View full details about a cat, including hunger and active role-quest bonuses\n"
+        "`/oclist [User]` — Publicly view a player's OCs and each living OC's hunger\n"
+        "`/ocowner [Cat]` — Find which player owns a specific OC\n"
         "`/cats [Clan]` — View all cats by clan or all clans\n"
         "`/clan [ClanName]` — View one clan roster\n"
         "`/cattinder [Name] [Clan]` — Find age-appropriate romance options\n"
@@ -12801,7 +13349,8 @@ async def bothelp(interaction: discord.Interaction):
         "Severe weather rolls on Mondays at 4 PM Toronto time. Primary disaster effects last 7 days unless staff sets a different duration.\n\n"
 
         "📜 **Quest / Story Commands**\n"
-        "Current quests/events post on the 1st of every month at 9 AM and stay active until the next month. Reminders post with 14 days, 7 days, and 3 days remaining. The pool rolls 35% hunting, 20% social, 20% herb patrol, 10% sickness/crisis, and 15% wild animal events.\n"
+        "Current quests/events post on the 1st of every month at 9 AM and stay active until the next month. Hunting objectives use broad prey categories such as birds, fish, or small prey. Reminders post with 14 days, 7 days, and 3 days remaining. The pool rolls 35% hunting, 20% social, 20% herb patrol, 10% sickness/crisis, and 15% wild animal events.\n"
+        "One optional role-specific quest also runs alongside the monthly quests. It can be completed by one eligible OC from any Clan for a small personal bonus, and there is no penalty if nobody completes it. Use `/quest role` to view it.\n"
         "`/gatheringreport [ClanName]` — View recent story updates, quest results, injuries, rank changes, and major events for a specific Clan.\n"
         "`/rollhelp` — Helps calculate whether an OC caught their prey by adding the roll, prey modifier, specialty prey bonus, weather modifier, quest modifier, hunger modifier, and any other modifier against the OC’s required hunting number.\n\n"
 
