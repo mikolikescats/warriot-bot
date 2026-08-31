@@ -3,7 +3,8 @@ import json
 import random
 import asyncio
 import copy
-from datetime import datetime, time, timedelta
+import calendar
+from datetime import datetime, date, time, timedelta
 from zoneinfo import ZoneInfo
 from threading import Thread
 
@@ -268,6 +269,38 @@ MEDICAL_ROLE_IDS = {
 }
 
 # ─────────────────────────────
+# GATHERING SCHEDULE SETTINGS
+# ─────────────────────────────
+
+# Both automated Gathering systems post in the main report/world channel.
+# Discord Scheduled Events require a specific start time, so Gatherings begin
+# at 7 PM Toronto time. The full Clan Gathering remains open until Monday at
+# 11 PM; the Medicine Cat Gathering is a single-evening event ending at 11 PM.
+GATHERING_CHANNEL_ID = REPORT_CHANNEL_ID
+MEDICINE_GATHERING_CHANNEL_ID = REPORT_CHANNEL_ID
+GATHERING_START_HOUR = 19
+GATHERING_START_MINUTE = 0
+GATHERING_END_HOUR = 23
+MEDICINE_GATHERING_END_HOUR = 23
+GATHERING_VOTE_LEAD_DAYS = 7
+GATHERING_VOTE_DURATION_DAYS = 3
+GATHERING_REMINDER_LEAD_DAYS = 1
+STARCLAN_GATHERING_VOLUNTEER_ROLE_ID = 1543789507155861515
+
+GATHERING_DESCRIPTION = (
+    "The full moon rises once more, and cats from every corner of the territories gather beneath the stars "
+    "to share the latest news. Leaders will speak of recent events, victories, troubles, and anything their "
+    "Clans wish to bring to light. Whether you come to listen quietly, trade words with old friends, or stir "
+    "up trouble among rivals, all are welcome at the Gathering."
+)
+
+MEDICINE_GATHERING_DESCRIPTION = (
+    "Medicine cats and medicine cat apprentices gather beneath the moon to exchange news, share knowledge, "
+    "and seek the guidance of StarClan. StarClan cats whose players volunteer may appear in spirit to speak "
+    "with the living medicine cats and apprentices."
+)
+
+# ─────────────────────────────
 # CLANS, RANKS, AND CHOICES
 # ─────────────────────────────
 
@@ -491,10 +524,19 @@ def fresh_default_data():
         "last_moon_snapshot": None,
         "rules_onboarding_reminders": {},
         "active_role_quest": None,
+        "active_role_quests": [],
         "role_quest_history": [],
         "used_role_quests": [],
+        "used_role_quest_roles": [],
+        "used_role_quests_by_role": {},
         "role_quest_rollout_v1": False,
-        "broad_hunting_quest_migration_v1": False
+        "broad_hunting_quest_migration_v1": False,
+        "gathering_cycles": {},
+        "medicine_gathering_cycles": {},
+        "gathering_history": [],
+        "medicine_gathering_history": [],
+        "last_gathering_skipped": None,
+        "last_medicine_gathering_skipped": None
     }
 
 
@@ -1274,6 +1316,20 @@ def prepare_cat_record(name, cat):
     cat.setdefault("role_quest_hunting_bonus", None)
     cat.setdefault("role_quest_injury_reduction_charges", 0)
     cat.setdefault("role_quest_hunger_pause_until", None)
+    cat.setdefault("role_quest_lucky_paw_charges", 0)
+    cat.setdefault("role_quest_well_rested_charges", 0)
+    cat.setdefault("role_quest_starclan_luck_charges", 0)
+    cat.setdefault("role_quest_collectibles", [])
+    cat.setdefault("role_quest_bonus_catches", [])
+    cat.setdefault("role_quest_nest_upgrades", [])
+    cat.setdefault("role_quest_secret_spots", [])
+    cat.setdefault("role_quest_connection_tokens", 0)
+    cat.setdefault("role_quest_skill_progress", {})
+    cat.setdefault("role_quest_title", None)
+    cat.setdefault("role_quest_streak", 0)
+    cat.setdefault("role_quest_total_completed", 0)
+    cat.setdefault("role_quest_streak_milestones", [])
+    cat.setdefault("role_quest_accomplishments", [])
     normalize_permanent_conditions(cat)
 
 
@@ -2756,6 +2812,19 @@ def role_quest_hunger_pause_remaining(cat, now=None):
     return until
 
 
+def active_role_quest_title(cat):
+    raw = cat.get("role_quest_title")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        expires_moon = int(raw.get("expires_moon", -1))
+    except (TypeError, ValueError):
+        return None
+    if int(data.get("moon", 0)) > expires_moon:
+        return None
+    return str(raw.get("title") or "").strip() or None
+
+
 def role_quest_bonus_summary(cat):
     bonuses = []
 
@@ -2777,7 +2846,74 @@ def role_quest_bonus_summary(cat):
     if pause_until:
         bonuses.append(f"hunger decay paused until {discord_expiry_timestamp(pause_until)}")
 
+    try:
+        lucky = int(cat.get("role_quest_lucky_paw_charges", 0) or 0)
+    except (TypeError, ValueError):
+        lucky = 0
+    if lucky:
+        bonuses.append(f"Lucky Paw: +1 on a future hunting attempt ({lucky} saved)")
+
+    try:
+        rested = int(cat.get("role_quest_well_rested_charges", 0) or 0)
+    except (TypeError, ValueError):
+        rested = 0
+    if rested:
+        bonuses.append(f"Well Rested: +1 on a future hunting/fishing or similar physical roll ({rested} saved)")
+
+    try:
+        star_luck = int(cat.get("role_quest_starclan_luck_charges", 0) or 0)
+    except (TypeError, ValueError):
+        star_luck = 0
+    if star_luck:
+        bonuses.append(f"StarClan's Little Blessing: +1 on one future hunting or fishing roll ({star_luck} saved)")
+
+    title = active_role_quest_title(cat)
+    if title:
+        bonuses.append(f"temporary title: {title}")
+
+    try:
+        tokens = int(cat.get("role_quest_connection_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        tokens = 0
+    if tokens:
+        bonuses.append(f"Connection Tokens: {tokens}")
+
     return "; ".join(bonuses) if bonuses else "None"
+
+
+def role_quest_collection_summary(cat, max_items=5):
+    items = []
+    for value in cat.get("role_quest_collectibles", []) or []:
+        if isinstance(value, dict):
+            shown = str(value.get("item") or value.get("label") or "").strip()
+        else:
+            shown = str(value).strip()
+        if shown:
+            items.append(shown)
+    for value in cat.get("role_quest_nest_upgrades", []) or []:
+        shown = str(value.get("item") if isinstance(value, dict) else value).strip()
+        if shown:
+            items.append(f"Nest: {shown}")
+    if not items:
+        return "None"
+    visible = items[-max_items:]
+    prefix = f"+{len(items) - max_items} older, " if len(items) > max_items else ""
+    return prefix + ", ".join(visible)
+
+
+def role_quest_skill_summary(cat):
+    raw = cat.get("role_quest_skill_progress", {})
+    if not isinstance(raw, dict) or not raw:
+        return "None"
+    cleaned = []
+    for skill, points in sorted(raw.items(), key=lambda item: str(item[0]).casefold()):
+        try:
+            points = int(points)
+        except (TypeError, ValueError):
+            continue
+        if points > 0:
+            cleaned.append(f"{skill}: {points}")
+    return ", ".join(cleaned) if cleaned else "None"
 
 
 # ─────────────────────────────
@@ -6108,6 +6244,631 @@ async def trigger_northern_lights(manual=False):
     return True
 
 # ─────────────────────────────
+# AUTOMATED CLAN + MEDICINE CAT GATHERINGS
+# ─────────────────────────────
+
+gathering_cycle_lock = asyncio.Lock()
+
+GATHERING_CANCELLATION_OUTCOMES = [
+    {
+        "key": "clouds",
+        "emoji": "☁️",
+        "weight": 12,
+        "text": """☁️ **There Will Be No Gathering This Moon**\n\nAs the night of the Gathering approaches, thick clouds settle over Echostone Mountain. When the full moon rises, its light is nowhere to be seen, completely hidden behind the darkened sky.\n\nWhether it is simply the weather or a warning from StarClan, the message is clear. **There will be no Gathering this moon.**\n\nThe Clans will have to wait until the next full moon to meet again."""
+    },
+    {
+        "key": "storm",
+        "emoji": "⛈️",
+        "weight": 12,
+        "text": """⛈️ **There Will Be No Gathering This Moon**\n\nDark clouds gather across Echostone Mountain as the full moon approaches. Thunder rolls between the peaks, and distant flashes of lightning warn the Clans against travelling far from home.\n\nWith the mountain caught beneath the storm, **there will be no Gathering this moon.**\n\nFor now, the Clans will remain within their own territories and wait for clearer skies beneath the next full moon."""
+    },
+    {
+        "key": "fog",
+        "emoji": "🌫️",
+        "weight": 12,
+        "text": """🌫️ **There Will Be No Gathering This Moon**\n\nAn unusually thick fog has settled across Echostone Mountain, swallowing trails, landmarks, and the paths leading toward the Gathering place. Even beneath the full moon, the territories disappear beneath a pale veil.\n\nTravelling so far in these conditions would be unwise. **There will be no Gathering this moon.**\n\nThe Clans will meet again when the mountain allows them safe passage."""
+    },
+    {
+        "key": "winds",
+        "emoji": "🌬️",
+        "weight": 12,
+        "text": """🌬️ **There Will Be No Gathering This Moon**\n\nRestless winds sweep across Echostone Mountain beneath the rising full moon. They howl through the trees, race between the cliffs, and carry unfamiliar scents across the territories until even well-known paths feel strange.\n\nTonight, the mountain is far too unsettled for the Clans to travel. **There will be no Gathering this moon.**\n\nWhatever has stirred the winds will hopefully have quieted by the next full moon."""
+    },
+    {
+        "key": "rain",
+        "emoji": "🌧️",
+        "weight": 12,
+        "text": """🌧️ **There Will Be No Gathering This Moon**\n\nRain has fallen across Echostone Mountain for hours without showing any sign of stopping. Trails have turned slick beneath countless paws, streams have swollen beyond their usual banks, and water runs down the mountainsides in muddy sheets.\n\nTravelling to the Gathering would put too many cats at risk. **There will be no Gathering this moon.**\n\nTonight, the Clans will remain sheltered in their camps and listen to the rain instead."""
+    },
+    {
+        "key": "snow",
+        "emoji": "❄️",
+        "weight": 12,
+        "text": """❄️ **There Will Be No Gathering This Moon**\n\nAn unexpected snowfall sweeps across Echostone Mountain as darkness falls, quickly burying familiar trails beneath fresh white drifts. Tracks disappear almost as soon as they are made, and the mountain paths grow harder to follow with every passing moment.\n\nThe journey to the Gathering place is no longer safe. **There will be no Gathering this moon.**\n\nPerhaps by the next full moon, the paths between the Clans will once again be clear."""
+    },
+    {
+        "key": "ice",
+        "emoji": "🧊",
+        "weight": 12,
+        "text": """🧊 **There Will Be No Gathering This Moon**\n\nA sudden freeze has coated the mountain paths in a thin layer of ice. Rocks have become slick beneath paw, narrow trails are dangerously unstable, and even experienced travellers find themselves choosing every step carefully.\n\nNo news is worth risking cats tumbling from the mountain trails. **There will be no Gathering this moon.**\n\nThe Clans will wait for safer footing before they meet again."""
+    },
+    {
+        "key": "flood",
+        "emoji": "🌊",
+        "weight": 12,
+        "text": """🌊 **There Will Be No Gathering This Moon**\n\nMelting snow and recent rain have sent water rushing down Echostone Mountain. Streams have overflowed their banks, familiar crossings have vanished beneath fast-moving water, and several routes toward the Gathering place have become impossible to safely cross.\n\nUntil the waters settle, **there will be no Gathering this moon.**\n\nThe mountain has divided the Clans for tonight, but the next full moon may bring them together once more."""
+    },
+    {
+        "key": "stars_disappear",
+        "emoji": "⭐",
+        "weight": 3,
+        "text": """⭐ **There Will Be No Gathering This Moon**\n\nThe full moon hangs clearly over Echostone Mountain, yet something is missing.\n\nThe stars have vanished.\n\nNot a single point of starlight can be seen surrounding the moon, despite the cloudless sky. Across the territories, an uncomfortable stillness settles over the mountain, as though something unseen is waiting.\n\nNo leader can say exactly what the silence means, but few are willing to ignore it. **There will be no Gathering this moon.**\n\nTonight, the Clans remain beneath a strangely empty sky."""
+    },
+    {
+        "key": "starclan_distant",
+        "emoji": "🌑",
+        "weight": 1,
+        "text": """🌑 **There Will Be No Gathering This Moon**\n\nThe full moon rises over Echostone Mountain, but something about its light feels wrong.\n\nThe stars seem faint and impossibly distant. The night is quiet, yet it is not peaceful. Even the mountain itself seems to be holding its breath, and where StarClan’s presence would normally feel strongest, there is only silence.\n\nWhether the ancestors are displeased, distracted, or simply unwilling to call the Clans together tonight, their absence is difficult to ignore.\n\n**There will be no Gathering this moon.**\n\nPerhaps by the next full moon, StarClan will welcome the Clans beneath the stars once more."""
+    }
+]
+
+MEDICINE_GATHERING_CANCELLATION_TEXT = {
+    "clouds": "Thick clouds swallow the moon and leave the route toward the medicine cats' meeting place without its familiar light. With the path dark and uncertain, the medicine cats and apprentices will remain with their Clans this moon.",
+    "storm": "Thunder rolls across Echostone Mountain and lightning flashes between the peaks. The medicine cats and apprentices will not risk the journey through the storm, so there will be no Medicine Cat Gathering this moon.",
+    "fog": "Dense fog has swallowed the mountain paths and hidden familiar landmarks. With even experienced travellers struggling to keep their bearings, the Medicine Cat Gathering will be skipped this moon.",
+    "winds": "Violent, restless winds tear across the high trails and make the journey dangerously unpredictable. The medicine cats and apprentices will remain home this moon.",
+    "rain": "Relentless rain has turned the mountain trails slick and swollen the streams along the route. The Medicine Cat Gathering will be skipped until safer travelling conditions return.",
+    "snow": "Unexpected snow is burying the familiar route faster than tracks can be made. The medicine cats and apprentices will not make the journey this moon.",
+    "ice": "A sudden freeze has left the mountain paths dangerously slick. Rather than risk a fall on the journey, the Medicine Cat Gathering will be skipped this moon.",
+    "flood": "Floodwater has cut across several familiar crossings and made parts of the route unsafe. The medicine cats and apprentices will stay with their Clans this moon.",
+    "stars_disappear": "The moon is clear, but the stars around it have vanished. The medicine cats cannot explain the empty sky, and none are eager to ignore such an unsettling sign. There will be no Medicine Cat Gathering this moon.",
+    "starclan_distant": "The full moon rises, yet StarClan feels impossibly far away. The sacred silence feels wrong rather than peaceful, and the medicine cats choose not to make the journey. There will be no Medicine Cat Gathering this moon."
+}
+
+
+def last_weekday_of_month(year, month, weekday):
+    last_day = calendar.monthrange(year, month)[1]
+    final_date = date(year, month, last_day)
+    return final_date - timedelta(days=(final_date.weekday() - weekday) % 7)
+
+
+def nth_weekday_of_month(year, month, weekday, occurrence):
+    first_date = date(year, month, 1)
+    offset = (weekday - first_date.weekday()) % 7
+    return first_date + timedelta(days=offset + ((occurrence - 1) * 7))
+
+
+def gathering_cycle_times(year, month, medicine=False):
+    gathering_date = (
+        nth_weekday_of_month(year, month, 3, 2)
+        if medicine
+        else last_weekday_of_month(year, month, 3)
+    )
+    start = datetime(
+        gathering_date.year,
+        gathering_date.month,
+        gathering_date.day,
+        GATHERING_START_HOUR,
+        GATHERING_START_MINUTE,
+        tzinfo=TZ
+    )
+    if medicine:
+        end = start.replace(hour=MEDICINE_GATHERING_END_HOUR, minute=0)
+    else:
+        monday = start + timedelta(days=4)
+        end = monday.replace(hour=GATHERING_END_HOUR, minute=0)
+    vote_open = start - timedelta(days=GATHERING_VOTE_LEAD_DAYS)
+    vote_close = vote_open + timedelta(days=GATHERING_VOTE_DURATION_DAYS)
+    reminder = start - timedelta(days=GATHERING_REMINDER_LEAD_DAYS)
+    return {
+        "start": start,
+        "end": end,
+        "vote_open": vote_open,
+        "vote_close": vote_close,
+        "reminder": reminder
+    }
+
+
+def gathering_cycle_key(now):
+    return f"{now.year}-{now.month:02d}"
+
+
+async def gathering_channel(medicine=False):
+    channel_id = MEDICINE_GATHERING_CHANNEL_ID if medicine else GATHERING_CHANNEL_ID
+    channel = bot.get_channel(channel_id)
+    if channel is not None:
+        return channel
+    try:
+        return await bot.fetch_channel(channel_id)
+    except Exception:
+        return None
+
+
+def gathering_guild():
+    if len(bot.guilds) == 1:
+        return bot.guilds[0]
+    for guild in bot.guilds:
+        if guild.get_role(MEMBER_ROLE_ID):
+            return guild
+    return None
+
+
+async def add_vote_reactions(message, medicine=False, include_vote=True):
+    try:
+        if include_vote:
+            await message.add_reaction("✅")
+            await message.add_reaction("❌")
+        if medicine:
+            await message.add_reaction("⭐")
+    except discord.HTTPException as error:
+        print(f"Could not add Gathering reactions: {error}")
+
+
+async def reaction_user_ids(message, emoji, guild, required_role_ids=None):
+    found = set()
+    target_reaction = None
+    for reaction in getattr(message, "reactions", []):
+        if str(reaction.emoji) == emoji:
+            target_reaction = reaction
+            break
+    if target_reaction is None:
+        return found
+
+    async for user in target_reaction.users(limit=None):
+        if getattr(user, "bot", False):
+            continue
+        member = guild.get_member(user.id) if guild else None
+        if member is None and guild is not None:
+            member = await fetch_member_by_id(guild, user.id)
+        if member is None:
+            continue
+        if required_role_ids:
+            role_ids = {role.id for role in getattr(member, "roles", [])}
+            if not role_ids.intersection(set(required_role_ids)):
+                continue
+        found.add(member.id)
+    return found
+
+
+async def fetch_gathering_vote_message(cycle, medicine=False):
+    message_id = cycle.get("vote_message_id")
+    if not message_id:
+        return None
+    channel = await gathering_channel(medicine=medicine)
+    if channel is None:
+        return None
+    try:
+        return await channel.fetch_message(int(message_id))
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException, TypeError, ValueError):
+        return None
+
+
+def choose_gathering_cancellation(cycle=None):
+    saved_key = cycle.get("cancellation_outcome_key") if isinstance(cycle, dict) else None
+    if saved_key:
+        for outcome in GATHERING_CANCELLATION_OUTCOMES:
+            if outcome["key"] == saved_key:
+                return outcome
+    return random.choices(
+        GATHERING_CANCELLATION_OUTCOMES,
+        weights=[outcome["weight"] for outcome in GATHERING_CANCELLATION_OUTCOMES],
+        k=1
+    )[0]
+
+
+def medicine_cancellation_message(outcome, yes_votes, no_votes):
+    body = MEDICINE_GATHERING_CANCELLATION_TEXT.get(outcome["key"], "The route is unsafe this moon.")
+    return (
+        f"{outcome['emoji']} **There Will Be No Medicine Cat Gathering This Moon**\n\n"
+        f"**Medicine-team vote:** ✅ {yes_votes} • ❌ {no_votes}\n\n"
+        f"{body}\n\n"
+        "The medicine cats and apprentices will try again beneath the next moon."
+    )
+
+
+async def ensure_discord_gathering_event(cycle_key, medicine=False):
+    store_key = "medicine_gathering_cycles" if medicine else "gathering_cycles"
+    async with data_lock:
+        cycle = copy.deepcopy(data.setdefault(store_key, {}).get(cycle_key, {}))
+    if cycle.get("scheduled_event_id"):
+        return cycle.get("scheduled_event_url")
+
+    guild = gathering_guild()
+    if guild is None:
+        print("Could not create Gathering Scheduled Event: guild not found.")
+        return None
+
+    try:
+        start = datetime.fromisoformat(cycle["start_at"])
+        end = datetime.fromisoformat(cycle["end_at"])
+    except Exception:
+        return None
+
+    try:
+        event = await guild.create_scheduled_event(
+            name="Medicine Cat Gathering" if medicine else "The Gathering",
+            start_time=start,
+            end_time=end,
+            entity_type=discord.EntityType.external,
+            privacy_level=discord.PrivacyLevel.guild_only,
+            location="Echostone Mountain — Medicine Cat Gathering RP" if medicine else "Echostone Mountain — Gathering RP",
+            description=MEDICINE_GATHERING_DESCRIPTION if medicine else GATHERING_DESCRIPTION,
+            reason="Automated monthly Echostone Mountain Gathering"
+        )
+    except discord.Forbidden:
+        print("Could not create Gathering Scheduled Event: bot needs Manage Events permission.")
+        return None
+    except (discord.HTTPException, TypeError, ValueError) as error:
+        print(f"Could not create Gathering Scheduled Event: {error}")
+        return None
+
+    async with data_lock:
+        saved = data.setdefault(store_key, {}).setdefault(cycle_key, {})
+        saved["scheduled_event_id"] = event.id
+        saved["scheduled_event_url"] = getattr(event, "url", None)
+        save_data(data)
+    return getattr(event, "url", None)
+
+
+async def initialize_gathering_cycle(now, medicine=False):
+    times = gathering_cycle_times(now.year, now.month, medicine=medicine)
+    cycle_key = gathering_cycle_key(now)
+    store_key = "medicine_gathering_cycles" if medicine else "gathering_cycles"
+    async with data_lock:
+        cycles = data.setdefault(store_key, {})
+        cycle = cycles.setdefault(cycle_key, {})
+        cycle.setdefault("cycle_key", cycle_key)
+        cycle.setdefault("start_at", times["start"].isoformat())
+        cycle.setdefault("end_at", times["end"].isoformat())
+        cycle.setdefault("vote_open_at", times["vote_open"].isoformat())
+        cycle.setdefault("vote_close_at", times["vote_close"].isoformat())
+        cycle.setdefault("reminder_at", times["reminder"].isoformat())
+        return copy.deepcopy(cycle), times, cycle_key
+
+
+async def post_gathering_vote(cycle_key, times, medicine=False):
+    channel = await gathering_channel(medicine=medicine)
+    if channel is None:
+        return False
+
+    skip_key = "last_medicine_gathering_skipped" if medicine else "last_gathering_skipped"
+    async with data_lock:
+        last_was_skipped = data.get(skip_key) is True
+
+    if medicine:
+        med_ping = f"<@&{MEDICINE_CAT_ROLE_ID}> <@&{MEDICINE_CAT_APPRENTICE_ROLE_ID}>"
+        star_ping = f"<@&{STARCLAN_GATHERING_VOLUNTEER_ROLE_ID}>"
+        if last_was_skipped:
+            content = (
+                f"{med_ping} {star_ping}\n"
+                "🌙 **The Medicine Cat Gathering Must Go Ahead This Moon**\n\n"
+                "Last moon's Medicine Cat Gathering was skipped, so there will be **no skip vote this time**. "
+                "The medicine cats and apprentices will meet on the second Thursday of the month.\n\n"
+                f"📅 **Gathering:** {discord_expiry_timestamp(times['start'])}\n\n"
+                f"{star_ping} If you have a **StarClan cat** available to speak with the medicine cats or apprentices, react with ⭐. "
+                "There is no limit on how many StarClan volunteers may join."
+            )
+            message = await channel.send(content)
+            await add_vote_reactions(message, medicine=True, include_vote=False)
+            async with data_lock:
+                cycle = data.setdefault("medicine_gathering_cycles", {}).setdefault(cycle_key, {})
+                cycle.update({
+                    "vote_posted": True,
+                    "vote_message_id": message.id,
+                    "forced_must_happen": True,
+                    "result_finalized": True,
+                    "result": "mandatory",
+                    "approved": True,
+                    "result_finalized_at": datetime.now(TZ).isoformat()
+                })
+                data[skip_key] = False
+                data.setdefault("medicine_gathering_history", []).append({
+                    "cycle": cycle_key,
+                    "result": "mandatory_after_skip",
+                    "recorded_at": datetime.now(TZ).isoformat()
+                })
+                data["medicine_gathering_history"] = data["medicine_gathering_history"][-24:]
+                save_data(data)
+            await ensure_discord_gathering_event(cycle_key, medicine=True)
+            return True
+
+        content = (
+            f"{med_ping} {star_ping}\n"
+            "🌙 **The Medicine Cat Gathering Is Approaching...**\n\n"
+            "The second Thursday of the month is drawing near. Medicine cats and medicine cat apprentices, should this moon's gathering go ahead?\n\n"
+            "✅ — **Hold the Medicine Cat Gathering**\n"
+            "❌ — **Skip this moon's Medicine Cat Gathering**\n\n"
+            f"Voting closes {discord_expiry_timestamp(times['vote_close'])}. Only members with the Medicine Cat or Medicine Cat Apprentice role count toward the yes/no vote.\n\n"
+            f"{star_ping} If you have a **StarClan cat** ready to speak with the medicine cats or apprentices, react with ⭐. "
+            "As many StarClan volunteers as want to participate may react."
+        )
+        message = await channel.send(content)
+        await add_vote_reactions(message, medicine=True, include_vote=True)
+        async with data_lock:
+            cycle = data.setdefault("medicine_gathering_cycles", {}).setdefault(cycle_key, {})
+            cycle.update({"vote_posted": True, "vote_message_id": message.id, "forced_must_happen": False})
+            save_data(data)
+        return True
+
+    # Full Clan Gathering.
+    if last_was_skipped:
+        content = (
+            f"<@&{MEMBER_ROLE_ID}>\n"
+            "🌕 **The Gathering Must Go Ahead This Moon**\n\n"
+            "The previous Gathering was skipped, so there will be **no vote to cancel this one**. "
+            "The Clans will meet beneath the full moon on the last Thursday of the month.\n\n"
+            f"📅 **The Gathering:** {discord_expiry_timestamp(times['start'])}\n\n"
+            "Prepare whichever of your cats you would like to send. News, reunions, rivalries, gossip, and whatever chaos the night brings are all welcome."
+        )
+        message = await channel.send(content)
+        async with data_lock:
+            cycle = data.setdefault("gathering_cycles", {}).setdefault(cycle_key, {})
+            cycle.update({
+                "vote_posted": True,
+                "vote_message_id": message.id,
+                "forced_must_happen": True,
+                "result_finalized": True,
+                "result": "mandatory",
+                "approved": True,
+                "result_finalized_at": datetime.now(TZ).isoformat()
+            })
+            data[skip_key] = False
+            data.setdefault("gathering_history", []).append({
+                "cycle": cycle_key,
+                "result": "mandatory_after_skip",
+                "recorded_at": datetime.now(TZ).isoformat()
+            })
+            data["gathering_history"] = data["gathering_history"][-24:]
+            save_data(data)
+        await ensure_discord_gathering_event(cycle_key, medicine=False)
+        return True
+
+    content = (
+        f"<@&{MEMBER_ROLE_ID}>\n"
+        "🌕 **The Gathering is Fast Approaching...**\n\n"
+        "The full moon will soon rise over Echostone Mountain, calling the Clans together once again.\n\n"
+        "Should we hold this moon's Gathering?\n\n"
+        "✅ — **Hold the Gathering**\n"
+        "❌ — **Skip this moon's Gathering**\n\n"
+        f"Voting closes {discord_expiry_timestamp(times['vote_close'])}. Verified members may vote, and reacting to both options will cancel out your vote."
+    )
+    message = await channel.send(content)
+    await add_vote_reactions(message, medicine=False, include_vote=True)
+    async with data_lock:
+        cycle = data.setdefault("gathering_cycles", {}).setdefault(cycle_key, {})
+        cycle.update({"vote_posted": True, "vote_message_id": message.id, "forced_must_happen": False})
+        save_data(data)
+    return True
+
+
+async def finalize_gathering_vote(cycle_key, medicine=False):
+    store_key = "medicine_gathering_cycles" if medicine else "gathering_cycles"
+    skip_key = "last_medicine_gathering_skipped" if medicine else "last_gathering_skipped"
+    history_key = "medicine_gathering_history" if medicine else "gathering_history"
+    async with data_lock:
+        cycle = copy.deepcopy(data.setdefault(store_key, {}).get(cycle_key, {}))
+    if not cycle or cycle.get("result_finalized"):
+        return False
+
+    message = await fetch_gathering_vote_message(cycle, medicine=medicine)
+    if message is None:
+        print(f"Could not finalize {'Medicine Cat ' if medicine else ''}Gathering vote: vote message unavailable.")
+        return False
+
+    guild = gathering_guild()
+    if guild is None:
+        return False
+
+    required_roles = (
+        {MEDICINE_CAT_ROLE_ID, MEDICINE_CAT_APPRENTICE_ROLE_ID}
+        if medicine
+        else {MEMBER_ROLE_ID}
+    )
+    yes_ids = await reaction_user_ids(message, "✅", guild, required_role_ids=required_roles)
+    no_ids = await reaction_user_ids(message, "❌", guild, required_role_ids=required_roles)
+    double_ids = yes_ids.intersection(no_ids)
+    yes_ids -= double_ids
+    no_ids -= double_ids
+    yes_votes = len(yes_ids)
+    no_votes = len(no_ids)
+
+    # A Gathering is the default. It is skipped only when NO has an actual majority.
+    approved = no_votes <= yes_votes
+    star_ids = set()
+    if medicine:
+        star_ids = await reaction_user_ids(message, "⭐", guild)
+
+    channel = await gathering_channel(medicine=medicine)
+    if channel is None:
+        return False
+
+    if approved:
+        async with data_lock:
+            saved = data.setdefault(store_key, {}).setdefault(cycle_key, {})
+            saved.update({
+                "result_finalized": True,
+                "result": "approved",
+                "approved": True,
+                "yes_votes": yes_votes,
+                "no_votes": no_votes,
+                "double_votes_ignored": len(double_ids),
+                "starclan_volunteer_ids": sorted(star_ids),
+                "result_finalized_at": datetime.now(TZ).isoformat()
+            })
+            data[skip_key] = False
+            data.setdefault(history_key, []).append({
+                "cycle": cycle_key,
+                "result": "approved",
+                "yes_votes": yes_votes,
+                "no_votes": no_votes,
+                "recorded_at": datetime.now(TZ).isoformat()
+            })
+            data[history_key] = data[history_key][-24:]
+            save_data(data)
+        event_url = await ensure_discord_gathering_event(cycle_key, medicine=medicine)
+        if medicine:
+            volunteer_text = (
+                " ".join(f"<@{user_id}>" for user_id in sorted(star_ids))
+                if star_ids else
+                "No StarClan volunteers have reacted yet; interested players can still use ⭐ on the original message."
+            )
+            result_text = (
+                f"🌙 **The Medicine Cat Gathering Will Go Ahead!**\n\n"
+                f"**Medicine-team vote:** ✅ {yes_votes} • ❌ {no_votes}\n"
+                + (f"**Ignored double-votes:** {len(double_ids)}\n" if double_ids else "") +
+                "\nThe medicine cats and apprentices will meet on the second Thursday of the month.\n\n"
+                f"⭐ **StarClan volunteers:** {volunteer_text}"
+            )
+        else:
+            result_text = (
+                f"🌕 **The Gathering Will Go Ahead!**\n\n"
+                f"✅ **Hold the Gathering:** {yes_votes}\n"
+                f"❌ **Skip the Gathering:** {no_votes}\n"
+                + (f"⚪ **Ignored double-votes:** {len(double_ids)}\n" if double_ids else "") +
+                "\nThe skies have given the Clans no reason to remain apart. The Gathering will take place on the **last Thursday of the month**."
+            )
+        if event_url:
+            result_text += f"\n\n📅 **Discord Event:** {event_url}"
+        else:
+            result_text += "\n\n⚠️ I could not create the Discord Scheduled Event yet. The bot will keep retrying; make sure it has **Manage Events** permission."
+        await channel.send(result_text)
+        return True
+
+    outcome = choose_gathering_cancellation(cycle)
+    async with data_lock:
+        saved = data.setdefault(store_key, {}).setdefault(cycle_key, {})
+        saved.update({
+            "result_finalized": True,
+            "result": "skipped",
+            "approved": False,
+            "yes_votes": yes_votes,
+            "no_votes": no_votes,
+            "double_votes_ignored": len(double_ids),
+            "starclan_volunteer_ids": sorted(star_ids),
+            "cancellation_outcome_key": outcome["key"],
+            "result_finalized_at": datetime.now(TZ).isoformat()
+        })
+        data[skip_key] = True
+        data.setdefault(history_key, []).append({
+            "cycle": cycle_key,
+            "result": "skipped",
+            "yes_votes": yes_votes,
+            "no_votes": no_votes,
+            "cancellation_outcome_key": outcome["key"],
+            "recorded_at": datetime.now(TZ).isoformat()
+        })
+        data[history_key] = data[history_key][-24:]
+        save_data(data)
+
+    if medicine:
+        result_text = medicine_cancellation_message(outcome, yes_votes, no_votes)
+    else:
+        tally = (
+            f"📊 **Gathering Vote:** ✅ {yes_votes} • ❌ {no_votes}"
+            + (f" • {len(double_ids)} double-vote(s) ignored" if double_ids else "")
+        )
+        result_text = tally + "\n\n" + outcome["text"]
+    await channel.send(result_text)
+    return True
+
+
+async def current_medicine_star_volunteers(cycle_key):
+    async with data_lock:
+        cycle = copy.deepcopy(data.setdefault("medicine_gathering_cycles", {}).get(cycle_key, {}))
+    message = await fetch_gathering_vote_message(cycle, medicine=True)
+    guild = gathering_guild()
+    if message is None or guild is None:
+        return set(cycle.get("starclan_volunteer_ids", []) or [])
+    return await reaction_user_ids(message, "⭐", guild)
+
+
+async def send_gathering_reminder(cycle_key, times, medicine=False):
+    channel = await gathering_channel(medicine=medicine)
+    if channel is None:
+        return False
+    store_key = "medicine_gathering_cycles" if medicine else "gathering_cycles"
+    async with data_lock:
+        cycle = copy.deepcopy(data.setdefault(store_key, {}).get(cycle_key, {}))
+    if not cycle.get("approved") or cycle.get("reminder_sent"):
+        return False
+
+    event_url = cycle.get("scheduled_event_url")
+    if medicine:
+        volunteers = await current_medicine_star_volunteers(cycle_key)
+        volunteer_text = (
+            " ".join(f"<@{user_id}>" for user_id in sorted(volunteers))
+            if volunteers else
+            "No StarClan volunteers have signed up yet."
+        )
+        content = (
+            f"<@&{MEDICINE_CAT_ROLE_ID}> <@&{MEDICINE_CAT_APPRENTICE_ROLE_ID}> <@&{STARCLAN_GATHERING_VOLUNTEER_ROLE_ID}>\n"
+            "🌙 **The Medicine Cat Gathering is Tomorrow!**\n\n"
+            "Tomorrow night, the medicine cats and their apprentices will gather beneath the moon to exchange news and seek StarClan's guidance.\n\n"
+            f"⭐ **StarClan volunteers:** {volunteer_text}"
+        )
+    else:
+        content = (
+            f"<@&{MEMBER_ROLE_ID}>\n"
+            "🌕 **The Gathering is Tomorrow!**\n\n"
+            "The moon is nearly full. Tomorrow night, the Clans will gather beneath the stars once again.\n\n"
+            "Decide which of your cats will be attending, and prepare for news, reunions, rivalries, gossip, and whatever chaos the night may bring!"
+        )
+    if event_url:
+        content += f"\n\n📅 {event_url}"
+    await channel.send(content)
+    async with data_lock:
+        saved = data.setdefault(store_key, {}).setdefault(cycle_key, {})
+        saved["reminder_sent"] = True
+        saved["reminder_sent_at"] = datetime.now(TZ).isoformat()
+        if medicine:
+            saved["starclan_volunteer_ids"] = sorted(volunteers)
+        save_data(data)
+    return True
+
+
+async def process_one_gathering_system(now, medicine=False):
+    cycle, times, cycle_key = await initialize_gathering_cycle(now, medicine=medicine)
+    store_key = "medicine_gathering_cycles" if medicine else "gathering_cycles"
+
+    # Do not create stale announcements for a month whose event has already ended.
+    if now >= times["end"]:
+        if not cycle.get("closed"):
+            async with data_lock:
+                saved = data.setdefault(store_key, {}).setdefault(cycle_key, {})
+                saved["closed"] = True
+                saved["closed_at"] = now.isoformat()
+                save_data(data)
+        return
+
+    if now >= times["vote_open"] and now < times["start"] and not cycle.get("vote_posted"):
+        await post_gathering_vote(cycle_key, times, medicine=medicine)
+        async with data_lock:
+            cycle = copy.deepcopy(data.setdefault(store_key, {}).get(cycle_key, {}))
+
+    if now >= times["vote_close"] and now < times["start"] and cycle.get("vote_posted") and not cycle.get("result_finalized"):
+        await finalize_gathering_vote(cycle_key, medicine=medicine)
+        async with data_lock:
+            cycle = copy.deepcopy(data.setdefault(store_key, {}).get(cycle_key, {}))
+
+    # If an approved event could not be created earlier, keep retrying safely.
+    if cycle.get("approved") and not cycle.get("scheduled_event_id") and now < times["start"]:
+        await ensure_discord_gathering_event(cycle_key, medicine=medicine)
+        async with data_lock:
+            cycle = copy.deepcopy(data.setdefault(store_key, {}).get(cycle_key, {}))
+
+    if now >= times["reminder"] and now < times["start"] and cycle.get("approved") and not cycle.get("reminder_sent"):
+        await send_gathering_reminder(cycle_key, times, medicine=medicine)
+
+
+@tasks.loop(minutes=30)
+async def gathering_scheduler():
+    now = datetime.now(TZ)
+    async with gathering_cycle_lock:
+        await process_one_gathering_system(now, medicine=False)
+        await process_one_gathering_system(now, medicine=True)
+
+
+# ─────────────────────────────
 # RULES VERIFICATION / ONBOARDING
 # ─────────────────────────────
 
@@ -6224,6 +6985,9 @@ async def on_ready():
     if not severe_weather_report.is_running():
         severe_weather_report.start()
 
+    if not gathering_scheduler.is_running():
+        gathering_scheduler.start()
+
     try:
         await migrate_active_quests_to_monthly_schedule()
     except Exception as error:
@@ -6234,8 +6998,8 @@ async def on_ready():
     try:
         async with data_lock:
             broadened_quests = broaden_current_hunting_quests_once()
-            rollout_role_quest = ensure_role_quest_rollout_once()
-            if broadened_quests or rollout_role_quest:
+            rollout_role_quests = ensure_role_quest_rollout_once()
+            if broadened_quests or rollout_role_quests:
                 save_data(data)
 
         quest_channel = bot.get_channel(QUEST_CHANNEL_ID)
@@ -6245,8 +7009,9 @@ async def on_ready():
                 lines.extend([clan_mention(group), f"~~{old_title}~~ → **{new_quest.get('title', 'Broad Hunting Quest')}**", new_quest.get("objective", ""), ""])
             await send_long_message(quest_channel, "\n".join(lines))
 
-        if quest_channel and rollout_role_quest:
-            await send_long_message(quest_channel, "🌟 **New Optional Role-Specific Quest!**\n\n" + format_role_quest_block(rollout_role_quest))
+        if quest_channel and rollout_role_quests:
+            blocks = [format_role_quest_block(quest, index=index, total=len(rollout_role_quests)) for index, quest in enumerate(rollout_role_quests, start=1)]
+            await send_long_message(quest_channel, "🌟 **New Optional Role-Specific Quest!**\n\n" + "\n\n".join(blocks))
     except Exception as error:
         print(f"Aug. 28 quest update migration failed: {error}")
 
@@ -6580,8 +7345,9 @@ async def botinfo(interaction: discord.Interaction):
 
         "📜 **Quest / Gathering Commands**\n"
         "`/quest force` — Quest manager only. Clear and force-post replacement quests while keeping the monthly first-of-the-month schedule\n"
-        "`/quest complete [Clan]` — Staff only. Mark a Clan or Outsider quest/event as complete and post the reward\n`/quest role` — View the current optional role-specific quest\n`/quest rolecomplete [Cat]` — Staff only. Complete the role quest with an eligible OC and award a random personal bonus\n`/quest rolereroll` — Staff only. Replace the current optional role quest\n`/resetquest [Clan/Outsider/All]` — Staff only. Replace one or all active quests/events while keeping the current due date\n"
+        "`/quest complete [Clan]` — Staff only. Mark a Clan or Outsider quest/event as complete and post the reward\n`/quest role` — View the current optional role-specific quests\n`/quest rolecomplete [Cat] [Quest Number]` — Staff only. Complete role quest 1 or 2 with an eligible OC and award a random personal reward\n`/quest rolereroll [Quest Number]` — Staff only. Replace role quest 1 or 2\n`/quest usebonus [Cat] [Bonus]` — Staff only. Mark a saved one-use quest bonus as spent after the roll/activity\n`/resetquest [Clan/Outsider/All]` — Staff only. Replace one or all active quests/events while keeping the current due date\n"
         "`/gatheringreport [ClanName]` — Generate a Clan-specific report including recent promotions, deaths, injuries, quest results, and major story changes\n"
+        "`Automatic Gatherings` — The full Gathering runs on the last Thursday; the Medicine Cat Gathering runs on the second Thursday. Votes open 7 days early and close after 3 days. Neither Gathering may be skipped two months in a row.\n"
         "`/rollhelp` — Helps calculate whether an OC caught their prey using their roll, modifiers, and required hunting number\n\n"
 
         "🐾 **General Member Commands**\n"
@@ -10690,8 +11456,19 @@ def reset_legacy_quest_data_if_needed():
     data.setdefault("quest_reminders_sent_v2", {})
     data.setdefault("last_quest_categories_v2", {})
     data.setdefault("active_role_quest", None)
+    data.setdefault("active_role_quests", [])
     data.setdefault("role_quest_history", [])
     data.setdefault("used_role_quests", [])
+    data.setdefault("used_role_quest_roles", [])
+    data.setdefault("used_role_quests_by_role", {})
+
+    # Migrate the Aug. 28 single role quest into the new two-slot list without
+    # changing the currently active August prompt. September 1 and later cycles
+    # automatically generate two role quests.
+    if not isinstance(data.get("active_role_quests"), list):
+        data["active_role_quests"] = []
+    if not data["active_role_quests"] and isinstance(data.get("active_role_quest"), dict):
+        data["active_role_quests"] = [data["active_role_quest"]]
 
     if data.get("quest_system_version") == QUEST_SYSTEM_VERSION:
         ensure_quest_category_tracking()
@@ -11268,23 +12045,98 @@ def complete_pending_failures():
     return failed_results
 
 
+ROLE_QUEST_DOUBLE_START = date(2026, 9, 1)
+
 ROLE_QUEST_PROMPTS = [
-    {"id": "kit-mossball", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Moss-Ball Mayhem", "objective": "Start a game of moss-ball and convince at least one other Clanmate to join in."},
-    {"id": "kit-story", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Story Seeker", "objective": "Ask an older Clanmate for a story, legend, or embarrassing tale from their younger moons."},
-    {"id": "kit-helper", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Tiny Helper", "objective": "Try to help with a harmless camp chore, even if the grown cats have to supervise."},
-    {"id": "kit-den-game", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Nursery Game", "objective": "Invent a new game in camp and teach the rules to another cat."},
+    # Kits — all 20 cycle before any Kit prompt repeats.
+    {"id": "kit-great-escape", "role": "Kits", "eligible_ranks": ["Kit"], "title": "The Great Escape", "objective": "Sneak out of the nursery or wander farther from your caretaker than you were supposed to, only to be discovered by another Clanmate."},
+    {"id": "kit-important-mission", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Very Important Mission", "objective": "Invent an extremely serious task for yourself and convince at least one other cat that it absolutely must be completed."},
+    {"id": "kit-warrior-training", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Warrior Training! Probably!", "objective": "Challenge another kit, apprentice, or very patient adult to a pretend battle and show off your finest imaginary warrior moves."},
+    {"id": "kit-treasure-hunter", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Treasure Hunter", "objective": "Find an interesting feather, stone, shell, flower, bone, stick, or other harmless object and proudly bring your treasure back to camp."},
+    {"id": "kit-questions", "role": "Kits", "eligible_ranks": ["Kit"], "title": "What Does This Do?", "objective": "Ask a Clanmate far too many questions about their rank, duties, scars, skills, or something else you find fascinating."},
+    {"id": "kit-best-nest", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Best Nest Ever", "objective": "Attempt to improve your nest with moss, feathers, leaves, flowers, or completely unnecessary decorations."},
+    {"id": "kit-tiny-hunter", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Tiny Hunter", "objective": "Stalk a leaf, bug, feather, tail, pinecone, or other harmless target as though the survival of the entire Clan depends upon catching it."},
+    {"id": "kit-catch-me", "role": "Kits", "eligible_ranks": ["Kit"], "title": "You Can't Catch Me!", "objective": "Start a game of chase with another kit or willing Clanmate around camp."},
+    {"id": "kit-council", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Kit Council", "objective": "Gather another kit or two and hold a very serious meeting about an extremely unserious problem."},
+    {"id": "kit-new-friend", "role": "Kits", "eligible_ranks": ["Kit"], "title": "New Best Friend", "objective": "Approach a Clanmate you do not usually interact with and decide that today is the perfect day to become friends."},
+    {"id": "kit-gossip", "role": "Kits", "eligible_ranks": ["Kit"], "title": "I Heard Something!", "objective": "Overhear a piece of Clan gossip and ask somebody about it, regardless of whether you understood it correctly."},
+    {"id": "kit-floor-lava", "role": "Kits", "eligible_ranks": ["Kit"], "title": "The Floor Is Lava", "objective": "Create a game involving jumping between rocks, roots, nests, logs, or other safe objects without touching the imaginary danger below."},
+    {"id": "kit-explorer", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Brave Little Explorer", "objective": "Explore somewhere in camp you normally ignore and investigate everything interesting you find there."},
+    {"id": "kit-future-legend", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Future Clan Legend", "objective": "Tell somebody exactly what kind of incredible warrior, healer, leader, or otherwise legendary cat you are going to become someday."},
+    {"id": "kit-gift", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Gift Delivery", "objective": "Find or make a tiny gift and give it to another Clanmate for whatever reason seems important to you."},
+    {"id": "kit-copycat", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Copycat", "objective": "Choose an older Clanmate you admire and spend part of a scene attempting to imitate the way they walk, speak, hunt, groom, or behave."},
+    {"id": "kit-accused", "role": "Kits", "eligible_ranks": ["Kit"], "title": "The Accused", "objective": "Blame another kit, apprentice, sibling, imaginary creature, or suspicious-looking object for a harmless bit of mischief."},
+    {"id": "kit-hideout", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Secret Hideout", "objective": "Find or create a little hiding place in camp and invite somebody you trust to see it."},
+    {"id": "kit-scary-story", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Very Scary Story", "objective": "Try to scare another kit or Clanmate with the most frightening story you can invent."},
+    {"id": "kit-cuddle", "role": "Kits", "eligible_ranks": ["Kit"], "title": "Emergency Cuddle", "objective": "Decide somebody looks lonely, grumpy, cold, tired, or otherwise in desperate need of kit companionship and go bother them affectionately."},
+
+    # Apprentices — all 20 cycle before any Apprentice prompt repeats.
     {"id": "app-moss", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Fresh Moss Run", "objective": "Gather fresh moss or bedding for a Clan den and bring it back to camp."},
     {"id": "app-lesson", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Ask for a Lesson", "objective": "Ask a mentor or experienced warrior to teach or review one useful Clan skill in RP."},
     {"id": "app-elder", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Elder Errand", "objective": "Help an Elder with prey, bedding, grooming, or another small everyday task."},
     {"id": "app-practice", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Practice Makes Progress", "objective": "Roleplay a short training session focused on hunting, tracking, climbing, swimming, or battle practice."},
+    {"id": "app-race", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Race You There!", "objective": "Challenge another apprentice or willing Clanmate to a friendly race somewhere safe within the territory."},
+    {"id": "app-challenge", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Choose My Challenge", "objective": "Ask another cat to give you a small training challenge, then attempt whatever they come up with."},
+    {"id": "app-tour-guide", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Territory Tour Guide", "objective": "Visit a familiar landmark with another Clanmate and tell them what you know about the area, correctly or otherwise."},
+    {"id": "app-hunt-experiment", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Hunting Experiment", "objective": "Try a hunting technique you do not normally use, even if the attempt turns out embarrassingly badly."},
+    {"id": "app-rivalry", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Friendly Rivalry", "objective": "Challenge another apprentice to a harmless competition involving hunting, tracking, climbing, swimming, balance, speed, or another skill."},
+    {"id": "app-patrol", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Patrol Tagalong", "objective": "Join or organize a short patrol and make yourself useful along the way."},
+    {"id": "app-learn-elders", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Learn From Your Elders", "objective": "Ask an Elder about something that happened before you were born and see what story you get."},
+    {"id": "app-showoff", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Show-Off Season", "objective": "Attempt to impress another Clanmate with one of your skills. Whether you actually succeed is completely optional."},
+    {"id": "app-wrong-turn", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Wrong Turn", "objective": "Take the slightly less familiar route during a training trip and explore somewhere you do not usually visit."},
+    {"id": "app-picnic", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Apprentice Picnic", "objective": "Share prey with another apprentice somewhere outside the apprentice den and spend some time talking about anything except training."},
+    {"id": "app-skill-swap", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Secret Skill Swap", "objective": "Teach another apprentice something you are good at and have them teach you something in return."},
+    {"id": "app-mentor-thanks", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Mentor Appreciation", "objective": "Do something small and thoughtful for your mentor, whether that means bringing them prey, gathering moss, leaving them a gift, or simply thanking them."},
+    {"id": "app-camp-challenge", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Camp Challenge", "objective": "Find something around camp that needs doing and complete it before somebody has to ask you."},
+    {"id": "app-shadow-specialist", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Shadow a Specialist", "objective": "Spend some time with a healer, Preymaster, Pathfinder, River Guardian, Digger, Sporekeeper, or another specialized Clanmate and learn something about what they do."},
+    {"id": "app-dare", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Dare Accepted", "objective": "Let another apprentice give you a harmless dare and attempt it in RP."},
+    {"id": "app-future-warrior", "role": "Apprentices", "eligible_ranks": ["Apprentice"], "title": "Future Warrior Talk", "objective": "Talk with another cat about the warrior you hope to become, what you are excited about, and what still makes you nervous."},
+
+    # Warriors — all 20 cycle before any Warrior prompt repeats.
     {"id": "warrior-border", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Mark the Borders", "objective": "Take part in a border patrol and refresh at least one stretch of scent markers."},
     {"id": "warrior-checkin", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Clanmate Check-In", "objective": "Notice a Clanmate who is alone, stressed, or bored and start a meaningful conversation with them."},
     {"id": "warrior-den", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Camp Upkeep", "objective": "Repair, clean, reinforce, or gather materials for one of the Clan's dens."},
     {"id": "warrior-share", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Share the Catch", "objective": "Bring prey back to camp and deliberately share a meal or conversation with another Clanmate."},
+    {"id": "warrior-scenic", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Take the Scenic Route", "objective": "Patrol a part of the territory you have not visited recently and see what has changed."},
+    {"id": "warrior-apprentice-ambush", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Apprentice Ambush", "objective": "Offer an apprentice an unexpected mini-training session, challenge, or bit of practical advice."},
+    {"id": "warrior-hunt-company", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Hunt With Company", "objective": "Invite another Clanmate hunting and use the trip as an excuse to catch up."},
+    {"id": "warrior-border-talk", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Border Conversation", "objective": "Encounter a cat from another Clan near a border and have a peaceful, awkward, suspicious, funny, or tense conversation without starting a fight."},
+    {"id": "warrior-new-tricks", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Old Skills, New Tricks", "objective": "Ask another warrior to show you a technique they use differently from you and give it a try yourself."},
+    {"id": "warrior-therapist", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Unofficial Camp Therapist", "objective": "Listen to another Clanmate complain about something and offer whatever advice your character considers helpful."},
+    {"id": "warrior-bring-someone", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Bring Someone Along", "objective": "Notice a younger, quieter, or less involved Clanmate and invite them to accompany you on a simple task."},
+    {"id": "warrior-detour", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Patrol Detour", "objective": "While travelling through the territory, investigate an unusual scent, sound, track, object, or harmless disturbance."},
+    {"id": "warrior-stranger-meal", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Meal With a Stranger", "objective": "Share prey with a Clanmate your character rarely speaks to and actually get to know them."},
+    {"id": "warrior-competition", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Warrior Competition", "objective": "Challenge another warrior to a friendly contest of speed, strength, tracking, climbing, swimming, hunting, or another Clan skill."},
+    {"id": "warrior-improvement", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "The Camp Improvement Project", "objective": "Decide something around camp could clearly be better and recruit somebody to help you fix, move, reinforce, decorate, or reorganize it."},
+    {"id": "warrior-long-way", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Take the Long Way Home", "objective": "After finishing a patrol or hunt, linger somewhere scenic with another Clanmate instead of immediately returning to camp."},
+    {"id": "warrior-babysitter", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Unexpected Babysitter", "objective": "Spend some time entertaining, supervising, teaching, or being relentlessly questioned by one or more kits."},
+    {"id": "warrior-scar-story", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Story Behind the Scar", "objective": "Ask another warrior about one of their scars, quirks, habits, possessions, or memorable experiences and trade a story of your own."},
+    {"id": "warrior-intervention", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Friendly Intervention", "objective": "Catch a Clanmate doing something foolish, reckless, stubborn, or suspicious and decide whether to stop them, help them, or make the situation considerably worse."},
+    {"id": "warrior-make-day", "role": "Warriors", "eligible_ranks": ["Warrior"], "title": "Make Someone's Day", "objective": "Do one small thing specifically to cheer up another Clanmate, whether that means bringing them prey, inviting them somewhere, complimenting them, teasing them affectionately, or simply keeping them company."},
+
+    # Elders — all 20 cycle before any Elder prompt repeats.
     {"id": "elder-gossip", "role": "Elders", "eligible_ranks": ["Elder"], "title": "A Little Clan Gossip", "objective": "Start a harmless gossip session, dramatic retelling, or opinionated conversation about recent Clan life."},
     {"id": "elder-story", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Old Story, New Ears", "objective": "Tell a younger cat a story from the past, whether it is wise, ridiculous, or suspiciously exaggerated."},
     {"id": "elder-advice", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Unsolicited Wisdom", "objective": "Give a younger Clanmate advice about something they are dealing with, useful or otherwise."},
     {"id": "elder-gamejudge", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Official Judge", "objective": "Get roped into judging a kit or apprentice game, contest, story, or petty disagreement."},
+    {"id": "elder-back-day", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Back In My Day", "objective": "Explain to somebody how apprentices, warriors, prey, weather, patrols, or basically anything else were apparently much tougher in your day."},
+    {"id": "elder-favourite", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Favourite Child", "objective": "Declare one younger Clanmate your favourite for the day and make absolutely no effort to hide your bias."},
+    {"id": "elder-snack-tax", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Snack Tax", "objective": "Convince another Clanmate that whatever prey they brought you looks considerably better than the prey already sitting nearby."},
+    {"id": "elder-matchmaker", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Matchmaker", "objective": "Offer completely unsolicited romantic observations, matchmaking attempts, or relationship advice to another Clanmate."},
+    {"id": "elder-investigation", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Elder Investigation Bureau", "objective": "Notice something mildly suspicious around camp and launch an unnecessary investigation into it."},
+    {"id": "elder-everything", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Tell Me Everything", "objective": "Corner an apprentice or warrior returning from patrol and demand all the interesting details."},
+    {"id": "elder-absolutely-not", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Absolutely Not", "objective": "Find something younger cats are doing and loudly explain why you think it is a terrible idea."},
+    {"id": "elder-kit-duty", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Kit Entertainment Duty", "objective": "Tell kits a story, teach them a game, answer their endless questions, or encourage an amount of mischief you definitely should not."},
+    {"id": "elder-childhood-story", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Embarrassing Childhood Story", "objective": "Tell somebody an embarrassing story about a warrior, leader, healer, or other respected Clanmate from when they were younger."},
+    {"id": "elder-good-old-days", "role": "Elders", "eligible_ranks": ["Elder"], "title": "The Good Old Days", "objective": "Visit a familiar part of camp or the territory with another Clanmate and reminisce about something that happened there long ago."},
+    {"id": "elder-nap", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Expert Nap Location", "objective": "Find somewhere unusually comfortable to nap and defend your new favourite sleeping spot from anybody questioning it."},
+    {"id": "elder-orders", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Elder's Orders", "objective": "Ask a younger Clanmate to fetch, move, bring, fix, or investigate something for you, then supervise with unnecessary seriousness."},
+    {"id": "elder-rebellion", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Tiny Rebellion", "objective": "Ignore a perfectly reasonable suggestion because you are old enough to know exactly what you are doing, thank you very much."},
+    {"id": "elder-pick-side", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Pick a Side", "objective": "Insert yourself into a harmless disagreement between two Clanmates and passionately support whichever side you find funniest."},
+    {"id": "elder-life-advice", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Life Advice Nobody Requested", "objective": "Tell another cat what you would have done in their situation, preferably with enough confidence to suggest there is absolutely no alternative."},
+    {"id": "elder-legacy", "role": "Elders", "eligible_ranks": ["Elder"], "title": "Legacy Lesson", "objective": "Teach a younger Clanmate something you genuinely want remembered after you are gone, whether it is a skill, story, tradition, joke, location, or piece of wisdom."},
+
+    # Existing specialist/leadership/nursery pools stay in rotation too.
     {"id": "med-sort", "role": "Medicine Team", "eligible_ranks": ["Medicine Cat", "Medicine Cat Apprentice", "Healer"], "title": "Herb Shelf Check", "objective": "Sort, count, replace, or discuss the condition of the Clan's herb stores."},
     {"id": "med-checkup", "role": "Medicine Team", "eligible_ranks": ["Medicine Cat", "Medicine Cat Apprentice", "Healer"], "title": "Routine Check-In", "objective": "Check on a Clanmate's health, recovery, stress, or general wellbeing in a casual medical RP."},
     {"id": "med-teach", "role": "Medicine Team", "eligible_ranks": ["Medicine Cat", "Medicine Cat Apprentice", "Healer"], "title": "Teach One Herb", "objective": "Teach another cat one useful herb fact, treatment tip, or piece of medical knowledge."},
@@ -11300,53 +12152,237 @@ ROLE_QUEST_PROMPTS = [
     {"id": "nursery-checkin", "role": "Queens and Den Dads", "eligible_ranks": ["Queen", "Den Dad"], "title": "Nursery Check-In", "objective": "Share a quiet conversation with another nursery cat about kits, Clan life, or how everyone is coping."}
 ]
 
-ROLE_QUEST_REWARDS = ["full_hunger", "hunting_bonus", "injury_reduction", "hunger_pause"]
+ROLE_QUEST_REWARD_WEIGHTS = {
+    "full_hunger": 10,
+    "hunting_bonus": 8,
+    "injury_reduction": 8,
+    "hunger_pause": 6,
+    "lucky_paw": 10,
+    "curious_trinket": 8,
+    "bonus_catch": 8,
+    "clan_recognition": 8,
+    "beautiful_find": 8,
+    "well_rested": 8,
+    "first_pick": 7,
+    "someone_thought": 7,
+    "skill_practice": 8,
+    "nest_upgrade": 7,
+    "starclan_blessing": 2,
+    "secret_spot": 6,
+    "social_butterfly": 6,
+    "mystery_reward": 4
+}
+
+ROLE_QUEST_TRINKETS = [
+    "an unusual blue-grey feather", "a perfectly smooth striped stone", "a clean shed tooth",
+    "a tiny spiral shell", "a rounded piece of harmless Twoleg glass", "a strangely shaped pinecone",
+    "an old bell with no collar attached", "a tiny metal button", "a pale bone polished by weather",
+    "a crooked twig shaped suspiciously like a tiny antler"
+]
+ROLE_QUEST_BEAUTIFUL_FINDS = [
+    "a spray of tiny wildflowers", "a cluster of colourful leaves", "a stone threaded with sparkling mineral",
+    "a nearly perfect feather", "a small piece of naturally shed antler", "a bright patch of soft moss",
+    "a smooth shell with pearly colour", "a little bundle of lavender", "a glossy seed pod", "a sun-bleached piece of driftwood"
+]
+ROLE_QUEST_GIFTS = [
+    "a blue jay feather", "a particularly soft tuft of moss", "a tiny white flower", "a polished pebble",
+    "a shell", "a bright leaf", "a neat little pinecone", "a small prey feather", "a sprig of lavender"
+]
+ROLE_QUEST_NEST_UPGRADES = [
+    "soft rabbit fur", "fresh pine needles", "particularly fluffy moss", "a feather lining",
+    "sprigs of lavender", "smooth stones around the edge", "a little collection of shells",
+    "soft dry leaves", "a woven ring of long grass"
+]
+ROLE_QUEST_SECRET_SPOTS = {
+    "BlizzardClan": [
+        "a sun-warmed hollow tucked between two pale rocks", "a sheltered ledge where the wind barely reaches",
+        "a tiny meltwater pool hidden behind an ice shelf", "an abandoned burrow overlooking the snow"
+    ],
+    "TorrentClan": [
+        "a quiet pool hidden behind a wall of reeds", "a sunny patch of sand above the usual waterline",
+        "a sheltered willow-root nook beside the river", "a tiny stream channel full of smooth stones"
+    ],
+    "FossilClan": [
+        "a warm stone shelf hidden between two pillars", "a pocket of wildflowers protected from the wind",
+        "a shallow fossil-lined hollow", "a strange old Twoleg object half-buried in the dust"
+    ],
+    "SpruceClan": [
+        "a tiny clearing where sunlight reaches the forest floor", "an abandoned burrow beneath tangled roots",
+        "a patch of wildflowers beside a hidden trickle of water", "an excellent flat napping rock beneath the spruce canopy"
+    ]
+}
+ROLE_QUEST_PREY = {
+    "BlizzardClan": ["mouse", "pika", "vole", "ptarmigan", "small snowshoe hare"],
+    "TorrentClan": ["trout", "perch", "frog", "water vole", "fat minnow"],
+    "FossilClan": ["mouse", "vole", "pika", "rock pigeon", "ptarmigan"],
+    "SpruceClan": ["squirrel", "sparrow", "water vole", "frog", "minnow"]
+}
+ROLE_QUEST_TITLES_BY_ROLE = {
+    "Kits": ["Tiny Menace", "Camp Favourite"],
+    "Apprentices": ["Helpful Paw", "Promising Paw"],
+    "Warriors": ["Reliable Clanmate", "Helpful Paw"],
+    "Elders": ["Elder Approved", "Clan Treasure"],
+    "Medicine Team": ["Gentle Paws", "Herb-Scented Hero"],
+    "Leadership": ["Steady Paw", "Camp Favourite"],
+    "Midranks": ["Specialist Star", "Reliable Clanmate"],
+    "Queens and Den Dads": ["Nursery Favourite", "Helpful Paw"]
+}
 
 
-def select_new_role_quest(due_at=None):
+def role_quest_role_names():
+    names = []
+    for quest in ROLE_QUEST_PROMPTS:
+        role = quest["role"]
+        if role not in names:
+            names.append(role)
+    return names
+
+
+def migrate_role_quest_usage_tracking():
     data.setdefault("used_role_quests", [])
-    used = set(data["used_role_quests"])
-    available = [quest for quest in ROLE_QUEST_PROMPTS if quest["id"] not in used]
+    data.setdefault("used_role_quest_roles", [])
+    data.setdefault("used_role_quests_by_role", {})
+    by_id = {quest["id"]: quest for quest in ROLE_QUEST_PROMPTS}
+    for quest_id in data.get("used_role_quests", []) or []:
+        quest = by_id.get(quest_id)
+        if not quest:
+            continue
+        used_for_role = data["used_role_quests_by_role"].setdefault(quest["role"], [])
+        if quest_id not in used_for_role:
+            used_for_role.append(quest_id)
+
+
+def choose_role_quest_roles(count):
+    migrate_role_quest_usage_tracking()
+    roles = role_quest_role_names()
+    selected = []
+    used = list(data.get("used_role_quest_roles", []) or [])
+
+    while len(selected) < count and roles:
+        available = [role for role in roles if role not in used and role not in selected]
+        if not available:
+            # The role-category cycle is complete. Start a new category cycle, but
+            # do not give both monthly slots to the same role.
+            used = []
+            data["used_role_quest_roles"] = []
+            available = [role for role in roles if role not in selected]
+        if not available:
+            break
+        chosen = random.choice(available)
+        selected.append(chosen)
+        used.append(chosen)
+        data["used_role_quest_roles"] = used.copy()
+
+    return selected
+
+
+def select_new_role_quest_for_role(role, due_at=None):
+    migrate_role_quest_usage_tracking()
+    prompts = [quest for quest in ROLE_QUEST_PROMPTS if quest["role"] == role]
+    used = data["used_role_quests_by_role"].setdefault(role, [])
+    available = [quest for quest in prompts if quest["id"] not in set(used)]
     if not available:
-        data["used_role_quests"] = []
-        available = ROLE_QUEST_PROMPTS.copy()
+        used.clear()
+        available = prompts.copy()
 
     quest = copy.deepcopy(random.choice(available))
-    data["used_role_quests"].append(quest["id"])
+    used.append(quest["id"])
+    if quest["id"] not in data["used_role_quests"]:
+        data["used_role_quests"].append(quest["id"])
     issued_at = datetime.now(TZ)
     due_at = due_at or next_regular_quest_cycle(issued_at)
     quest.update({"status": "Pending", "issued_at": issued_at.isoformat(), "due_at": due_at.isoformat()})
     return quest
 
 
-def archive_active_role_quest(reason="Expired"):
-    data.setdefault("role_quest_history", [])
-    active = data.get("active_role_quest")
-    if not active or active.get("status") == "Completed":
-        # Completed role quests are already added to history when staff completes them.
+def select_new_role_quests(count=2, due_at=None):
+    roles = choose_role_quest_roles(count)
+    return [select_new_role_quest_for_role(role, due_at=due_at) for role in roles]
+
+
+def select_new_role_quest(due_at=None, exclude_roles=None):
+    """Choose one replacement role quest without wasting another role's rotation slot."""
+    migrate_role_quest_usage_tracking()
+    exclude_roles = set(exclude_roles or [])
+    roles = role_quest_role_names()
+    used_roles = list(data.get("used_role_quest_roles", []) or [])
+
+    # Prefer a role that has not appeared yet in the current role-category cycle,
+    # while never duplicating the other active monthly role quest.
+    available = [
+        role for role in roles
+        if role not in exclude_roles and role not in used_roles
+    ]
+
+    if not available:
+        # If every allowed role has already been used in this category cycle, reroll
+        # among allowed roles without clearing the main monthly rotation. This keeps
+        # a staff reroll from accidentally consuming or resetting unrelated roles.
+        available = [role for role in roles if role not in exclude_roles]
+
+    if not available:
+        available = roles.copy()
+
+    role = random.choice(available)
+    if role not in used_roles:
+        used_roles.append(role)
+        data["used_role_quest_roles"] = used_roles
+
+    return select_new_role_quest_for_role(role, due_at=due_at)
+
+
+def get_active_role_quests():
+    raw = data.get("active_role_quests", [])
+    if not isinstance(raw, list):
+        raw = []
+    if not raw and isinstance(data.get("active_role_quest"), dict):
+        raw = [data["active_role_quest"]]
+        data["active_role_quests"] = raw
+    return raw
+
+
+def set_active_role_quests(quests):
+    data["active_role_quests"] = list(quests or [])
+    data["active_role_quest"] = data["active_role_quests"][0] if data["active_role_quests"] else None
+
+
+def archive_role_quest(quest, reason="Expired"):
+    if not quest or quest.get("status") == "Completed":
         return
-    archived = copy.deepcopy(active)
+    data.setdefault("role_quest_history", [])
+    archived = copy.deepcopy(quest)
     archived["status"] = reason
     archived["ended_at"] = datetime.now(TZ).isoformat()
     archived["result"] = "No penalty. Role-specific quests are always optional."
     data["role_quest_history"].append(archived)
-    data["role_quest_history"] = data["role_quest_history"][-40:]
+    data["role_quest_history"] = data["role_quest_history"][-120:]
 
 
-def format_role_quest_block(quest):
+def archive_active_role_quests(reason="Expired"):
+    for quest in list(get_active_role_quests()):
+        archive_role_quest(quest, reason=reason)
+
+
+def archive_active_role_quest(reason="Expired"):
+    # Backward-compatible wrapper for older call sites.
+    archive_active_role_quests(reason=reason)
+
+
+def format_role_quest_block(quest, index=None, total=None):
     if not quest:
         return ""
     ranks = ", ".join(quest.get("eligible_ranks", []))
+    slot_text = f" #{index}" if index is not None and (total or 0) > 1 else ""
     return "\n".join([
         "━━━━━━━━━━━━━━━",
-        "🌟 **OPTIONAL ROLE-SPECIFIC QUEST**",
+        f"🌟 **OPTIONAL ROLE-SPECIFIC QUEST{slot_text}**",
         f"### {quest.get('role', 'Clan Cats')}: {quest.get('title', 'Role Quest')}",
         f"**Eligible ranks:** {ranks}",
         quest.get("objective", "Complete a casual Clan-life RP prompt."),
         "",
         "Any eligible living OC from **any Clan** may complete this quest.",
-        "🎁 **Reward:** The OC who completes it receives one random small personal bonus.",
-        "✅ Possible bonuses: hunger set to **Full**, **+2 hunting** for the remainder of the current moon, **-1 severity** on their next injury/illness, or **7 days with hunger decay paused**.",
+        "🎁 **Reward:** The OC who completes it receives one random personal reward, keeps their quest streak moving, and may earn extra milestone rewards at 3, 5, and 10 completions.",
+        "🍀 Rewards range from hunger/roll bonuses and injury protection to trinkets, prey, nest upgrades, temporary titles, secret spots, gifts, skill practice, Connection Tokens, rare StarClan luck, and mystery rewards.",
         "💚 **Optional:** Nothing bad happens if nobody completes this quest."
     ])
 
@@ -11359,9 +12395,84 @@ def role_quest_cat_is_eligible(cat, quest):
     return cat.get("rank") in set(quest.get("eligible_ranks", []))
 
 
+def add_role_quest_collectible(cat, item, source, category="Keepsake"):
+    cat.setdefault("role_quest_collectibles", [])
+    cat["role_quest_collectibles"].append({
+        "item": item,
+        "category": category,
+        "source": source,
+        "moon": int(data.get("moon", 0)),
+        "earned_at": datetime.now(TZ).isoformat()
+    })
+    cat["role_quest_collectibles"] = cat["role_quest_collectibles"][-40:]
+
+
+def role_quest_random_prey(cat):
+    return random.choice(ROLE_QUEST_PREY.get(cat.get("clan"), ["mouse", "vole", "small bird"]))
+
+
+def infer_role_quest_skill(quest):
+    text = f"{quest.get('title', '')} {quest.get('objective', '')}".casefold()
+    checks = [
+        (["hunt", "prey", "stalk"], "Hunting Practice"),
+        (["battle", "fight", "strength"], "Fighting Practice"),
+        (["race", "speed", "chase"], "Speed Practice"),
+        (["track", "patrol", "border", "scent"], "Tracking Practice"),
+        (["swim", "fish", "water"], "Swimming/Fishing Practice"),
+        (["climb", "ledge"], "Climbing/Balance Practice"),
+        (["herb", "medicine", "health"], "Medicine Practice"),
+        (["teach", "lesson", "story", "advice"], "Teaching/Social Practice")
+    ]
+    for keywords, label in checks:
+        if any(keyword in text for keyword in keywords):
+            return label
+    return "General Clan Skill Practice"
+
+
+def apply_mystery_role_quest_reward(cat_name, cat, quest):
+    source = quest.get("title", "Role Quest")
+    outcomes = ["round_rock", "rare_feather", "large_prey", "lucky", "nest", "title", "beautiful"]
+    outcome = random.choice(outcomes)
+    if outcome == "round_rock":
+        item = "a strangely round rock"
+        add_role_quest_collectible(cat, item, source, category="Mystery Reward")
+        return f"🎁 **MYSTERY REWARD!** {cat_name} has found... **{item}**. It appears to serve absolutely no purpose. It is theirs now."
+    if outcome == "rare_feather":
+        item = random.choice(["an immaculate owl feather", "a shimmering magpie feather", "a huge raven feather", "a pale hawk feather"])
+        add_role_quest_collectible(cat, item, source, category="Mystery Reward")
+        return f"🎁 **MYSTERY REWARD!** {cat_name} found **{item}** and may keep, gift, or decorate with it."
+    if outcome == "large_prey":
+        prey = role_quest_random_prey(cat)
+        cat.setdefault("role_quest_bonus_catches", []).append({"prey": f"especially large {prey}", "moon": int(data.get("moon", 0)), "source": source})
+        cat["role_quest_bonus_catches"] = cat["role_quest_bonus_catches"][-20:]
+        return f"🎁 **MYSTERY REWARD!** {cat_name} comes across an **especially large {prey}** to bring back to camp."
+    if outcome == "lucky":
+        cat["role_quest_lucky_paw_charges"] = int(cat.get("role_quest_lucky_paw_charges", 0) or 0) + 1
+        return f"🎁 **MYSTERY REWARD!** {cat_name} gains **Lucky Paw**, worth **+1 on one future hunting attempt**."
+    if outcome == "nest":
+        item = random.choice(ROLE_QUEST_NEST_UPGRADES)
+        cat.setdefault("role_quest_nest_upgrades", []).append({"item": item, "moon": int(data.get("moon", 0)), "source": source})
+        cat["role_quest_nest_upgrades"] = cat["role_quest_nest_upgrades"][-20:]
+        return f"🎁 **MYSTERY REWARD!** {cat_name} earns a nest upgrade: **{item}**."
+    if outcome == "title":
+        title = random.choice(ROLE_QUEST_TITLES_BY_ROLE.get(quest.get("role"), ["Camp Favourite"]))
+        cat["role_quest_title"] = {"title": title, "expires_moon": int(data.get("moon", 0)) + 1, "source": source}
+        return f"🎁 **MYSTERY REWARD!** {cat_name} gains the temporary reputation title **{title}** for roughly one moon."
+    item = random.choice(ROLE_QUEST_BEAUTIFUL_FINDS)
+    add_role_quest_collectible(cat, item, source, category="Mystery Reward")
+    return f"🎁 **MYSTERY REWARD!** {cat_name} discovers **{item}**."
+
+
 def apply_role_quest_reward(cat_name, cat, quest):
-    reward = random.choice(ROLE_QUEST_REWARDS)
+    reward_names = list(ROLE_QUEST_REWARD_WEIGHTS.keys())
+    reward = random.choices(
+        reward_names,
+        weights=[ROLE_QUEST_REWARD_WEIGHTS[name] for name in reward_names],
+        k=1
+    )[0]
     now = datetime.now(TZ)
+    source = quest.get("title", "Role Quest")
+
     if reward == "full_hunger":
         old_hunger = get_hunger_status(cat)
         cat["hunger_level"] = "Full"
@@ -11369,24 +12480,105 @@ def apply_role_quest_reward(cat_name, cat, quest):
         cat["last_hunger_update"] = now.isoformat()
         text = f"🍽️ **Full Belly:** {cat_name}'s hunger was set from **{old_hunger}** to **Full**."
     elif reward == "hunting_bonus":
-        cat["role_quest_hunting_bonus"] = {"modifier": 2, "moon": int(data.get("moon", 0)), "source": quest.get("title", "Role Quest")}
+        cat["role_quest_hunting_bonus"] = {"modifier": 2, "moon": int(data.get("moon", 0)), "source": source}
         text = f"🎯 **Hunter's Edge:** {cat_name} gets **+2 to hunting rolls** for the remainder of **Moon {data.get('moon', 0)}**."
     elif reward == "injury_reduction":
-        try:
-            charges = int(cat.get("role_quest_injury_reduction_charges", 0) or 0)
-        except (TypeError, ValueError):
-            charges = 0
-        cat["role_quest_injury_reduction_charges"] = charges + 1
+        cat["role_quest_injury_reduction_charges"] = int(cat.get("role_quest_injury_reduction_charges", 0) or 0) + 1
         text = f"🩹 **Protective Luck:** The next injury or illness {cat_name} receives is automatically **1 severity lower** (minimum 1)."
-    else:
+    elif reward == "hunger_pause":
         pause_until = now + timedelta(days=7)
         existing_until = role_quest_hunger_pause_remaining(cat, now)
         if existing_until and existing_until > pause_until:
             pause_until = existing_until
         cat["role_quest_hunger_pause_until"] = pause_until.isoformat()
         text = f"🌙 **Rested Stomach:** {cat_name}'s hunger decay is paused for **7 days**, until {discord_expiry_timestamp(pause_until)}."
+    elif reward == "lucky_paw":
+        cat["role_quest_lucky_paw_charges"] = int(cat.get("role_quest_lucky_paw_charges", 0) or 0) + 1
+        text = f"🍀 **Lucky Paw:** {cat_name} banks a one-use **+1 bonus on a future hunting attempt**."
+    elif reward == "curious_trinket":
+        item = random.choice(ROLE_QUEST_TRINKETS)
+        add_role_quest_collectible(cat, item, source, category="Curious Trinket")
+        text = f"🪶 **Curious Trinket:** While finishing the quest, {cat_name} finds **{item}**. It has been added to their quest keepsakes."
+    elif reward == "bonus_catch":
+        prey = role_quest_random_prey(cat)
+        cat.setdefault("role_quest_bonus_catches", []).append({"prey": prey, "moon": int(data.get("moon", 0)), "source": source})
+        cat["role_quest_bonus_catches"] = cat["role_quest_bonus_catches"][-20:]
+        text = f"🐭 **Bonus Catch:** On the way home, {cat_name} comes across **a {prey}** and automatically brings it back to camp."
+    elif reward == "clan_recognition":
+        title = random.choice(ROLE_QUEST_TITLES_BY_ROLE.get(quest.get("role"), ["Camp Favourite"]))
+        cat["role_quest_title"] = {"title": title, "expires_moon": int(data.get("moon", 0)) + 1, "source": source}
+        cat.setdefault("role_quest_accomplishments", []).append(f"Moon {data.get('moon', 0)}: earned the temporary title {title}")
+        text = f"⭐ **Clan Recognition:** {cat_name}'s helpfulness earns them the temporary reputation tag **{title}** for roughly one moon."
+    elif reward == "beautiful_find":
+        item = random.choice(ROLE_QUEST_BEAUTIFUL_FINDS)
+        add_role_quest_collectible(cat, item, source, category="Beautiful Find")
+        text = f"🌿 **A Beautiful Find:** {cat_name} discovers **{item}** to keep, decorate with, or give away in RP."
+    elif reward == "well_rested":
+        cat["role_quest_well_rested_charges"] = int(cat.get("role_quest_well_rested_charges", 0) or 0) + 1
+        label = "Actually Took a Nap" if quest.get("role") == "Kits" else "Well Rested"
+        text = f"💤 **{label}:** {cat_name} banks a one-use **+1 bonus for a future hunting, fishing, or similar physical roll**."
+    elif reward == "first_pick":
+        prey = role_quest_random_prey(cat)
+        cat.setdefault("role_quest_bonus_catches", []).append({"prey": f"first-pick {prey}", "moon": int(data.get("moon", 0)), "source": source})
+        cat["role_quest_bonus_catches"] = cat["role_quest_bonus_catches"][-20:]
+        text = f"🍖 **First Pick:** For helping around camp, {cat_name} gets first choice of the fresh-kill pile and claims **an especially nice {prey}**."
+    elif reward == "someone_thought":
+        item = random.choice(ROLE_QUEST_GIFTS)
+        add_role_quest_collectible(cat, item, source, category="Anonymous Gift")
+        text = f"💌 **Someone Thought of You:** {cat_name} returns to their nest to find **{item}** tucked carefully beside their bedding. Whoever left it did not stick around to take credit."
+    elif reward == "skill_practice":
+        skill = infer_role_quest_skill(quest)
+        skills = cat.setdefault("role_quest_skill_progress", {})
+        skills[skill] = int(skills.get(skill, 0) or 0) + 1
+        text = f"🐾 **Skill Practice:** {cat_name} gains **+1 {skill} point** from what they practised during the quest. These are deliberately tiny RP progress markers, not large roll boosts."
+    elif reward == "nest_upgrade":
+        item = random.choice(ROLE_QUEST_NEST_UPGRADES)
+        cat.setdefault("role_quest_nest_upgrades", []).append({"item": item, "moon": int(data.get("moon", 0)), "source": source})
+        cat["role_quest_nest_upgrades"] = cat["role_quest_nest_upgrades"][-20:]
+        text = f"🪺 **Nest Upgrade:** {cat_name}'s sleeping space gains **{item}**."
+    elif reward == "starclan_blessing":
+        cat["role_quest_starclan_luck_charges"] = int(cat.get("role_quest_starclan_luck_charges", 0) or 0) + 1
+        text = f"🌙 **StarClan's Little Blessing — Rare:** Nothing speaks to {cat_name}, and no prophecy comes. For reasons they cannot quite explain, today simply feels lucky. They bank **+1 on one future hunting or fishing roll**."
+    elif reward == "secret_spot":
+        spot = random.choice(ROLE_QUEST_SECRET_SPOTS.get(cat.get("clan"), ["a quiet hidden hollow they had never noticed before"]))
+        cat.setdefault("role_quest_secret_spots", []).append({"spot": spot, "moon": int(data.get("moon", 0)), "source": source})
+        cat["role_quest_secret_spots"] = cat["role_quest_secret_spots"][-12:]
+        text = f"🗺️ **Secret Spot Discovered:** {cat_name} finds **{spot}**. It is now theirs to reuse as an RP location whenever they want."
+    elif reward == "social_butterfly":
+        cat["role_quest_connection_tokens"] = int(cat.get("role_quest_connection_tokens", 0) or 0) + 1
+        text = f"🤝 **Social Butterfly:** {cat_name} earns a **Connection Token** for creating RP with another character. They now have **{cat['role_quest_connection_tokens']}**."
+    else:
+        text = apply_mystery_role_quest_reward(cat_name, cat, quest)
 
-    add_history(cat, f"Completed optional role quest: {quest.get('title', 'Role Quest')}")
+    # Quest streaks are attached to the OC and never create a penalty. Since the
+    # monthly role prompts are not assigned to an OC in advance, the streak tracks
+    # completed role quests rather than resetting somebody for simply sitting one out.
+    cat["role_quest_streak"] = int(cat.get("role_quest_streak", 0) or 0) + 1
+    cat["role_quest_total_completed"] = int(cat.get("role_quest_total_completed", 0) or 0) + 1
+    milestones = cat.setdefault("role_quest_streak_milestones", [])
+    streak = cat["role_quest_streak"]
+    milestone_text = None
+    if streak >= 10 and 10 not in milestones:
+        milestones.append(10)
+        cat["role_quest_starclan_luck_charges"] = int(cat.get("role_quest_starclan_luck_charges", 0) or 0) + 1
+        special_item = "a small moon-pale stone kept as a Quest Legend keepsake"
+        add_role_quest_collectible(cat, special_item, source, category="10-Quest Milestone")
+        cat.setdefault("role_quest_accomplishments", []).append("Completed 10 role-specific quests")
+        milestone_text = f"🌟 **10-Quest Milestone:** {cat_name} earns a special **Quest Legend** accomplishment, {special_item}, and one StarClan luck charge."
+    elif streak >= 5 and 5 not in milestones:
+        milestones.append(5)
+        milestone_text = "🌟 **5-Quest Streak:** Uncommon bonus unlocked! " + apply_mystery_role_quest_reward(cat_name, cat, quest)
+    elif streak >= 3 and 3 not in milestones:
+        milestones.append(3)
+        cat["role_quest_lucky_paw_charges"] = int(cat.get("role_quest_lucky_paw_charges", 0) or 0) + 1
+        milestone_text = f"🌟 **3-Quest Streak:** {cat_name} earns an extra **Lucky Paw** charge."
+
+    cat.setdefault("role_quest_accomplishments", []).append(f"Moon {data.get('moon', 0)}: completed {source}")
+    cat["role_quest_accomplishments"] = cat["role_quest_accomplishments"][-40:]
+    add_history(cat, f"Completed optional role quest: {source}")
+
+    if milestone_text:
+        text += "\n" + milestone_text
     return text
 
 
@@ -11485,12 +12677,15 @@ def build_quest_announcement(due_at=None, apply_failures=True, forced=False, ski
         data["active_quests_v2"][group] = quest
         lines.append(format_quest_block(group, quest))
 
-    # One optional role-specific prompt runs alongside the monthly group quests.
-    # It never creates a failure consequence if nobody completes it.
-    archive_active_role_quest("Cleared" if forced else "Expired")
-    role_quest = select_new_role_quest(due_at)
-    data["active_role_quest"] = role_quest
-    lines.extend(["", format_role_quest_block(role_quest)])
+    # Starting September 1, 2026, two different role categories receive optional
+    # prompts each month. The role-category cycle and each role's prompt pool both
+    # exhaust themselves before repeating. August keeps its original single quest.
+    archive_active_role_quests("Cleared" if forced else "Expired")
+    role_count = 2 if issued_at.date() >= ROLE_QUEST_DOUBLE_START else 1
+    role_quests = select_new_role_quests(count=role_count, due_at=due_at)
+    set_active_role_quests(role_quests)
+    for index, role_quest in enumerate(role_quests, start=1):
+        lines.extend(["", format_role_quest_block(role_quest, index=index, total=len(role_quests))])
 
     return "\n".join(lines)
 
@@ -11520,9 +12715,9 @@ def build_quest_reminder(days_remaining):
             ""
         ])
 
-    role_quest = data.get("active_role_quest")
-    if role_quest and role_quest.get("status") == "Pending":
-        lines.extend(["", format_role_quest_block(role_quest), ""])
+    role_quests = [quest for quest in get_active_role_quests() if quest and quest.get("status") == "Pending"]
+    for index, role_quest in enumerate(role_quests, start=1):
+        lines.extend(["", format_role_quest_block(role_quest, index=index, total=len(role_quests)), ""])
 
     return "\n".join(lines)
 
@@ -11640,17 +12835,18 @@ def broaden_current_hunting_quests_once():
 
 
 def ensure_role_quest_rollout_once():
-    """Introduce the optional role quest immediately after this update, even mid-month."""
+    """Introduce role quests once without changing August into a two-quest cycle early."""
     if data.get("role_quest_rollout_v1"):
-        return None
+        return []
     reset_legacy_quest_data_if_needed()
     data["role_quest_rollout_v1"] = True
-    if data.get("active_role_quest"):
-        return None
+    if get_active_role_quests():
+        return []
     due_at = get_current_quest_cycle_due_at()
-    quest = select_new_role_quest(due_at)
-    data["active_role_quest"] = quest
-    return copy.deepcopy(quest)
+    count = 2 if datetime.now(TZ).date() >= ROLE_QUEST_DOUBLE_START else 1
+    quests = select_new_role_quests(count=count, due_at=due_at)
+    set_active_role_quests(quests)
+    return copy.deepcopy(quests)
 
 
 async def migrate_active_quests_to_monthly_schedule():
@@ -11664,6 +12860,12 @@ async def migrate_active_quests_to_monthly_schedule():
         changed = False
 
         for quest in data.get("active_quests_v2", {}).values():
+            if not quest or quest.get("status") != "Pending":
+                continue
+            quest["due_at"] = next_due.isoformat()
+            changed = True
+
+        for quest in get_active_role_quests():
             if not quest or quest.get("status") != "Pending":
                 continue
             quest["due_at"] = next_due.isoformat()
@@ -11830,35 +13032,106 @@ async def quest_complete(
         )
 
 
-@quest_group.command(name="role", description="View the current optional role-specific quest")
+@quest_group.command(name="role", description="View the current optional role-specific quests")
 async def quest_role_view(interaction: discord.Interaction):
     async with data_lock:
         reset_legacy_quest_data_if_needed()
-        quest = copy.deepcopy(data.get("active_role_quest"))
-    if not quest:
-        await interaction.response.send_message("🌟 There is no active role-specific quest right now.")
+        quests = copy.deepcopy(get_active_role_quests())
+    if not quests:
+        await interaction.response.send_message("🌟 There are no active role-specific quests right now.")
         return
-    lines = [format_role_quest_block(quest), "", f"**Status:** {quest.get('status', 'Pending')}"]
-    if quest.get("completed_by"):
-        lines.append(f"**Completed by:** {quest['completed_by']}")
-    if quest.get("reward_result"):
-        lines.append(f"**Reward:** {quest['reward_result']}")
-    await interaction.response.send_message("\n".join(lines)[:1900])
+    lines = ["🌟 **Current Optional Role-Specific Quests**"]
+    for index, quest in enumerate(quests, start=1):
+        lines.extend(["", format_role_quest_block(quest, index=index, total=len(quests)), f"**Status:** {quest.get('status', 'Pending')}"])
+        if quest.get("completed_by"):
+            lines.append(f"**Completed by:** {quest['completed_by']}")
+        if quest.get("reward_result"):
+            lines.append(f"**Reward:** {quest['reward_result']}")
+    chunks = split_allegiance_text("\n".join(lines), max_length=1850)
+    await interaction.response.send_message(chunks[0])
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk)
 
 
-@quest_group.command(name="rolecomplete", description="Staff only. Complete the optional role quest with one eligible OC")
-@app_commands.describe(cat_name="Eligible OC who completed the role-specific quest")
-async def quest_role_complete(interaction: discord.Interaction, cat_name: str):
+ROLE_QUEST_SPENDABLE_CHOICES = [
+    app_commands.Choice(name="Lucky Paw (+1 hunting)", value="lucky_paw"),
+    app_commands.Choice(name="Well Rested (+1 physical roll)", value="well_rested"),
+    app_commands.Choice(name="StarClan's Little Blessing (+1 hunting/fishing)", value="starclan_luck")
+]
+
+
+@quest_group.command(name="usebonus", description="Staff only. Mark a one-use role-quest bonus as spent")
+@app_commands.describe(
+    cat_name="OC using the saved bonus",
+    bonus="Which one-use role-quest bonus was used"
+)
+@app_commands.choices(bonus=ROLE_QUEST_SPENDABLE_CHOICES)
+async def quest_use_bonus(
+    interaction: discord.Interaction,
+    cat_name: str,
+    bonus: app_commands.Choice[str]
+):
+    if not await staff_command_check(interaction):
+        return
+
+    field_map = {
+        "lucky_paw": ("role_quest_lucky_paw_charges", "🍀 Lucky Paw"),
+        "well_rested": ("role_quest_well_rested_charges", "💤 Well Rested"),
+        "starclan_luck": ("role_quest_starclan_luck_charges", "🌙 StarClan's Little Blessing")
+    }
+    field, label = field_map[bonus.value]
+
+    async with data_lock:
+        resolved_name = resolve_cat_name_casefold(cat_name)
+        if not resolved_name:
+            await interaction.response.send_message(
+                f"❌ Cat **{cat_name}** was not found.",
+                ephemeral=True
+            )
+            return
+
+        cat = data["cats"][resolved_name]
+        prepare_cat_record(resolved_name, cat)
+        charges = int(cat.get(field, 0) or 0)
+        if charges <= 0:
+            await interaction.response.send_message(
+                f"❌ **{resolved_name}** does not have a saved **{label}** charge.",
+                ephemeral=True
+            )
+            return
+
+        cat[field] = charges - 1
+        add_history(cat, f"Used role-quest bonus: {label}")
+        save_data(data)
+        remaining = cat[field]
+
+    await interaction.response.send_message(
+        f"✅ **{resolved_name}** used **{label}**. "
+        f"**{remaining}** charge{'s' if remaining != 1 else ''} remaining.",
+        ephemeral=True
+    )
+
+
+@quest_group.command(name="rolecomplete", description="Staff only. Complete one optional role quest with an eligible OC")
+@app_commands.describe(
+    cat_name="Eligible OC who completed the role-specific quest",
+    quest_number="Which active role quest: 1 or 2 (defaults to 1)"
+)
+async def quest_role_complete(interaction: discord.Interaction, cat_name: str, quest_number: int = 1):
     if not await staff_command_check(interaction):
         return
     async with data_lock:
         reset_legacy_quest_data_if_needed()
-        quest = data.get("active_role_quest")
-        if not quest:
-            await interaction.response.send_message("❌ There is no active role-specific quest.", ephemeral=True)
+        quests = get_active_role_quests()
+        if not quests:
+            await interaction.response.send_message("❌ There are no active role-specific quests.", ephemeral=True)
             return
+        if quest_number < 1 or quest_number > len(quests):
+            await interaction.response.send_message(f"❌ Choose a quest number from **1 to {len(quests)}**.", ephemeral=True)
+            return
+        quest = quests[quest_number - 1]
         if quest.get("status") == "Completed":
-            await interaction.response.send_message(f"❌ This role quest was already completed by **{quest.get('completed_by', 'another OC')}**.", ephemeral=True)
+            await interaction.response.send_message(f"❌ Role quest #{quest_number} was already completed by **{quest.get('completed_by', 'another OC')}**.", ephemeral=True)
             return
         resolved_name = resolve_cat_name_casefold(cat_name)
         if not resolved_name:
@@ -11879,32 +13152,43 @@ async def quest_role_complete(interaction: discord.Interaction, cat_name: str):
         quest["completed_by"] = resolved_name
         quest["completed_by_owner_id"] = oc_owner_id(cat)
         quest["reward_result"] = reward_text
-        data["active_role_quest"] = quest
+        quests[quest_number - 1] = quest
+        set_active_role_quests(quests)
         data.setdefault("role_quest_history", []).append(copy.deepcopy(quest))
-        data["role_quest_history"] = data["role_quest_history"][-40:]
+        data["role_quest_history"] = data["role_quest_history"][-120:]
         save_data(data)
 
     channel = bot.get_channel(QUEST_CHANNEL_ID)
     if channel:
         await send_long_message(channel, "🌟 **Role-Specific Quest Complete!**\n\n" + f"**{resolved_name}** completed **{quest.get('title', 'the role quest')}**.\n🎁 {reward_text}")
-    await interaction.response.send_message(f"✅ Marked the role quest complete for **{resolved_name}** and applied their random bonus.", ephemeral=True)
+    await interaction.response.send_message(f"✅ Marked role quest #{quest_number} complete for **{resolved_name}** and applied their random reward.", ephemeral=True)
 
 
-@quest_group.command(name="rolereroll", description="Staff only. Replace the optional role-specific quest with a new one")
-async def quest_role_reroll(interaction: discord.Interaction):
+@quest_group.command(name="rolereroll", description="Staff only. Replace one optional role-specific quest")
+@app_commands.describe(quest_number="Which active role quest to replace: 1 or 2 (defaults to 1)")
+async def quest_role_reroll(interaction: discord.Interaction, quest_number: int = 1):
     if not await staff_command_check(interaction):
         return
     async with data_lock:
         reset_legacy_quest_data_if_needed()
+        quests = get_active_role_quests()
+        if not quests:
+            await interaction.response.send_message("❌ There are no active role-specific quests.", ephemeral=True)
+            return
+        if quest_number < 1 or quest_number > len(quests):
+            await interaction.response.send_message(f"❌ Choose a quest number from **1 to {len(quests)}**.", ephemeral=True)
+            return
         due_at = get_current_quest_cycle_due_at()
-        archive_active_role_quest("Replaced")
-        quest = select_new_role_quest(due_at)
-        data["active_role_quest"] = quest
+        archive_role_quest(quests[quest_number - 1], "Replaced")
+        other_roles = {quest.get("role") for i, quest in enumerate(quests) if i != quest_number - 1 and quest}
+        replacement = select_new_role_quest(due_at=due_at, exclude_roles=other_roles)
+        quests[quest_number - 1] = replacement
+        set_active_role_quests(quests)
         save_data(data)
     channel = bot.get_channel(QUEST_CHANNEL_ID)
     if channel:
-        await send_long_message(channel, "🔄 **Role Quest Rerolled**\n\n" + format_role_quest_block(quest))
-    await interaction.response.send_message("✅ Posted a new optional role-specific quest.", ephemeral=True)
+        await send_long_message(channel, f"🔄 **Role Quest #{quest_number} Rerolled**\n\n" + format_role_quest_block(replacement, index=quest_number, total=len(quests)))
+    await interaction.response.send_message(f"✅ Posted a new optional role-specific quest in slot #{quest_number}.", ephemeral=True)
 
 
 RESET_QUEST_CHOICES = [
@@ -12611,6 +13895,9 @@ async def catinfo(interaction: discord.Interaction, name: str):
         injury_text = format_injury(cat)
         hunger_text = format_hunger_status(cat)
         role_bonus_text = role_quest_bonus_summary(cat)
+        role_collection_text = role_quest_collection_summary(cat)
+        role_skill_text = role_quest_skill_summary(cat)
+        role_streak = int(cat.get("role_quest_streak", 0) or 0)
 
         age_text = f"{cat.get('age', 0)} moons"
         age_freeze_text = freeze_remaining_text(cat, "freeze_age", "freeze_age_until")
@@ -12666,6 +13953,9 @@ async def catinfo(interaction: discord.Interaction, name: str):
             f"**Current Health**: {injury_text}\n"
             f"**Hunger**: {hunger_text}\n"
             f"**Role Quest Bonus**: {role_bonus_text}\n"
+            f"**Role Quest Streak**: {role_streak} completed\n"
+            f"**Quest Keepsakes**: {role_collection_text}\n"
+            f"**Quest Skill Practice**: {role_skill_text}\n"
             f"**Mentor**: {mentor}\n"
             f"**Apprentices**: {apprentices_text}\n"
             f"**Afterlife**: {afterlife}\n\n"
@@ -13350,7 +14640,7 @@ async def bothelp(interaction: discord.Interaction):
 
         "📜 **Quest / Story Commands**\n"
         "Current quests/events post on the 1st of every month at 9 AM and stay active until the next month. Hunting objectives use broad prey categories such as birds, fish, or small prey. Reminders post with 14 days, 7 days, and 3 days remaining. The pool rolls 35% hunting, 20% social, 20% herb patrol, 10% sickness/crisis, and 15% wild animal events.\n"
-        "One optional role-specific quest also runs alongside the monthly quests. It can be completed by one eligible OC from any Clan for a small personal bonus, and there is no penalty if nobody completes it. Use `/quest role` to view it.\n"
+        "Starting September 1, two optional role-specific quests run alongside the monthly quests, using two different role groups whenever possible. Each role cycles through all of its prompts before repeating. There is no penalty if nobody completes them. Use `/quest role` to view both. One-use Lucky Paw, Well Rested, and StarClan blessing charges are saved on `/catinfo`; staff can mark them spent with `/quest usebonus`.\n"
         "`/gatheringreport [ClanName]` — View recent story updates, quest results, injuries, rank changes, and major events for a specific Clan.\n"
         "`/rollhelp` — Helps calculate whether an OC caught their prey by adding the roll, prey modifier, specialty prey bonus, weather modifier, quest modifier, hunger modifier, and any other modifier against the OC’s required hunting number.\n\n"
 
