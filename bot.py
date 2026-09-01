@@ -173,8 +173,11 @@ MEMBER_ROLE_ID = 1441508526504808561
 # Rules verification / onboarding.
 RULES_VERIFICATION_MESSAGE_ID = 1544201037093535904
 NEW_MEMBER_ROLE_ID = 1441509553001730098
-RULES_CHANNEL_ID = 1441202727672877076
-# Direct link to the exact message members must react to, rather than only the rules channel.
+# ALL bot-written onboarding/verification information belongs in this channel.
+# Never send onboarding messages into the rules/verification-post channel itself.
+VERIFICATION_INFO_CHANNEL_ID = 1441200938898423851
+# Direct link to the exact verification post. The linked post lives in the rules channel,
+# but the bot must never SEND onboarding/reminder messages to that channel.
 RULES_LINK = "https://discord.com/channels/1441200937514434563/1441202727672877076/1544201037093535904"
 RULES_REMINDER_AFTER_DAYS = 3
 NEW_MEMBER_ROLE_REMOVE_AFTER_DAYS = 7
@@ -6888,12 +6891,12 @@ async def on_member_join(member: discord.Member):
     if member.bot:
         return
 
-    rules_channel = bot.get_channel(RULES_CHANNEL_ID)
-    if rules_channel is None:
+    welcome_channel = bot.get_channel(VERIFICATION_INFO_CHANNEL_ID)
+    if welcome_channel is None:
         try:
-            rules_channel = await bot.fetch_channel(RULES_CHANNEL_ID)
+            welcome_channel = await bot.fetch_channel(VERIFICATION_INFO_CHANNEL_ID)
         except (discord.NotFound, discord.Forbidden, discord.HTTPException) as error:
-            print(f"Could not access the rules channel for new member {member.id}: {error}")
+            print(f"Could not access the verification welcome channel for new member {member.id}: {error}")
             return
 
     message = (
@@ -6908,13 +6911,13 @@ async def on_member_join(member: discord.Member):
     )
 
     try:
-        await rules_channel.send(
+        await welcome_channel.send(
             message,
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False)
         )
         print(f"Sent verification instructions for new member {member} ({member.id}).")
     except discord.Forbidden:
-        print("Could not send new-member verification instructions: bot lacks permission in the rules channel.")
+        print("Could not send new-member verification instructions: bot lacks permission in the verification welcome channel.")
     except discord.HTTPException as error:
         print(f"Could not send verification instructions for {member.id}: {error}")
 
@@ -6957,12 +6960,12 @@ async def check_rules_onboarding():
     if member_role is None or new_member_role is None:
         return
 
-    rules_channel = bot.get_channel(RULES_CHANNEL_ID)
-    if rules_channel is None:
+    verification_info_channel = bot.get_channel(VERIFICATION_INFO_CHANNEL_ID)
+    if verification_info_channel is None:
         try:
-            rules_channel = await bot.fetch_channel(RULES_CHANNEL_ID)
+            verification_info_channel = await bot.fetch_channel(VERIFICATION_INFO_CHANNEL_ID)
         except Exception:
-            rules_channel = None
+            verification_info_channel = None
 
     now = datetime.now(TZ)
     changed = False
@@ -6977,9 +6980,9 @@ async def check_rules_onboarding():
             record = reminders.setdefault(user_key, {})
 
             if days_in_server >= RULES_REMINDER_AFTER_DAYS and days_in_server < NEW_MEMBER_ROLE_REMOVE_AFTER_DAYS and member_role not in member.roles and not record.get("three_day_reminder_sent"):
-                if rules_channel:
+                if verification_info_channel:
                     try:
-                        await rules_channel.send(
+                        await verification_info_channel.send(
                             f"{member.mention} 🐾 **Verification reminder!** You still need to read the server rules and react with ✅ on the verification message to receive the Member role.\n\n"
                             f"📜 **[Read the rules & verify here]({RULES_LINK})**",
                             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False)
