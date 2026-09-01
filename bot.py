@@ -171,10 +171,11 @@ HIATUS_ROLE_ID = 1463773050242728049
 MEMBER_ROLE_ID = 1441508526504808561
 
 # Rules verification / onboarding.
-RULES_VERIFICATION_MESSAGE_ID = 1542923923165806592
+RULES_VERIFICATION_MESSAGE_ID = 1544201037093535904
 NEW_MEMBER_ROLE_ID = 1441509553001730098
 RULES_CHANNEL_ID = 1441202727672877076
-RULES_LINK = "https://discord.com/channels/1441200937514434563/1441202727672877076"
+# Direct link to the exact message members must react to, rather than only the rules channel.
+RULES_LINK = "https://discord.com/channels/1441200937514434563/1441202727672877076/1544201037093535904"
 RULES_REMINDER_AFTER_DAYS = 3
 NEW_MEMBER_ROLE_REMOVE_AFTER_DAYS = 7
 
@@ -6882,6 +6883,43 @@ async def get_rules_guild():
 
 
 @bot.event
+async def on_member_join(member: discord.Member):
+    """Immediately point new members to the exact rules verification message."""
+    if member.bot:
+        return
+
+    rules_channel = bot.get_channel(RULES_CHANNEL_ID)
+    if rules_channel is None:
+        try:
+            rules_channel = await bot.fetch_channel(RULES_CHANNEL_ID)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as error:
+            print(f"Could not access the rules channel for new member {member.id}: {error}")
+            return
+
+    message = (
+        f"👋 **Welcome to Echostone Mountain, {member.mention}!**\n\n"
+        "Before you can access the rest of the server, you’ll need to verify yourself as a Member. 🐾\n\n"
+        "**Here’s exactly what to do:**\n"
+        f"**1.** Open the **[Rules & Verification message]({RULES_LINK})**.\n"
+        "**2.** Read through the server rules completely.\n"
+        "**3.** React to that message with **✅** once you’re finished.\n"
+        f"**4.** The bot will automatically give you the <@&{MEMBER_ROLE_ID}> role, which unlocks the rest of the server.\n\n"
+        "That’s it! Once you’ve reacted, you should be ready to explore Echostone Mountain. 🌙"
+    )
+
+    try:
+        await rules_channel.send(
+            message,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False)
+        )
+        print(f"Sent verification instructions for new member {member} ({member.id}).")
+    except discord.Forbidden:
+        print("Could not send new-member verification instructions: bot lacks permission in the rules channel.")
+    except discord.HTTPException as error:
+        print(f"Could not send verification instructions for {member.id}: {error}")
+
+
+@bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if payload.message_id != RULES_VERIFICATION_MESSAGE_ID or str(payload.emoji) != "✅":
         return
@@ -6941,7 +6979,11 @@ async def check_rules_onboarding():
             if days_in_server >= RULES_REMINDER_AFTER_DAYS and days_in_server < NEW_MEMBER_ROLE_REMOVE_AFTER_DAYS and member_role not in member.roles and not record.get("three_day_reminder_sent"):
                 if rules_channel:
                     try:
-                        await rules_channel.send(f"{member.mention} please read the server rules and react with ✅ to verify: {RULES_LINK}")
+                        await rules_channel.send(
+                            f"{member.mention} 🐾 **Verification reminder!** You still need to read the server rules and react with ✅ on the verification message to receive the Member role.\n\n"
+                            f"📜 **[Read the rules & verify here]({RULES_LINK})**",
+                            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False)
+                        )
                         record["three_day_reminder_sent"] = True
                         record["three_day_reminder_sent_at"] = now.isoformat()
                         changed = True
