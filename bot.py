@@ -540,7 +540,9 @@ def fresh_default_data():
         "gathering_history": [],
         "medicine_gathering_history": [],
         "last_gathering_skipped": None,
-        "last_medicine_gathering_skipped": None
+        "last_medicine_gathering_skipped": None,
+        "ambient_hazard_last_triggered": {},
+        "ambient_hazard_last_checked": {}
     }
 
 
@@ -7007,6 +7009,826 @@ async def check_rules_onboarding():
             save_data(data)
 
 
+
+# ─────────────────────────────
+# HUNTING PROMPT SYSTEM
+# ─────────────────────────────
+
+HUNT_CHANNELS = {1443836708494905425: {'location': 'Glacier’s Edge', 'emoji': '❄️'},
+ 1443836740338188389: {'location': 'Cloud Plateau', 'emoji': '❄️'},
+ 1443836807459377162: {'location': 'Frost Tunnels', 'emoji': '❄️'},
+ 1443836852317585418: {'location': 'Frozen Falls', 'emoji': '❄️'},
+ 1443838786285998150: {'location': 'Trout Run', 'emoji': '🌊'},
+ 1443839406288142457: {'location': 'Reed Marsh', 'emoji': '🌊'},
+ 1443839451917848677: {'location': 'Glistening Pools', 'emoji': '🌊'},
+ 1443839512672469115: {'location': 'Sunspirit Sands', 'emoji': '🌊'},
+ 1443840180837548112: {'location': 'Raptorfang Spires', 'emoji': '🦴'},
+ 1443840270381879410: {'location': 'Rexhead Pillars', 'emoji': '🦴'},
+ 1443840242258939925: {'location': 'Dustwind Flats', 'emoji': '🦴'},
+ 1443840299657986190: {'location': 'Dinosaur Spine', 'emoji': '🦴'},
+ 1443840673857146950: {'location': 'Whispering Branches', 'emoji': '🌲'},
+ 1443840741582438400: {'location': 'Deeproot Tangle', 'emoji': '🌲'},
+ 1443841769316810794: {'location': 'Sundance Pond', 'emoji': '🌲'},
+ 1443842326488158209: {'location': 'Toadstool Glade', 'emoji': '🍄'},
+ 1444902861267013756: {'location': 'The Sanctuary', 'emoji': '🐖'},
+ 1444903072370397317: {'location': 'Frostbite Ridge', 'emoji': '🏔️'},
+ 1444903464957382717: {'location': 'Neon Path', 'emoji': '🌃'},
+ 1444903561099088004: {'location': 'Twoleg Town', 'emoji': '🏡'}}
+
+NO_PREY_HUNT_PROMPTS = {'Frozen Falls': ['The roar of BlizzardClan’s sacred falls drowns out every other sound, and no prey scent lingers anywhere nearby. A '
+                  'single pale feather spirals slowly from somewhere above and lands at your paws. **There is nothing to hunt here, but... '
+                  'is that a sign from StarClan? Probably not. You might want to keep it anyway.**',
+                  'You search along the icy stones behind the falls, but find no tracks fresh enough to follow. Instead, a thin shard of '
+                  'ice breaks loose overhead and lands perfectly upright in the snow before tipping over. **There is nothing to hunt here. '
+                  'Still... that was oddly dramatic.**',
+                  'No prey dares linger around the sacred falls, leaving only the thunder of water and the occasional groan of shifting '
+                  'ice. Beneath a frozen ledge, you notice a tiny blue-grey stone polished completely smooth by the water. **There is '
+                  'nothing to hunt here, but you may take the stone with you if you wish.**',
+                  'You catch what sounds like a whisper beneath the pounding waterfall and turn sharply toward the hidden cavern. Nothing '
+                  'is there when you look, only dripping water and your own reflection trembling across the ice. **There is nothing to '
+                  'hunt here. Maybe the mountain is simply playing tricks on you.**',
+                  'Fresh pawprints appear in the snow near the falls, but they abruptly stop several tail-lengths from the water with no '
+                  'obvious trail leading away. They are too blurred by frost to identify. **There is nothing to hunt here, though you may '
+                  'want to remember what you found.**',
+                  'A thin beam of sunlight slips through the ice and throws a strange rainbow across the cavern wall. For only a moment, '
+                  'the colours seem almost shaped like a cat before the light shifts and the illusion disappears. **There is nothing to '
+                  'hunt here. StarClan probably has better things to do... probably.**'],
+ 'Sunspirit Sands': ['Warm sand shifts beneath your paws while the water laps peacefully against the shore. There are no prey trails to '
+                     'follow, but a perfectly intact shell gleams beside the tide line as though somebody placed it there. **Sunspirit '
+                     'Sands is for resting, not hunting, but the shell is yours if you want it.**',
+                     'You wander along the empty beach without finding so much as a mouse track. A smooth piece of driftwood has washed '
+                     'ashore instead, twisted into a shape that looks suspiciously like a curled cat if you squint hard enough. **There is '
+                     'nothing to hunt here, but perhaps it would make an interesting keepsake.**',
+                     'The sand holds no fresh prey scent, only the overlapping pawprints of TorrentClan cats who have visited before you. '
+                     'Among them is one tiny set of tracks leading toward the water and disappearing at the shoreline. **There is nothing '
+                     'to hunt here. Maybe somebody went for a swim... hopefully.**',
+                     'A wave rolls farther up the beach than the others and leaves something glittering behind. It is only a tiny piece of '
+                     'polished sea glass, dulled smooth enough that it cannot cut your paws. **There is nothing to hunt here, but you may '
+                     'take your strangely shiny treasure.**',
+                     'You find no prey whatsoever, but a little mound of sand near the water looks suspiciously deliberate. One swipe of '
+                     'your paw reveals three shells tucked underneath as though another cat had hidden them there. **Sunspirit Sands is '
+                     'for resting, not hunting. Whether you disturb this mysterious shell stash is entirely up to you.**',
+                     'A warm breeze carries the distant call of a bird over the water, followed by a single feather drifting onto the '
+                     'beach beside you. It is damp at the tip but otherwise untouched. **There is nothing to hunt here, though perhaps the '
+                     'feather deserves a place in somebody’s nest.**'],
+ 'Dinosaur Spine': ['Ancient bone, mineral-rich stone, and FossilClan’s water source surround you, but there are no prey trails worth '
+                    'following here. Something glimmers between two old fossils: a tiny crystal loosened from the ridge. **This sacred '
+                    'place is not a hunting ground, but you may take the crystal if it feels right.**',
+                    'You find no prey among the ancient bones, but your paw brushes against a small fossil fragment half-buried in the '
+                    'dust. Its shape resembles a tiny claw, though whether it actually belonged to anything interesting is impossible to '
+                    'tell. **There is nothing to hunt here. FossilClan would probably still think this is pretty cool.**',
+                    'A gust whistles through the Dinosaur Spine and produces a low, hollow note from somewhere inside the rocks. For a '
+                    'heartbeat it sounds almost like a distant roar before fading back into ordinary wind. **There is nothing to hunt '
+                    'here. Definitely just the wind. Probably.**',
+                    'No prey scent breaks through the mineral-rich air. Instead, sunlight catches a vein of crystal in the ridge and sends '
+                    'a bright flash directly across your eyes. When you look again, one loose shard has fallen beside your paws. **There '
+                    'is nothing to hunt here, but you have found a small crystal.**',
+                    'While crossing between the old bones, you notice several pebbles arranged in a rough circle around one tiny fossil. '
+                    'It could easily be coincidence... or perhaps another FossilClan cat placed them there moons ago. **There is nothing '
+                    'to hunt here, but maybe leave the little arrangement undisturbed.**',
+                    'The ridge remains completely quiet until a pebble suddenly tumbles from somewhere above and lands beside an enormous '
+                    'ancient bone. Nothing follows it. **There is nothing to hunt here, though the Dinosaur Spirits apparently have '
+                    'excellent timing when it comes to making things ominous.**'],
+ 'Toadstool Glade': ['The overwhelming scent of damp earth and fungi smothers every prey trail before you can follow it. Instead, you '
+                     'notice a tiny mushroom growing in an almost perfect ring of moss. **Hunting is impossible here, but you might want '
+                     'to remember where you saw this strange little fairy circle.**',
+                     'No prey ventures close to the towering mushrooms, but a single drop of water falls from one enormous cap and lands '
+                     'directly between your ears. **There is nothing to hunt here. The Glade has instead chosen violence in the smallest '
+                     'possible form.**',
+                     'You search beneath the towering fungi and find nothing edible, but something pale gleams in the moss. It is a small '
+                     'feather dusted with spores, untouched except for the damp forest floor beneath it. **There is nothing to hunt here, '
+                     'but you may take the feather if you are confident it is safe.**',
+                     'A cluster of tiny mushrooms releases a faint puff of harmless-looking spores when a falling twig strikes the ground '
+                     'beside them. They sparkle briefly in a shaft of light before disappearing into the air. **There is nothing to hunt '
+                     'here. Maybe... do not stick your face directly into that.**',
+                     'The Glade is completely devoid of prey, but one enormous toadstool has collected a shallow pool of rainwater in the '
+                     'centre of its cap. Your reflection stares back at you from above in a strangely distorted little mirror. **Hunting '
+                     'is impossible here, but apparently the forest has provided free self-reflection.**',
+                     'You hear something rustle behind one of the towering mushrooms and immediately prepare yourself, only for a pinecone '
+                     'to roll slowly into view and stop at your paws. Nothing follows it. **There is nothing to hunt here. Whatever caused '
+                     'that is either completely harmless or extremely committed to being mysterious.**']}
+
+HUNT_TABLES = {'Glacier’s Edge': [(27, 'prey', ['Pika', 'Mouse', 'Vole', 'Shrew']),
+                    (25, 'prey', ['Cutthroat Trout', 'Mountain Whitefish']),
+                    (15, 'prey', ['Snowshoe Hare']),
+                    (10, 'prey', ['Ptarmigan']),
+                    (8, 'prey', ['Bull Trout']),
+                    (6, 'prey', ['Marmot']),
+                    (4, 'prey', ['Golden Eagle']),
+                    (2, 'prey', ['Mountain Goat']),
+                    (2, 'threat', 'Cougar'),
+                    (1, 'threat', 'Bear')],
+ 'Frost Tunnels': [(30, 'prey', ['Mouse']),
+                   (20, 'prey', ['Pika']),
+                   (20, 'prey', ['Salamander']),
+                   (15, 'prey', ['Bat']),
+                   (8, 'prey', ['Rat']),
+                   (4, 'threat', 'Wolverine'),
+                   (3, 'threat', 'Dark Forest Cat')],
+ 'Cloud Plateau': [(20, 'prey', ['Mouse', 'Shrew']),
+                   (18, 'prey', ['Vole', 'Pika']),
+                   (16, 'prey', ['Red Squirrel']),
+                   (14, 'prey', ['Snowshoe Hare']),
+                   (13, 'prey', ['Ptarmigan']),
+                   (10, 'prey', ['Magpie']),
+                   (5, 'prey', ['Caribou Scraps']),
+                   (2, 'prey', ['Canada Goose']),
+                   (1, 'threat', 'Cougar'),
+                   (1, 'threat', 'Bear')],
+ 'Trout Run': [(30, 'prey', ['Trout', 'Perch', 'Arctic Char']),
+               (20, 'prey', ['Minnows']),
+               (18, 'prey', ['Frog']),
+               (12, 'prey', ['Mouse', 'Squirrel']),
+               (10, 'prey', ['Crayfish']),
+               (3, 'prey', ['Kingfisher']),
+               (3, 'prey', ['Duckling']),
+               (3, 'threat', 'Otter'),
+               (1, 'threat', 'Bear')],
+ 'Reed Marsh': [(20, 'prey', ['Frog']),
+                (18, 'prey', ['Perch']),
+                (12, 'prey', ['Water Vole']),
+                (11, 'prey', ['Walleye']),
+                (10, 'prey', ['Loon']),
+                (9, 'prey', ['Duck']),
+                (8, 'prey', ['Catfish']),
+                (6, 'prey', ['Mink']),
+                (4, 'prey', ['Muskrat']),
+                (2, 'prey', ['Beaver'])],
+ 'Glistening Pools': [(20, 'prey', ['Minnow', 'Mouse']),
+                      (18, 'prey', ['Frog']),
+                      (15, 'prey', ['Duck']),
+                      (13, 'prey', ['Coot']),
+                      (12, 'prey', ['Loon']),
+                      (10, 'prey', ['Rat']),
+                      (5, 'prey', ['Heron']),
+                      (5, 'shared', ['Canada Goose', 'Canada Goose']),
+                      (2, 'threat', 'Otter')],
+ 'Raptorfang Spires': [(25, 'prey', ['Pika', 'Vole', 'Rock Wren']),
+                       (20, 'prey', ['Squirrel', 'Chipmunk']),
+                       (18, 'prey', ['Crow']),
+                       (17, 'prey', ['Garter Snake', 'Frog']),
+                       (10, 'prey', ['Snowshoe Hare']),
+                       (8, 'prey', ['Golden Eagle']),
+                       (2, 'threat', 'Cougar')],
+ 'Rexhead Pillars': [(30, 'prey', ['Ptarmigan', 'Rock Pigeon']),
+                     (25, 'prey', ['Sparrow', 'Robin', 'Blue Jay']),
+                     (20, 'prey', ['Squirrel', 'Chipmunk']),
+                     (12, 'prey', ['Crow']),
+                     (5, 'shared', ['Red-tailed Hawk', 'Red-tailed Hawk']),
+                     (5, 'shared', ['Peregrine Falcon', 'Peregrine Falcon']),
+                     (3, 'prey', ['Mountain Goat'])],
+ 'Dustwind Flats': [(25, 'prey', ['Mouse', 'Vole', 'Common Shrew']),
+                    (20, 'prey', ['Red Squirrel', 'Chipmunk']),
+                    (18, 'prey', ['Blue Grouse']),
+                    (12, 'prey', ['Snowshoe Hare']),
+                    (10, 'prey', ['Pika']),
+                    (8, 'prey', ['Garter Snake', 'Spotted Salamander']),
+                    (5, 'prey', ['Nighthawk']),
+                    (2, 'shared', ['Weasel', 'Weasel'])],
+ 'Whispering Branches': [(30, 'prey', ['Squirrel', 'Chipmunk']),
+                         (25, 'prey', ['Sparrow', 'Robin', 'Blue Jay', 'Woodpecker', 'Starling']),
+                         (20, 'prey', ['Nestling Birds']),
+                         (10, 'prey', ['Crow']),
+                         (5, 'shared', ['Red-tailed Hawk', 'Red-tailed Hawk']),
+                         (5, 'shared', ['Owl', 'Owl']),
+                         (5, 'shared', ['Vulture', 'Vulture'])],
+ 'Deeproot Tangle': [(25, 'prey', ['Minnow', 'Frog']),
+                     (20, 'prey', ['Water Vole']),
+                     (15, 'prey', ['Red-winged Blackbird']),
+                     (10, 'prey', ['Duck', 'Garter Snake']),
+                     (10, 'prey', ['Turtle']),
+                     (5, 'prey', ['Heron']),
+                     (10, 'shared', ['Canada Goose', 'Canada Goose']),
+                     (5, 'threat', 'Otter')],
+ 'Sundance Pond': [(25, 'prey', ['Minnow', 'Frog']),
+                   (20, 'prey', ['Duck']),
+                   (15, 'prey', ['Water Vole']),
+                   (10, 'prey', ['Red-winged Blackbird']),
+                   (10, 'prey', ['Garter Snake']),
+                   (7, 'prey', ['Turtle']),
+                   (5, 'prey', ['Rat']),
+                   (3, 'prey', ['Heron']),
+                   (3, 'shared', ['Canada Goose', 'Canada Goose']),
+                   (2, 'threat', 'Otter')],
+ 'Frostbite Ridge': [(60, 'prey', ['Gull', 'Pigeon', 'Starling']),
+                     (30, 'prey', ['Sparrow', 'Finch', 'Lark']),
+                     (5, 'prey', ['Eagle']),
+                     (2, 'threat', 'Owl'),
+                     (2, 'threat', 'Extreme Wind'),
+                     (1, 'threat', 'Sheer Drop')],
+ 'The Sanctuary': [(70, 'prey', ['Mouse']), (30, 'prey', ['Barn Rat'])],
+ 'Neon Path': [(50, 'prey', ['Rat']),
+               (30, 'prey', ['Mouse']),
+               (10, 'prey', ['Skunk']),
+               (5, 'shared', ['Raccoon', 'Raccoon']),
+               (3, 'threat', 'Dog'),
+               (2, 'threat', 'Twoleg Monster')],
+ 'Twoleg Town': [(30, 'prey', ['Mouse']),
+                 (30, 'prey', ['Sparrow', 'Pigeon']),
+                 (30, 'prey', ['Squirrel', 'Chipmunk']),
+                 (5, 'threat', 'Raccoon'),
+                 (3, 'threat', 'Dog'),
+                 (2, 'threat', 'Twoleg Monster')]}
+
+HUNT_PROMPTS = {('Glacier’s Edge', 'Pika'): ['A pika emerges from between frost-covered stones with a mouthful of dry grass, pausing to carefully rearrange its bundle. **Roll to catch it, +1 '
+                              'because it is distracted!**',
+                              'A pika slips while jumping onto a frost-coated rock and slides backward toward you. **Roll to catch it, +2 because it lost its footing!**'],
+ ('Glacier’s Edge', 'Mouse'): ['A mouse scurries across a thin patch of snow and stops beside frozen grass to dig desperately for seeds. **Roll to catch it!**'],
+ ('Glacier’s Edge', 'Vole'): ['A vole noses along the edge of a snowbank, leaving a tiny trail between exposed stones. **Roll to catch it!**'],
+ ('Glacier’s Edge', 'Shrew'): ['A shrew zigzags between frost-covered stones with its nose pressed to the ground. **Roll to catch it, +1 because it is distracted by its '
+                               'search!**'],
+ ('Glacier’s Edge', 'Cutthroat Trout'): ['A cutthroat trout holds in a clear pocket beside a submerged stone, red-orange markings flashing beneath the icy water. **Roll to catch '
+                                         'it!**'],
+ ('Glacier’s Edge', 'Mountain Whitefish'): ['A mountain whitefish glides through a calmer seam of current below the frozen bank. **Roll to catch it!**'],
+ ('Glacier’s Edge', 'Snowshoe Hare'): ['A hare crouches beside a snow-covered boulder, relying so heavily on its white coat that it has not realized you spotted it. **Roll to '
+                                       'catch it, +1 because it thinks it is hidden!**',
+                                       'A hare launches over several icy rocks but lands badly on the last one and skids across the frost. **Roll to catch it, +2 because its '
+                                       'footing failed!**'],
+ ('Glacier’s Edge', 'Ptarmigan'): ['A ptarmigan scratches beneath crusted snow for food, pale feathers blending almost seamlessly into the frozen ground. **Roll to catch it, -1 '
+                                   'because its camouflage is excellent!**',
+                                   'A gust presses the ptarmigan low against the snow and prevents an immediate takeoff. **Roll to catch it, +1 because the wind is working '
+                                   'against it!**'],
+ ('Glacier’s Edge', 'Bull Trout'): ['A thick bull trout circles through one of the deeper pools, occasionally rising beneath the surface before disappearing again. **Roll to '
+                                    'catch it, -2 because it is staying deep!**',
+                                    'A large trout surges after a smaller fish and briefly drives itself into the shallows near your paws. **Roll to catch it, +2 because its own '
+                                    'hunt brought it close!**'],
+ ('Glacier’s Edge', 'Marmot'): ['A chunky marmot waddles between two boulders carrying an enormous bundle of dried vegetation. **Roll to catch it, +1 because its load is slowing '
+                                'it down!**',
+                                'A marmot digs enthusiastically at its burrow entrance, throwing dirt and snow behind itself without looking around. **Roll to catch it, +2 '
+                                'because it is completely distracted!**'],
+ ('Glacier’s Edge', 'Golden Eagle'): ['A golden eagle lands heavily on an exposed ledge, wings spreading wide as it steadies itself above the icy stream. **Roll to hunt it! '
+                                      'Hunting party required: 4+ cats, combined roll over 50.**',
+                                      'A golden eagle wrestles with prey already trapped beneath one talon. **Roll to hunt it, +1 because it is distracted! Hunting party '
+                                      'required: 4+ cats, combined roll over 50.**'],
+ ('Glacier’s Edge', 'Mountain Goat'): ['A young mountain goat stands apart from its herd on a broad ledge, scraping one hoof against the ice while searching for vegetation. '
+                                       '**Roll to hunt it! Hunting party required: 6+ cats, combined roll over 80.**',
+                                       'A mountain goat lowers its head to lick minerals from exposed stone, giving the patrol a rare opportunity to approach unnoticed. **Roll to '
+                                       'hunt it, +1 because it is distracted! Hunting party required: 6+ cats, combined roll over 80.**'],
+ ('Frost Tunnels', 'Mouse'): ['Tiny claws scrape somewhere beyond the darkness before a mouse emerges beside a dripping wall, whiskers twitching as it investigates the stone. '
+                              '**Roll to catch it!**',
+                              'A mouse bolts across the tunnel and slips on a patch of frost, scrambling wildly for traction. **Roll to catch it, +2 because it lost its '
+                              'footing!**'],
+ ('Frost Tunnels', 'Pika'): ['A pika appears on a low shelf of stone, pausing beside a crack while its ears twitch toward every echo. **Roll to catch it!**'],
+ ('Frost Tunnels', 'Salamander'): ['A salamander crawls slowly across a damp patch of stone beside meltwater. **Roll to catch it!**'],
+ ('Frost Tunnels', 'Bat'): ['A bat drops from the cavern ceiling and sweeps low through the tunnel before climbing again. **Roll to catch it, -1 because it is airborne!**',
+                            'A bat recognizes you as a threat and shoots toward the highest part of the cavern. **Roll to catch it, -2 because it is actively escaping!**'],
+ ('Frost Tunnels', 'Rat'): ['A large rat emerges from a crevice with its whiskers spread and teeth already visible. **Roll to catch it, -1 because it will fight back!**',
+                            'A rat is busy gnawing something against the cave wall and fails to notice you entering the passage. **Roll to catch it, +2 because you caught it '
+                            'completely unaware!**'],
+ ('Cloud Plateau', 'Mouse'): ['A mouse scurries over windswept stone before stopping beside a crust of old snow to dig for seeds. **Roll to catch it!**',
+                              'A sudden gust sends loose snow flying and startles the mouse out of hiding. It freezes rather than runs. **Roll to catch it, +2 because you caught '
+                              'it by surprise!**'],
+ ('Cloud Plateau', 'Shrew'): ['A shrew zigzags through sparse grass with its nose pressed to the ground, searching so intensely that it nearly crosses your paws. **Roll to catch '
+                              'it, +1 because it is distracted!**',
+                              'A gust sends grit and snow across the shrew’s face, causing it to stop and shake itself violently. **Roll to catch it, +2 because it is '
+                              'distracted!**'],
+ ('Cloud Plateau', 'Vole'): ['A round vole emerges from beneath the snow and sits chewing on a dry blade of grass. **Roll to catch it!**'],
+ ('Cloud Plateau', 'Pika'): ['A pika hops between wind-scoured stones and pauses beside a shallow crevice. **Roll to catch it!**'],
+ ('Cloud Plateau', 'Red Squirrel'): ['A red squirrel races across the open plateau carrying a cone, tail streaming behind it in the wind. **Roll to catch it, +1 because its cargo '
+                                     'is slowing it down!**'],
+ ('Cloud Plateau', 'Snowshoe Hare'): ['A snowshoe hare crouches beside a patch of pale stone, trusting its coat to hide it in the snow. **Roll to catch it, +1 because it has not '
+                                      'realized you spotted it!**'],
+ ('Cloud Plateau', 'Ptarmigan'): ['A ptarmigan scratches through windblown snow for seeds, pale feathers nearly vanishing against the plateau. **Roll to catch it, -1 because its '
+                                  'camouflage is excellent!**'],
+ ('Cloud Plateau', 'Magpie'): ['A magpie lands beside a bright scrap caught between two stones and immediately becomes fascinated with it. **Roll to catch it, +1 because it is '
+                               'distracted!**'],
+ ('Cloud Plateau', 'Caribou Scraps'): ['A trail of old caribou scraps lies half-buried in the snow, likely left behind by a larger predator. **No roll is needed to take a small '
+                                       'usable scrap, but stay alert.**'],
+ ('Cloud Plateau', 'Canada Goose'): ['A Canada goose stands stubbornly on the open plateau with its neck stretched high against the wind. **Roll to catch it, -1 because it is '
+                                     'alert!**'],
+ ('Trout Run', 'Trout'): ['A trout holds steady behind a half-submerged rock where the rapids briefly weaken, tail flicking constantly against the current. **Roll to catch it!**',
+                          'A trout drifts into a shallow pocket between stones while searching for food beneath the surface. **Roll to catch it, +2 because the current '
+                          'temporarily boxed it in!**'],
+ ('Trout Run', 'Perch'): ['A perch cruises beside a submerged branch where the river slows slightly around the wood. **Roll to catch it!**',
+                          'A perch becomes momentarily trapped between two rocks as the current presses against its side. **Roll to catch it, +2 because its movement is '
+                          'restricted!**'],
+ ('Trout Run', 'Arctic Char'): ['An Arctic char flashes pale beneath the rapids as it fights steadily upstream against the current. **Roll to catch it!**'],
+ ('Trout Run', 'Minnows'): ['A school of minnows gathers in a calmer pocket near the bank, flashing silver between the stones. **Roll to catch them!**'],
+ ('Trout Run', 'Frog'): ['A frog clings to a slick stone at the river’s edge, watching insects over the rapids. **Roll to catch it!**'],
+ ('Trout Run', 'Mouse'): ['A mouse creeps along the riverbank roots searching for seeds above the spray. **Roll to catch it!**'],
+ ('Trout Run', 'Squirrel'): ['A squirrel pauses on a low root above the water to gnaw at something between its paws. **Roll to catch it, +1 because it is distracted!**'],
+ ('Trout Run', 'Crayfish'): ['A crayfish crawls from beneath a submerged stone into the shallows, claws raised defensively. **Roll to catch it!**'],
+ ('Trout Run', 'Kingfisher'): ['A kingfisher perches low over the rapids, completely focused on the fish below. **Roll to catch it, +1 because it is distracted!**'],
+ ('Trout Run', 'Duckling'): ['A duckling paddles through a protected eddy close to shore, tiny feet churning beneath the surface. **Roll to catch it!**'],
+ ('Reed Marsh', 'Frog'): ['A frog sits half-submerged in thick mud, croaking loudly enough to betray exactly where it is hiding. **Roll to catch it!**',
+                          'A frog tries to leap from a slick reed root but slides backward into the muck. **Roll to catch it, +2 because it botched its escape!**'],
+ ('Reed Marsh', 'Perch'): ['A perch darts between submerged reeds in water barely deep enough to cover its back. **Roll to catch it!**',
+                           'A perch becomes trapped momentarily in a dense patch of underwater weeds. **Roll to catch it, +2 because its fins are tangled!**'],
+ ('Reed Marsh', 'Water Vole'): ['A water vole paddles between reed stems with a mouthful of wet vegetation. **Roll to catch it, +1 because it is burdened!**'],
+ ('Reed Marsh', 'Walleye'): ['A walleye glides through a darker pocket of marsh water where the reeds briefly open. **Roll to catch it!**'],
+ ('Reed Marsh', 'Loon'): ['A loon drifts between the reeds, dipping its head beneath the surface to search for fish. **Roll to catch it, +1 because it is distracted!**'],
+ ('Reed Marsh', 'Duck'): ['A duck noses through floating plants near the muddy bank. **Roll to catch it, +1 because it is feeding!**'],
+ ('Reed Marsh', 'Catfish'): ['A catfish noses along the muddy bottom, whisker-like barbels stirring the silt. **Roll to catch it, -1 because the water is murky!**'],
+ ('Reed Marsh', 'Mink'): ['A mink slips between the reeds like flowing water, appearing only briefly before vanishing into cover again. **Roll to catch it, -2 because it is '
+                          'exceptionally quick!**',
+                          'A mink bursts from the reeds directly in front of you, just as surprised to see the patrol as you are to see it. **Roll to catch it, +2 because you '
+                          'caught it at close range!**'],
+ ('Reed Marsh', 'Muskrat'): ['A muskrat emerges from the reeds carrying a mouthful of wet vegetation and pauses beside the water. **Roll to hunt it! Hunting party required: 3+ '
+                             'cats, combined roll over 25.**',
+                             'A muskrat struggles to haul an oversized bundle of plants through thick mud. **Roll to hunt it, +2 because it is heavily slowed! Hunting party '
+                             'required: 3+ cats, combined roll over 25.**'],
+ ('Reed Marsh', 'Beaver'): ['A massive beaver gnaws steadily on a fallen branch beside its dam, sending wood chips into the water. **Roll to hunt it! Hunting party required: 5+ '
+                            'cats, combined roll over 60.**',
+                            'A beaver slips while dragging a branch down the muddy slope and lands awkwardly at the water’s edge. **Roll to hunt it, +2 because it is briefly off '
+                            'balance! Hunting party required: 5+ cats, combined roll over 60.**'],
+ ('Glistening Pools', 'Minnow'): ['A glittering school of minnows twists beneath the clear surface, scales flashing whenever sunlight reaches the pond. **Roll to catch them!**',
+                                  'Several minnows become trapped in a tiny sun-warmed shallows between stones. **Roll to catch them, +2 because deeper water is cut off!**'],
+ ('Glistening Pools', 'Mouse'): ['A mouse scurries through exposed roots beside the pool and stops to pry at a seed lodged beneath the bark. **Roll to catch it!**',
+                                 'A mouse lowers its head to drink from the perfectly still water. **Roll to catch it, +1 because it is distracted!**'],
+ ('Glistening Pools', 'Frog'): ['A frog rests on a smooth stone at the edge of the clear pool. **Roll to catch it!**'],
+ ('Glistening Pools', 'Duck'): ['A duck paddles lazily through the clear water and begins preening near the bank. **Roll to catch it, +1 because it is distracted!**'],
+ ('Glistening Pools', 'Coot'): ['A coot paddles across the pool toward a clump of floating plants. **Roll to catch it!**'],
+ ('Glistening Pools', 'Loon'): ['A loon dives beneath the glassy surface and reappears closer to shore than expected. **Roll to catch it, +1 because you know where it '
+                                'surfaced!**'],
+ ('Glistening Pools', 'Rat'): ['A rat darts from the reeds carrying something stolen from the shoreline. **Roll to catch it, -1 because it already has momentum!**',
+                               'A rat slips on the muddy bank and slides several paw-lengths toward the pond. **Roll to catch it, +2 because it lost its footing!**'],
+ ('Glistening Pools', 'Heron'): ['A heron stands perfectly still in the shallows, staring down at fish moving between its legs. **Roll to hunt it! Hunting party required: 3+ '
+                                 'cats, combined roll over 25.**',
+                                 'One long leg slips unexpectedly on a submerged stone and the heron flaps wildly for balance. **Roll to hunt it, +2 because it is off balance! '
+                                 'Hunting party required: 3+ cats, combined roll over 25.**'],
+ ('Glistening Pools', 'Canada Goose'): ['A Canada goose floats near shore and begins hissing the moment it notices you. **Roll to catch it, -2 because it is alert and '
+                                        'aggressive!**',
+                                        'A goose slips while climbing onto a muddy stone and spreads both wings for balance. **Roll to catch it, +2 because it has been caught '
+                                        'awkwardly!**'],
+ ('Raptorfang Spires', 'Pika'): ['A pika squeezes from a crack in one towering spire and pauses on a ledge barely wider than its body. **Roll to catch it, -1 because there is '
+                                 'very little room to pounce!**',
+                                 'Loose gravel slips beneath the pika’s hind feet and sends it scrambling wildly to keep from sliding farther. **Roll to catch it, +2 because it '
+                                 'lost its footing!**'],
+ ('Raptorfang Spires', 'Vole'): ['A vole scurries between loose stones at the base of a spire, pausing to sniff into every crack it passes. **Roll to catch it!**',
+                                 'A vole digs enthusiastically beneath the red dust with its head almost completely buried. **Roll to catch it, +2 because it cannot see you!**'],
+ ('Raptorfang Spires', 'Rock Wren'): ['A rock wren hops between narrow ledges, pecking at insects in the cracks. **Roll to catch it, -1 because the broken stone gives it plenty '
+                                      'of escape routes!**'],
+ ('Raptorfang Spires', 'Squirrel'): ['A squirrel scrambles over a warm stone shelf carrying a seed in its mouth. **Roll to catch it, +1 because it is burdened!**'],
+ ('Raptorfang Spires', 'Chipmunk'): ['A chipmunk pokes from a crack with both cheeks full and pauses on the exposed stone. **Roll to catch it, +1 because its food is slowing it '
+                                     'down!**'],
+ ('Raptorfang Spires', 'Crow'): ['A crow stalks along the top of a spire, head tilted as it watches the gorge below. **Roll to catch it, -1 because it is alert!**'],
+ ('Raptorfang Spires', 'Garter Snake'): ['A garter snake warms itself on a sunlit slab between two spires. **Roll to catch it!**'],
+ ('Raptorfang Spires', 'Frog'): ['A frog remains completely still beneath the shade of a pillar, apparently relying on the darkness for safety. **Roll to catch it!**'],
+ ('Raptorfang Spires', 'Snowshoe Hare'): ['A snowshoe hare races between the bases of the towering spires, using each pillar to break your line of sight. **Roll to catch it, -2 '
+                                          'because the terrain gives it endless turns!**',
+                                          'A hare lands awkwardly after jumping between rocks and skids over loose gravel. **Roll to catch it, +2 because its footing failed!**'],
+ ('Raptorfang Spires', 'Golden Eagle'): ['A golden eagle rests on the crown of a spire, enormous wings folded tightly while it watches the gorge below. **Roll to hunt it! Hunting '
+                                         'party required: 4+ cats, combined roll over 50.**',
+                                         'A gorge wind catches the eagle during landing and forces it to stumble sideways across the ledge. **Roll to hunt it, +2 because it is '
+                                         'temporarily off balance! Hunting party required: 4+ cats, combined roll over 50.**'],
+ ('Rexhead Pillars', 'Ptarmigan'): ['A ptarmigan scratches around a broad ledge, scattering dust and tiny pebbles behind itself as it searches for food. **Roll to catch it!**',
+                                    'A ptarmigan catches one foot in a shallow crack and stumbles forward before pulling free. **Roll to catch it, +2 because it lost its '
+                                    'balance!**'],
+ ('Rexhead Pillars', 'Rock Pigeon'): ['A rock pigeon struts along the pillar edge, bobbing its head importantly with every step. **Roll to catch it!**',
+                                      'A pigeon pecks at scattered seeds caught in a shallow depression in the stone. **Roll to catch it, +1 because it is eating!**'],
+ ('Rexhead Pillars', 'Sparrow'): ['A sparrow hops over the warm stone searching for tiny seeds caught in cracks. **Roll to catch it!**'],
+ ('Rexhead Pillars', 'Robin'): ['A robin lands on a broad ledge and begins pecking through grit near a patch of scrub. **Roll to catch it!**'],
+ ('Rexhead Pillars', 'Blue Jay'): ['A blue jay lands noisily on the pillar and becomes distracted scolding another bird across the gap. **Roll to catch it, +1 because its '
+                                   'attention is elsewhere!**'],
+ ('Rexhead Pillars', 'Squirrel'): ['A squirrel races along a broad ledge with a seed clenched between its teeth. **Roll to catch it, +1 because it is carrying food!**'],
+ ('Rexhead Pillars', 'Chipmunk'): ['A chipmunk stops beside a shallow crack to sort seeds between its paws. **Roll to catch it, +1 because it is distracted!**'],
+ ('Rexhead Pillars', 'Crow'): ['A crow stands at the edge of a pillar watching everything below with unsettling patience. **Roll to catch it, -1 because it is extremely '
+                               'observant!**'],
+ ('Rexhead Pillars', 'Red-tailed Hawk'): ['A red-tailed hawk rests on a pillar overlooking the valley, talons wrapped firmly around a rough patch of stone. **Roll to catch it, -1 '
+                                          'because it is alert and dangerous!**'],
+ ('Rexhead Pillars', 'Peregrine Falcon'): ['A peregrine falcon streaks between the pillars and lands farther along the ridge in a blur of feathers. **Roll to catch it, -2 because '
+                                           'its speed is incredible!**'],
+ ('Rexhead Pillars', 'Mountain Goat'): ['The goat lowers its head to lick minerals from the warm stone, paying no attention to the cats approaching behind it. **Roll to hunt it, '
+                                        '+1 because it is distracted! Hunting party required: 6+ cats, combined roll over 80.**'],
+ ('Dustwind Flats', 'Mouse'): ['A mouse scurries across dusty ground and stops beneath a tumbleweed to nose through loose seeds trapped below it. **Roll to catch it!**',
+                               'A mouse bursts from beneath a tumbleweed almost directly under your paws and freezes in surprise. **Roll to catch it, +2 because you startled it '
+                               'at close range!**'],
+ ('Dustwind Flats', 'Vole'): ['A vole waddles between stones carrying dry grass in its mouth, the bundle trailing behind it through the dust. **Roll to catch it, +1 because it is '
+                              'burdened!**'],
+ ('Dustwind Flats', 'Common Shrew'): ['A common shrew zigzags through brittle scrub with its nose pressed to the ground. **Roll to catch it, +1 because it is distracted!**'],
+ ('Dustwind Flats', 'Red Squirrel'): ['A red squirrel races between low patches of scrub with its tail held high above the dust. **Roll to catch it!**'],
+ ('Dustwind Flats', 'Chipmunk'): ['A chipmunk digs beneath a tumbleweed with its back toward you. **Roll to catch it, +2 because it cannot see you!**'],
+ ('Dustwind Flats', 'Blue Grouse'): ['A blue grouse picks through dry vegetation in the open flats. **Roll to catch it!**'],
+ ('Dustwind Flats', 'Snowshoe Hare'): ['A snowshoe hare bolts through the open flats toward a patch of scrub. **Roll to catch it, -1 because it already has a head start!**'],
+ ('Dustwind Flats', 'Pika'): ['A pika slips between warm stones and pauses with a mouthful of dried grass. **Roll to catch it, +1 because it is burdened!**'],
+ ('Dustwind Flats', 'Garter Snake'): ['A garter snake lies stretched across a sun-warmed strip of stone. **Roll to catch it!**'],
+ ('Dustwind Flats', 'Spotted Salamander'): ['A spotted salamander crawls slowly across a damp log sheltered beneath tangled roots. **Roll to catch it!**',
+                                            'A falling leaf lands directly over the salamander, causing it to wriggle awkwardly out from underneath. **Roll to catch it, +1 '
+                                            'because it has been startled!**'],
+ ('Dustwind Flats', 'Nighthawk'): ['A nighthawk swoops low across the flats before curving back toward the same patch of ground. **Roll to catch it, -1 because it remains '
+                                   'airborne!**',
+                                   'A sudden gust forces the bird into an unexpectedly low landing. **Roll to catch it, +2 because it is briefly grounded!**'],
+ ('Dustwind Flats', 'Weasel'): ['A weasel slips through the tumbleweeds with its long body held low to the ground, following a scent across the flats. **Roll to hunt it! Hunting '
+                                'party required: 4+ cats, combined roll over 50.**',
+                                'A rolling tumbleweed collides with the weasel and sends it scrambling sideways in surprise. **Roll to hunt it, +2 because it has been startled! '
+                                'Hunting party required: 4+ cats, combined roll over 50.**'],
+ ('Whispering Branches', 'Squirrel'): ['A squirrel digs furiously through the deep pine-needle carpet, throwing little sprays of brown needles behind its tail while searching for '
+                                       'a buried meal. **Roll to catch it!**',
+                                       'A squirrel misjudges a jump between two low branches and catches the second branch awkwardly with its front paws. **Roll to catch it, +2 '
+                                       'because it is scrambling to recover!**'],
+ ('Whispering Branches', 'Chipmunk'): ['A chipmunk darts along a fallen branch with both cheeks packed full, pausing briefly whenever another forest sound reaches its ears. '
+                                       '**Roll to catch it, +1 because its food is slowing it down!**',
+                                       'A falling pinecone lands beside the chipmunk and startles it directly toward your paws. **Roll to catch it, +2 because it fled the wrong '
+                                       'way!**'],
+ ('Whispering Branches', 'Sparrow'): ['A sparrow hops through fallen needles, tossing tiny pieces of forest litter aside while searching for food beneath them. **Roll to catch '
+                                      'it!**'],
+ ('Whispering Branches', 'Robin'): ['A robin pulls at something beneath the pine needles with its back turned toward you. **Roll to catch it, +1 because it is distracted!**'],
+ ('Whispering Branches', 'Blue Jay'): ['A blue jay lands on a low branch and begins loudly scolding another bird deeper in the forest. **Roll to catch it, +1 because it is '
+                                       'distracted!**'],
+ ('Whispering Branches', 'Woodpecker'): ['A woodpecker clings low on a spruce trunk, hammering at the bark so loudly it masks your approach. **Roll to catch it, +1 because it '
+                                         'cannot hear you clearly!**'],
+ ('Whispering Branches', 'Starling'): ['A starling drops to the forest floor to peck rapidly through the needles. **Roll to catch it!**'],
+ ('Whispering Branches', 'Nestling Birds'): ['A low nest hidden between dense spruce branches holds several nestlings, their tiny calls giving away the nest. **Roll to catch one, '
+                                             '+1 because they cannot fly yet!**'],
+ ('Whispering Branches', 'Crow'): ['A crow watches from a low branch, head cocked toward every movement below. **Roll to catch it, -1 because it is extremely alert!**'],
+ ('Whispering Branches', 'Red-tailed Hawk'): ['A red-tailed hawk rests on a heavy branch overlooking the forest floor. **Roll to hunt it! Hunting party required: 4+ cats, '
+                                              'combined roll over 40.**'],
+ ('Whispering Branches', 'Owl'): ['An owl lowers its head toward prey moving far below, unaware of the patrol approaching through the branches behind it. **Roll to hunt it, +1 '
+                                  'because it is distracted! Hunting party required: 4+ cats, combined roll over 40.**'],
+ ('Whispering Branches', 'Vulture'): ['A huge vulture hunches on a heavy spruce branch, broad wings held slightly away from its body while it surveys the forest below. **Roll to '
+                                      'hunt it! Hunting party required: 4+ cats, combined roll over 50.**',
+                                      'A vulture is occupied tearing at old carrion beneath the trees, burying its head deep into the remains between bites. **Roll to hunt it, +1 '
+                                      'because it is feeding! Hunting party required: 4+ cats, combined roll over 50.**'],
+ ('Deeproot Tangle', 'Minnow'): ['A school of minnows gathers in a shallow pocket of clear water trapped between two massive roots, scales flickering whenever sunlight reaches '
+                                 'them. **Roll to catch them!**'],
+ ('Deeproot Tangle', 'Frog'): ['A frog crouches on a damp root above a shallow pool, watching insects between the leaves. **Roll to catch it!**'],
+ ('Deeproot Tangle', 'Water Vole'): ['A water vole squeezes between two roots carrying a mouthful of mossy vegetation. **Roll to catch it, +1 because it is burdened!**'],
+ ('Deeproot Tangle', 'Red-winged Blackbird'): ['A red-winged blackbird clings to a reed between the roots, bright shoulder patch flashing as it calls. **Roll to catch it!**'],
+ ('Deeproot Tangle', 'Duck'): ['A duck pushes through a root-choked pool with its head down, searching for food. **Roll to catch it, +1 because it is distracted!**'],
+ ('Deeproot Tangle', 'Garter Snake'): ['A garter snake threads between warm exposed roots and pauses in a patch of sunlight. **Roll to catch it!**'],
+ ('Deeproot Tangle', 'Turtle'): ['A turtle drags itself onto a broad damp root to bask, moving painfully slowly. **Roll to catch it, +2 because it is slow on land!**'],
+ ('Deeproot Tangle', 'Heron'): ['A heron stands between the massive roots with its beak angled toward the water. **Roll to hunt it! Hunting party required: 3+ cats, combined roll '
+                                'over 25.**'],
+ ('Deeproot Tangle', 'Canada Goose'): ['A Canada goose forces its way through a root-choked pool, occasionally bumping its broad body against the wood as it searches for plants. '
+                                       '**Roll to catch it!**',
+                                       'A slippery root sends the goose stumbling sideways into shallow water, wings flaring in surprise. **Roll to catch it, +2 because it has '
+                                       'lost its footing!**'],
+ ('Sundance Pond', 'Minnow'): ['Minnows glitter beneath a warm patch of sunlight near the clear bank, their tiny bodies flashing every time they change direction. **Roll to catch '
+                               'them!**',
+                               'One minnow becomes trapped between a stone and the muddy bank. **Roll to catch it, +2 because its escape route is limited!**'],
+ ('Sundance Pond', 'Frog'): ['A frog stretches across a sun-warmed stone beside the pond, hind legs extended comfortably behind it. **Roll to catch it!**',
+                             'A frog lands badly on a slick stone and slides backward into the shallows. **Roll to catch it, +2 because its landing failed!**'],
+ ('Sundance Pond', 'Duck'): ['A duck paddles lazily through a patch of golden sunlight, leaving a soft V-shaped trail behind it across the pond. **Roll to catch it!**'],
+ ('Sundance Pond', 'Water Vole'): ['A water vole emerges beside the pond with a mouthful of plants and pauses on the muddy bank. **Roll to catch it, +1 because it is burdened!**'],
+ ('Sundance Pond', 'Red-winged Blackbird'): ['A red-winged blackbird lands on a reed above the pond, attention fixed on insects below. **Roll to catch it, +1 because it is '
+                                             'distracted!**'],
+ ('Sundance Pond', 'Garter Snake'): ['A garter snake coils loosely on a sun-warmed patch beside the pond. **Roll to catch it!**'],
+ ('Sundance Pond', 'Turtle'): ['A turtle basks on a low stone at the waterline. **Roll to catch it, +2 because it is slow on land!**'],
+ ('Sundance Pond', 'Rat'): ['A rat races through the reed bed carrying something stolen from the shoreline. **Roll to catch it, -1 because it is already moving quickly!**',
+                            'A rat slips on the muddy shoreline and slides several paw-lengths toward the water. **Roll to catch it, +2 because it lost its footing!**'],
+ ('Sundance Pond', 'Heron'): ['A heron stands perfectly still in the pond, long neck angled down toward fish moving beneath its feet. **Roll to hunt it! Hunting party required: '
+                              '3+ cats, combined roll over 25.**',
+                              'A slick submerged stone causes the heron to stumble and flap violently for balance. **Roll to hunt it, +2 because it is off balance! Hunting party '
+                              'required: 3+ cats, combined roll over 25.**'],
+ ('Sundance Pond', 'Canada Goose'): ['A Canada goose glides toward shore, broad body leaving ripples across the otherwise calm pond. **Roll to catch it!**',
+                                     'A goose slips while climbing onto the muddy bank and throws both wings outward to keep from falling. **Roll to catch it, +2 because it is '
+                                     'off balance!**'],
+ ('Frostbite Ridge', 'Gull'): ['A gull swoops out of the cliffside wind and lands on a broad slab of stone, immediately wrestling with a scrap of food that keeps trying to blow '
+                               'away. **Roll to catch it, +1 because it is distracted!**'],
+ ('Frostbite Ridge', 'Pigeon'): ['A pigeon huddles against the sheltered side of a boulder, feathers puffed into a round ball as it escapes the worst of the mountain wind. **Roll '
+                                 'to catch it!**'],
+ ('Frostbite Ridge', 'Starling'): ['A starling lands among the wind-scoured rocks and begins pecking rapidly at something caught in a crack. **Roll to catch it, +1 because it is '
+                                   'distracted!**'],
+ ('Frostbite Ridge', 'Sparrow'): ['A sparrow drops into a sheltered pocket between stones and starts searching for seeds. **Roll to catch it!**'],
+ ('Frostbite Ridge', 'Finch'): ['A finch clings to a low scrub branch bending in the ridge wind. **Roll to catch it, -1 because the gusts make its movement unpredictable!**'],
+ ('Frostbite Ridge', 'Lark'): ['A lark lands on open stone after fighting the wind and pauses to recover. **Roll to catch it, +1 because it is briefly grounded!**'],
+ ('Frostbite Ridge', 'Eagle'): ['A massive eagle settles onto an exposed outcrop, broad wings folding slowly while its sharp gaze remains fixed on the rapids below. **Roll to '
+                                'hunt it! Hunting party required: 4+ cats, combined roll over 50.**'],
+ ('The Sanctuary', 'Mouse'): ['A fat mouse waddles through spilled grain with both cheeks packed so full that its head looks nearly square. It has apparently forgotten predators '
+                              'exist. **Roll to catch it, +2 because it is distracted and burdened!**',
+                              'A mouse has fallen asleep in a warm pile of hay with half a seed still tucked between its paws. Its whiskers twitch peacefully in its sleep. **Roll '
+                              'to catch it, +2 because it is literally asleep!**',
+                              'Two mice squeak furiously at one another over a single grain kernel while an entire pile of grain sits beside them. **Choose one and roll to catch '
+                              'it, +2 because they are busy arguing!**'],
+ ('The Sanctuary', 'Barn Rat'): ['A barn rat becomes preoccupied stealing food directly from a smaller mouse, chasing the unfortunate rodent away from its meal. **Roll to catch '
+                                 'it, +2 because it is distracted by its robbery!**',
+                                 'A rat trots across the aisle carrying a broad piece of vegetable peel that keeps dragging between its front paws. **Roll to catch it, +1 because '
+                                 'its food is slowing it down!**'],
+ ('Neon Path', 'Rat'): ['A rat tears into a discarded twoleg meal beside an overflowing dumpster, grease coating its whiskers while it rips at the wrapping. **Roll to catch it, '
+                        '+1 because it is distracted!**',
+                        'A rat darts from beneath a dumpster carrying something wrapped in shiny paper. **Roll to catch it, -1 because it already has a strong head start!**'],
+ ('Neon Path', 'Mouse'): ['A mouse darts from beneath a curb and pauses beside a dropped crumb glowing beneath the neon light. **Roll to catch it!**'],
+ ('Neon Path', 'Skunk'): ['A skunk slips on wet concrete while climbing onto a pile of rubbish and scrambles wildly to regain its footing. **Roll to catch it, +2 because it is '
+                          'off balance!**'],
+ ('Neon Path', 'Raccoon'): ['A raccoon digs noisily through an overturned garbage bin, scattering wrappers and scraps across the pavement with both front paws. **Roll to hunt it! '
+                            'Hunting party required: 4+ cats, combined roll over 45.**',
+                            'A metal trash lid crashes down behind the raccoon and startles it into slipping sideways across the pavement. **Roll to hunt it, +2 because it is '
+                            'briefly disoriented! Hunting party required: 4+ cats, combined roll over 45.**'],
+ ('Twoleg Town', 'Mouse'): ['A mouse scurries beneath a garden fence and stops beside an overgrown flowerbed, nosing through fallen seeds beneath the leaves. **Roll to catch '
+                            'it!**',
+                            'A mouse discovers spilled birdseed beneath a feeder and begins stuffing its cheeks as quickly as possible. **Roll to catch it, +1 because it is '
+                            'distracted!**'],
+ ('Twoleg Town', 'Sparrow'): ['A sparrow hops along the top of a wooden fence, occasionally dropping into the garden to peck through scattered seed. **Roll to catch it, -1 '
+                              'because it can take flight easily!**',
+                              'A sparrow splashes enthusiastically in a shallow twoleg birdbath, throwing droplets over its wings and completely soaking itself. **Roll to catch '
+                              'it, +2 because it is thoroughly distracted!**'],
+ ('Twoleg Town', 'Pigeon'): ['A pigeon struts across a garden path beneath a feeder, pecking at scattered seed. **Roll to catch it!**'],
+ ('Twoleg Town', 'Squirrel'): ['A squirrel hangs from a garden feeder while stuffing its mouth with stolen seed. **Roll to catch it, +1 because it is distracted!**'],
+ ('Twoleg Town', 'Chipmunk'): ['A chipmunk sits upright beneath a garden bench, carefully sorting several seeds between its front paws. **Roll to catch it!**',
+                               'A chipmunk becomes absorbed digging beneath a flowerpot, spraying loose soil behind itself without looking around. **Roll to catch it, +2 because '
+                               'it is completely distracted!**']}
+
+HUNT_THREATS = {('Glacier’s Edge', 'Cougar'): 'A tawny shape appears silently among the rocks above you. The cougar lowers itself and begins descending the ridge. **Roll 1d10 to flee. 3–10:** '
+                               'you escape unharmed. **2:** your paws skid and you painfully twist or scrape one. **1:** the cougar closes the distance, **roll 1d6 for injury '
+                               'severity.**',
+ ('Glacier’s Edge', 'Bear'): 'A deep grunt cuts through the mountain wind as a bear lumbers onto the hunting ground, drawn by the scent of prey. **Drop your prey and roll 1d10. '
+                             '3–10:** you escape. **2:** you suffer a minor bruise or twisted limb. **1:** the bear or dangerous escape catches you badly, **roll 1d6 for '
+                             'severity.**',
+ ('Frost Tunnels', 'Wolverine'): 'A low growl rolls through the passage before a stocky wolverine pushes into view, blocking much of the narrow tunnel. **Roll 1d10 to retreat. '
+                                 '3–10:** you escape. **2:** you scrape or wrench yourself squeezing through the rocks. **1:** the wolverine catches you, **roll 1d6 for injury '
+                                 'severity.**',
+ ('Frost Tunnels', 'Dark Forest Cat'): 'A shadow moves against the direction of the cave light. A cat-shaped figure waits farther down the tunnel, but its scent is wrong and its '
+                                       'eyes catch light that is not there. **Head home and roll 1d10. 3–10:** you escape safely. **2:** you suffer a minor injury fleeing blindly '
+                                       'through the tunnels. **1:** something worse happens before you escape, **roll 1d6 for injury severity.**',
+ ('Cloud Plateau', 'Cougar'): 'A cougar appears on a shelf above the open plateau, watching the patrol before beginning a silent descent. **Roll 1d10 to retreat. 3–10:** you '
+                              'escape unharmed. **2:** you slip on wind-scoured stone and suffer a minor injury. **1:** the cougar closes the distance, **roll 1d6 for injury '
+                              'severity.**',
+ ('Cloud Plateau', 'Bear'): 'A bear pushes onto the plateau from behind a bank of stone, nose lifted toward the scent of prey. **Drop your prey and roll 1d10 to retreat. 3–10:** '
+                            'you escape safely. **2:** you twist or scrape a limb in the rush. **1:** the escape goes badly, **roll 1d6 for injury severity.**',
+ ('Trout Run', 'Otter'): 'A sleek head surfaces between the rapids before the otter climbs onto a wet rock and notices you. **Roll 1d10 to retreat. 3–10:** you escape. **2:** you '
+                         'receive a shallow bite, scrape, or twisted paw. **1:** the otter catches you or the escape goes badly, **roll 1d6 for injury severity.**',
+ ('Trout Run', 'Bear'): 'A bear crashes through the riverbank brush, clearly interested in the exact stretch of water you are hunting. **Drop your prey and roll 1d10. 3–10:** you '
+                        'flee safely. **2:** you twist a limb or take a painful scrape escaping over the rocks. **1:** the bear closes the distance, **roll 1d6 for injury '
+                        'severity.**',
+ ('Glistening Pools', 'Otter'): 'Ripples cross the pool before an otter surfaces close to shore and immediately begins moving toward you. **Roll 1d10 to retreat. 3–10:** you '
+                                'escape. **2:** you suffer a shallow bite, scrape, or fall. **1:** the encounter causes a serious injury, **roll 1d6 for severity.**',
+ ('Raptorfang Spires', 'Cougar'): 'A cougar’s face appears silently between two stone shelves above the patrol before its body follows, paws making almost no sound. **Roll 1d10 '
+                                  'to retreat. 3–10:** you escape. **2:** you wrench a paw or scrape yourself descending too quickly. **1:** the cougar closes the distance, '
+                                  '**roll 1d6 for injury severity.**',
+ ('Deeproot Tangle', 'Otter'): 'An otter appears in one of the root pools and moves through the tangled water with frightening ease, quickly closing the distance. **Roll 1d10 to '
+                               'retreat. 3–10:** you escape. **2:** you scrape or twist a paw scrambling through the roots. **1:** the otter or desperate escape causes a serious '
+                               'injury, **roll 1d6 for severity.**',
+ ('Sundance Pond', 'Otter'): 'The calm surface suddenly breaks as an otter appears much closer to shore than expected and turns toward the patrol. **Roll 1d10 to retreat. 3–10:** '
+                             'you escape. **2:** you suffer a shallow bite, scrape, or twisted paw. **1:** the encounter causes a serious injury, **roll 1d6 for severity.**',
+ ('Frostbite Ridge', 'Owl'): 'A silent shadow sweeps over the ridge before an owl drops onto a ledge behind you, enormous eyes already fixed on the patrol. **Roll 1d10 to flee. '
+                             '3–10:** you escape unharmed. **2:** a talon clips you, leaving a shallow scratch. **1:** the owl lands a much stronger strike, **roll 1d6 for injury '
+                             'severity.**',
+ ('Frostbite Ridge', 'Extreme Wind'): 'The air suddenly roars and a brutal crosswind slams into the exposed ridge hard enough to send loose stones tumbling over the edge. **Roll '
+                                      '1d10 to reach shelter. 3–10:** you brace safely. **2:** you slip and painfully twist a paw. **1:** the gust throws you dangerously against '
+                                      'the rocks or toward the edge, **roll 1d6 for injury severity.**',
+ ('Frostbite Ridge', 'Sheer Drop'): 'Stone crumbles unexpectedly beneath your hind paws near the cliff edge, sending fragments rattling toward the rapids far below. **Roll 1d10 '
+                                    'to scramble back. 3–10:** you recover safely. **2:** you scrape yourself badly pulling onto solid ground. **1:** your fall or near-fall '
+                                    'causes a serious injury, **roll 1d6 for severity.**',
+ ('Neon Path', 'Dog'): 'Barking explodes from behind a nearby building before a loose dog rounds the corner at a run, claws scraping frantically against the concrete. **Roll 1d10 '
+                       'to flee. 3–10:** you get away. **2:** you twist a paw or suffer a shallow nip during the chase. **1:** the dog catches up, **roll 1d6 for injury '
+                       'severity.**',
+ ('Neon Path', 'Twoleg Monster'): 'Bright lights sweep suddenly over the pavement as a monster turns into the plaza far closer than anyone expected. **Roll 1d10 to get clear. '
+                                  '3–10:** you escape safely. **2:** you painfully wrench a paw during the frantic dodge. **1:** the escape goes badly, **roll 1d6 for injury '
+                                  'severity.**',
+ ('Twoleg Town', 'Raccoon'): 'A garbage lid shifts beside you and a raccoon rises from behind the bin, bristling when it realizes you are blocking the path back to the fence. '
+                             '**Roll 1d10 to retreat. 3–10:** you escape. **2:** it catches you with a shallow scratch or bite. **1:** the raccoon attacks properly, **roll 1d6 '
+                             'for injury severity.**',
+ ('Twoleg Town', 'Dog'): 'A garden gate bangs open and a barking dog charges into the yard, paws tearing across the grass toward you. **Roll 1d10 to flee. 3–10:** you escape '
+                         'unharmed. **2:** you twist a paw or receive a shallow nip. **1:** the dog catches you before you clear the yard, **roll 1d6 for injury severity.**',
+ ('Twoleg Town', 'Twoleg Monster'): 'A monster suddenly turns onto the street while you are crossing, lights glaring and engine roaring far too close. **Roll 1d10 to reach '
+                                    'safety. 3–10:** you clear the road. **2:** you wrench a paw against the curb. **1:** the escape goes badly, **roll 1d6 for injury severity.**'}
+
+HUNT_SHARED_THREATS = {('Glistening Pools', 'Canada Goose'): 'A goose charges from the water with its neck stretched forward and wings beating violently. **Roll 1d10 to escape. 3–10:** you retreat '
+                                       'safely. **2:** you suffer a shallow wound or bruising. **1:** the goose lands a serious strike, **roll 1d6 for severity.**',
+ ('Rexhead Pillars', 'Red-tailed Hawk'): 'A hawk drops suddenly from a pillar above, talons stretched as it sweeps low over the patrol. **Roll 1d10 to evade it. 3–10:** you '
+                                         'escape unharmed. **2:** a talon leaves a shallow scratch. **1:** the hawk lands a serious hit, **roll 1d6 for injury severity.**',
+ ('Rexhead Pillars', 'Peregrine Falcon'): 'A blur tears through the air between the pillars and a peregrine lashes past far closer than expected. **Roll 1d10 to evade it. 3–10:** '
+                                          'you duck clear. **2:** its talons graze you. **1:** the strike lands badly, **roll 1d6 for injury severity.**',
+ ('Dustwind Flats', 'Weasel'): 'A weasel bursts from the scrub and charges rather than retreating, forcing the patrol to abandon the hunt. **Roll 1d10 to disengage. 3–10:** you '
+                               'escape unharmed. **2:** you receive a shallow bite or scratch. **1:** the weasel catches you badly, **roll 1d6 for injury severity.**',
+ ('Whispering Branches', 'Red-tailed Hawk'): 'A hawk drops suddenly through the canopy with talons stretched forward, furious that you wandered beneath its perch. **Roll 1d10 to '
+                                             'retreat. 3–10:** you escape unharmed. **2:** a talon leaves a shallow scratch. **1:** the hawk lands a serious strike, **roll 1d6 '
+                                             'for injury severity.**',
+ ('Whispering Branches', 'Owl'): 'An enormous owl launches silently from the dark canopy and sweeps low between the trees. **Roll 1d10 to flee. 3–10:** you reach thicker cover. '
+                                 '**2:** a talon clips your shoulder or flank. **1:** the owl catches you properly, **roll 1d6 for injury severity.**',
+ ('Whispering Branches', 'Vulture'): 'A huge vulture drops heavily from the branches and spreads its wings, blocking the easiest route through the forest. **Roll 1d10 to get '
+                                     'clear. 3–10:** you escape. **2:** you take a minor beak or claw wound. **1:** the encounter causes a serious injury, **roll 1d6 for '
+                                     'severity.**',
+ ('Deeproot Tangle', 'Canada Goose'): 'A furious goose bursts through the reeds with wings spread and immediately charges the patrol. **Roll 1d10 to retreat. 3–10:** you escape '
+                                      'unharmed. **2:** a wing or beak leaves bruising or a shallow wound. **1:** the goose lands a serious hit, **roll 1d6 for severity.**',
+ ('Sundance Pond', 'Canada Goose'): 'A furious goose charges from the pond with its wings spread wide, hissing loud enough to carry across the water. **Roll 1d10 to retreat. '
+                                    '3–10:** you escape. **2:** you receive minor bruising or a shallow wound. **1:** the goose lands a serious strike, **roll 1d6 for severity.**',
+ ('Neon Path', 'Raccoon'): 'A raccoon rises from behind a dumpster much closer than expected and bristles when it realizes the patrol is blocking its escape. **Roll 1d10 to '
+                           'disengage. 3–10:** you escape unharmed. **2:** it catches you with a shallow scratch or bite. **1:** the raccoon lands a serious attack, **roll 1d6 '
+                           'for injury severity.**'}
+
+REED_MARSH_BEAVER_FAIL_THREAT = 'The beaver wheels around with shocking speed and charges through the shallows instead of retreating. **Roll 1d10 to escape. 3–10:** the patrol gets clear. **2:** you receive a shallow bite, bruise, or painful fall. **1:** the beaver lands a serious attack, **roll 1d6 for injury severity.**'
+
+AMBIENT_HUNT_HAZARDS = {1443842326488158209: {'name': 'Spore Sickness',
+                       'chance': 2.0,
+                       'cooldown_hours': 24,
+                       'message': 'A strange **puffing sound** ripples through the Glade. Before you can figure out where it came from, several towering mushrooms around you '
+                                  'erupt at once, releasing thick clouds of spores that roll across the ground and swallow you in a dusty haze. Your eyes sting, your throat '
+                                  'burns, and suddenly getting out of here feels much more important than finding prey. **There is nothing to hunt here... but you may have just '
+                                  'breathed in something nasty.**\n'
+                                  '\n'
+                                  '🍄 **SPORE SICKNESS CHECK!**\n'
+                                  '\n'
+                                  'Roll **1d10** to see whether you escaped the cloud unharmed!\n'
+                                  '\n'
+                                  '**3–10:** You stumble into fresh air coughing and sneezing, but otherwise seem fine.\n'
+                                  '\n'
+                                  '**2:** You inhaled enough spores to contract **Spore Sickness.**\n'
+                                  '\n'
+                                  '**1:** You took a particularly heavy dose of spores. You contract **Spore Sickness** and must **roll 1d6 for severity.**\n'
+                                  '\n'
+                                  '**Head back to camp and report to a Medicine Cat!**'},
+ 1443836852317585418: {'name': 'Falling Ice',
+                       'chance': 2.0,
+                       'cooldown_hours': 24,
+                       'message': 'A sharp **crack** cuts through the roar of Frozen Falls. High above, a heavy sheet of ice tears loose from the frozen ledge and drops toward '
+                                  'the cats below, exploding against the stone in a spray of glittering shards.\n'
+                                  '\n'
+                                  '🧊 **FALLING ICE CHECK!**\n'
+                                  '\n'
+                                  'Roll **1d10** to get clear!\n'
+                                  '\n'
+                                  '**3–10:** You throw yourself out of the way before the ice crashes down and escape unharmed.\n'
+                                  '\n'
+                                  '**2:** A smaller shard clips you during the scramble, leaving a bruise or shallow cut.\n'
+                                  '\n'
+                                  '**1:** The falling ice or frantic escape catches you badly. **Roll 1d6 for injury severity.**\n'
+                                  '\n'
+                                  '**If injured, head back to camp and report to a Medicine Cat!**'}}
+
+
+def validate_hunt_tables():
+    """Fail loudly on startup/import if a hunting chance table stops totaling 100%."""
+    for location, entries in HUNT_TABLES.items():
+        total = sum(entry[0] for entry in entries)
+        if total != 100:
+            raise ValueError(f"Hunt table for {location} totals {total}%, expected 100%.")
+
+
+validate_hunt_tables()
+
+
+def hunt_fallback_prompt(location, species):
+    """Safety fallback for a species whose prompt pool is accidentally missing."""
+    party_rules = {
+        "Golden Eagle": (4, 50), "Eagle": (4, 50), "Red-tailed Hawk": (4, 40),
+        "Owl": (4, 40), "Vulture": (4, 50), "Mountain Goat": (6, 80),
+        "Muskrat": (3, 25), "Beaver": (5, 60), "Heron": (3, 25),
+        "Raccoon": (4, 45), "Weasel": (4, 50),
+    }
+    if species == "Caribou Scraps":
+        return "Old caribou scraps lie half-buried nearby. **There is no chase this time, but the usable scraps may be taken if the area seems safe.**"
+    if species in party_rules:
+        cats, combined = party_rules[species]
+        return f"A {species.lower()} appears in {location}, presenting a difficult but possible hunt. **Roll to hunt it! Hunting party required: {cats}+ cats, combined roll over {combined}.**"
+    plural = species in {"Minnows", "Nestling Birds"}
+    pronoun = "them" if plural else "it"
+    article = "" if plural else ("an " if species[:1].lower() in "aeiou" else "a ")
+    subject = species.lower() if plural else article + species.lower()
+    return f"You spot {subject} moving through {location}. **Roll to catch {pronoun}!**"
+
+
+def choose_hunt_result(location):
+    if location in NO_PREY_HUNT_PROMPTS:
+        return {"kind": "flavour", "text": random.choice(NO_PREY_HUNT_PROMPTS[location])}
+
+    entries = HUNT_TABLES.get(location)
+    if not entries:
+        return {"kind": "error", "text": "No hunting table is configured for this location."}
+
+    roll = random.uniform(0, 100)
+    running = 0
+    chosen = entries[-1]
+    for entry in entries:
+        running += entry[0]
+        if roll <= running:
+            chosen = entry
+            break
+
+    _weight, kind, payload = chosen
+
+    if kind == "threat":
+        return {"kind": "threat", "text": HUNT_THREATS[(location, payload)]}
+
+    species = random.choice(payload)
+
+    if kind == "shared" and random.random() < 0.5:
+        threat_text = HUNT_SHARED_THREATS.get((location, species))
+        if threat_text:
+            return {"kind": "threat", "species": species, "text": threat_text}
+
+    prompts = HUNT_PROMPTS.get((location, species), [])
+    prompt = random.choice(prompts) if prompts else hunt_fallback_prompt(location, species)
+
+    if location == "Reed Marsh" and species == "Beaver":
+        prompt += f"\n\n**If the beaver hunt fails:** {REED_MARSH_BEAVER_FAIL_THREAT}"
+
+    return {"kind": "prey", "species": species, "text": prompt}
+
+
+@bot.tree.command(
+    name="hunt",
+    description="Search for prey using the hunting table for the channel you are currently in."
+)
+async def hunt_command(interaction: discord.Interaction):
+    channel_info = HUNT_CHANNELS.get(interaction.channel_id)
+    if not channel_info:
+        await interaction.response.send_message(
+            "❌ `/hunt` only works inside Echostone Mountain's designated hunting and territory channels.",
+            ephemeral=True
+        )
+        return
+
+    location = channel_info["location"]
+    result = choose_hunt_result(location)
+
+    if result["kind"] == "error":
+        await interaction.response.send_message(result["text"], ephemeral=True)
+        return
+
+    header_icon = "⚠️" if result["kind"] == "threat" else channel_info["emoji"]
+    await interaction.response.send_message(
+        f"{header_icon} **Hunt — {location}**\n\n{result['text']}",
+        allowed_mentions=discord.AllowedMentions.none()
+    )
+
+
+def _parse_hunt_timestamp(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=TZ)
+        return parsed.astimezone(TZ)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _hunt_channel_had_recent_human_activity(channel, since):
+    async for message in channel.history(limit=100, after=since):
+        if not getattr(message.author, "bot", False):
+            return True
+    return False
+
+
+@tasks.loop(hours=1)
+async def ambient_hunt_hazards():
+    """Rare ambient hazards in special non-hunting locations, only after recent RP activity."""
+    now = datetime.now(TZ)
+    since = now - timedelta(hours=1)
+    hour_key = now.strftime("%Y-%m-%dT%H")
+
+    for channel_id, hazard in AMBIENT_HUNT_HAZARDS.items():
+        key = str(channel_id)
+
+        async with data_lock:
+            last_checked = data.setdefault("ambient_hazard_last_checked", {}).get(key)
+            last_triggered = _parse_hunt_timestamp(
+                data.setdefault("ambient_hazard_last_triggered", {}).get(key)
+            )
+
+        # Prevent Railway reconnects/restarts from granting extra rolls in the same hour.
+        if last_checked == hour_key:
+            continue
+
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(channel_id)
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException) as error:
+                print(f"Ambient hunt hazard could not access channel {channel_id}: {error}")
+                continue
+
+        try:
+            recent_activity = await _hunt_channel_had_recent_human_activity(channel, since)
+        except discord.Forbidden:
+            print(f"Ambient hunt hazard needs Read Message History in channel {channel_id}.")
+            continue
+        except discord.HTTPException as error:
+            print(f"Ambient hunt hazard history check failed in channel {channel_id}: {error}")
+            continue
+        except Exception as error:
+            print(f"Ambient hunt hazard unexpected history error in channel {channel_id}: {error}")
+            continue
+
+        async with data_lock:
+            data.setdefault("ambient_hazard_last_checked", {})[key] = hour_key
+            save_data(data)
+
+        if not recent_activity:
+            continue
+
+        cooldown = timedelta(hours=float(hazard.get("cooldown_hours", 24)))
+        if last_triggered and now - last_triggered < cooldown:
+            continue
+
+        if random.random() * 100 >= float(hazard.get("chance", 2.0)):
+            continue
+
+        try:
+            await channel.send(
+                hazard["message"],
+                allowed_mentions=discord.AllowedMentions.none()
+            )
+        except discord.Forbidden:
+            print(f"Ambient hunt hazard cannot send messages in channel {channel_id}.")
+            continue
+        except discord.HTTPException as error:
+            print(f"Ambient hunt hazard send failed in channel {channel_id}: {error}")
+            continue
+
+        async with data_lock:
+            data.setdefault("ambient_hazard_last_triggered", {})[key] = now.isoformat()
+            save_data(data)
+
+        print(f"Triggered ambient hunt hazard {hazard.get('name')} in {channel_id}.")
+
+
+@ambient_hunt_hazards.before_loop
+async def before_ambient_hunt_hazards():
+    await bot.wait_until_ready()
+
 # ─────────────────────────────
 # READY + ERROR HANDLING
 # ─────────────────────────────
@@ -7077,6 +7899,9 @@ async def on_ready():
 
     if not check_rules_onboarding.is_running():
         check_rules_onboarding.start()
+
+    if not ambient_hunt_hazards.is_running():
+        ambient_hunt_hazards.start()
 
     try:
         await asyncio.wait_for(
@@ -7403,6 +8228,7 @@ async def botinfo(interaction: discord.Interaction):
         "`/clan [ClanName]` — View one clan roster\n"
         "`/cattinder [Name] [Clan]` — Find age-appropriate romance options\n"
         "`/question` — Random OC question prompt system\n"
+        "`/hunt` — In a designated territory channel, randomly find prey or a local threat using that location’s prey table; no location argument needed\n"
         "`/needsmentor` — View apprentices and medicine cat apprentices who do not currently have mentors\n"
         "`/upcomingceremonies [Clan]` — View eligible kits, apprentices, and elder candidates for all Clans or one Clan\n\n"
 
@@ -14668,6 +15494,7 @@ async def bothelp(interaction: discord.Interaction):
         "`/clan [ClanName]` — View one clan roster\n"
         "`/cattinder [Name] [Clan]` — Find age-appropriate romance options\n"
         "`/question` — Random OC question prompt system\n"
+        "`/hunt` — In a designated territory channel, randomly find prey or a local threat using that location’s prey table; no location argument needed\n"
         "`/needsmentor` — View apprentices and medicine cat apprentices who do not currently have mentors\n"
         "`/upcomingceremonies [Clan]` — View kits, apprentices, and older warriors eligible for ceremonies or assessments, optionally filtered by Clan\n\n"
 
@@ -14682,6 +15509,7 @@ async def bothelp(interaction: discord.Interaction):
         "`/severeweather active` — View active severe-weather events, locations, and penalties\n"
         "`/severeweather modifier` — Check the severe-weather modifier for a specific territory/location and hunting or fishing roll\n"
         "Severe weather rolls on Mondays at 4 PM Toronto time. Primary disaster effects last 7 days unless staff sets a different duration.\n\n"
+        "Rare ambient hazards can also occur at Frozen Falls and Toadstool Glade after recent RP activity; these only post a roll prompt and never apply injuries automatically.\n\n"
 
         "📜 **Quest / Story Commands**\n"
         "Current quests/events post on the 1st of every month at 9 AM and stay active until the next month. Hunting objectives use broad prey categories such as birds, fish, or small prey. Reminders post with 14 days, 7 days, and 3 days remaining. The pool rolls 35% hunting, 20% social, 20% herb patrol, 10% sickness/crisis, and 15% wild animal events.\n"
