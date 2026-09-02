@@ -541,8 +541,7 @@ def fresh_default_data():
         "medicine_gathering_history": [],
         "last_gathering_skipped": None,
         "last_medicine_gathering_skipped": None,
-        "ambient_hazard_last_triggered": {},
-        "ambient_hazard_last_checked": {}
+        "ambient_hazard_last_triggered": {}
     }
 
 
@@ -569,6 +568,10 @@ def load_data():
     defaults = fresh_default_data()
     for key, value in defaults.items():
         loaded.setdefault(key, value)
+
+    # Legacy ambient hourly-check timestamps are no longer persisted. Dropping
+    # this obsolete key keeps it out of future full-state Supabase writes.
+    loaded.pop("ambient_hazard_last_checked", None)
 
     return loaded
 
@@ -7752,6 +7755,12 @@ async def _hunt_channel_had_recent_human_activity(channel, since):
     return False
 
 
+# Process-local guard for ambient hazard checks. This intentionally is not
+# persisted to Supabase: recording every routine hourly check would otherwise
+# upload CODY's entire bot_data payload even when nothing happened.
+_ambient_hazard_last_checked_memory = {}
+
+
 @tasks.loop(hours=1)
 async def ambient_hunt_hazards():
     """Rare ambient hazards in special non-hunting locations, only after recent RP activity."""
@@ -7763,13 +7772,14 @@ async def ambient_hunt_hazards():
         key = str(channel_id)
 
         async with data_lock:
-            last_checked = data.setdefault("ambient_hazard_last_checked", {}).get(key)
             last_triggered = _parse_hunt_timestamp(
                 data.setdefault("ambient_hazard_last_triggered", {}).get(key)
             )
 
-        # Prevent Railway reconnects/restarts from granting extra rolls in the same hour.
-        if last_checked == hour_key:
+        # Prevent duplicate checks while this CODY process is running without
+        # writing routine hourly timestamps to Supabase. A Railway restart can
+        # therefore allow at most one extra rare roll in that hour.
+        if _ambient_hazard_last_checked_memory.get(key) == hour_key:
             continue
 
         channel = bot.get_channel(channel_id)
@@ -7792,9 +7802,9 @@ async def ambient_hunt_hazards():
             print(f"Ambient hunt hazard unexpected history error in channel {channel_id}: {error}")
             continue
 
-        async with data_lock:
-            data.setdefault("ambient_hazard_last_checked", {})[key] = hour_key
-            save_data(data)
+        # Mark this hour as checked only in memory. No database write is needed
+        # unless a hazard actually triggers.
+        _ambient_hazard_last_checked_memory[key] = hour_key
 
         if not recent_activity:
             continue
