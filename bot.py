@@ -14282,7 +14282,7 @@ async def quest_catch(interaction: discord.Interaction, cat_name: str, prey: str
         if bool(cat.get("is_npc", False)):
             await interaction.response.send_message("❌ Monthly quest catch credit is for player OCs, not NPCs.", ephemeral=True)
             return
-        if cat.get("status", "Alive") != "Alive":
+        if cat_is_dead(cat):
             await interaction.response.send_message(f"❌ **{resolved_name}** is not currently a living OC.", ephemeral=True)
             return
 
@@ -14442,7 +14442,7 @@ async def quest_contribute(interaction: discord.Interaction, cat_name: str):
         if bool(cat.get("is_npc", False)):
             await interaction.response.send_message("❌ Connection Tokens are for player OCs, not NPCs.", ephemeral=True)
             return
-        if cat.get("status", "Alive") != "Alive":
+        if cat_is_dead(cat):
             await interaction.response.send_message(f"❌ **{resolved_name}** is not currently a living OC.", ephemeral=True)
             return
         owner_id = oc_owner_id(cat)
@@ -14514,7 +14514,7 @@ async def quest_redeem_perk(interaction: discord.Interaction, cat_name: str, per
         if bool(cat.get("is_npc", False)):
             await interaction.response.send_message("❌ Connection Perks are for player OCs, not NPCs.", ephemeral=True)
             return
-        if cat.get("status", "Alive") != "Alive":
+        if cat_is_dead(cat):
             await interaction.response.send_message(f"❌ **{resolved_name}** is not currently a living OC.", ephemeral=True)
             return
         owner_id = oc_owner_id(cat)
