@@ -1,6 +1,7 @@
 import os
 import json
 import random
+import re
 import asyncio
 import copy
 import calendar
@@ -1333,6 +1334,10 @@ def prepare_cat_record(name, cat):
     cat.setdefault("role_quest_nest_upgrades", [])
     cat.setdefault("role_quest_secret_spots", [])
     cat.setdefault("role_quest_connection_tokens", 0)
+    # Connection Perks are permanent profile badges bought with Connection Tokens.
+    # Only redeemed perks are shown on /catinfo.
+    cat.setdefault("connection_perks", [])
+    cat.setdefault("connection_perk_moon_uses", {})
     cat.setdefault("role_quest_skill_progress", {})
     cat.setdefault("role_quest_title", None)
     cat.setdefault("role_quest_streak", 0)
@@ -8225,7 +8230,7 @@ async def botinfo(interaction: discord.Interaction):
 
         "📜 **Quest / Gathering Commands**\n"
         "`/quest force` — Quest manager only. Clear and force-post replacement quests while keeping the monthly first-of-the-month schedule\n"
-        "`/quest complete [Clan]` — Staff only. Mark a Clan or Outsider quest/event as complete and post the reward\n`/quest role` — View the current optional role-specific quests\n`/quest rolecomplete [Cat] [Quest Number]` — Staff only. Complete role quest 1 or 2 with an eligible OC and award a random personal reward\n`/quest rolereroll [Quest Number]` — Staff only. Replace role quest 1 or 2\n`/quest usebonus [Cat] [Bonus]` — Staff only. Mark a saved one-use quest bonus as spent after the roll/activity\n`/resetquest [Clan/Outsider/All]` — Staff only. Replace one or all active quests/events while keeping the current due date\n"
+        "`/quest progress` — View current monthly quest status, contributors, and exactly how much prey is still needed\n`/quest catch [Cat] [Prey]` — Record a hunting-quest catch; the OC's first contribution earns a Connection Token\n`/quest contribute [Cat]` — Record your OC as a contributor to a non-hunting monthly quest\n`/quest perks` — View all Connection Perks and token costs\n`/quest redeemperk [Cat] [Perk]` — Spend Connection Tokens on a permanent perk badge\n`/quest track [Cat] [Prey]` — Great Tracker perk: once per moon, choose a specific prey encounter\n`/quest complete [Clan]` — Staff only. Complete a quest and award success tokens to registered contributors\n`/quest role` — View the current optional role-specific quests\n`/quest rolecomplete [Cat] [Quest Number]` — Staff only. Complete role quest 1 or 2 with an eligible OC and award a random personal reward\n`/quest rolereroll [Quest Number]` — Staff only. Replace role quest 1 or 2\n`/quest usebonus [Cat] [Bonus]` — Staff only. Mark a saved one-use quest bonus as spent after the roll/activity\n`/resetquest [Clan/Outsider/All]` — Staff only. Replace one or all active quests/events while keeping the current due date\n"
         "`/gatheringreport [ClanName]` — Generate a Clan-specific report including recent promotions, deaths, injuries, quest results, and major story changes\n"
         "`Automatic Gatherings` — The full Gathering runs on the last Thursday; the Medicine Cat Gathering runs on the second Thursday. Votes open 7 days early and close after 3 days. Neither Gathering may be skipped two months in a row.\n"
         "`/rollhelp` — Helps calculate whether an OC caught their prey using their roll, modifiers, and required hunting number\n\n"
@@ -12617,6 +12622,10 @@ def build_quest_database():
                 "id": make_quest_id(group, "hunting", index + 1),
                 "category": "hunting",
                 "broad_hunting": True,
+                "hunt_required": amount,
+                "hunt_target": broad_target,
+                "hunt_site": site["name"],
+                "hunt_catches": [],
                 "title": f"{style_title}: Catch {amount} {broad_target.title()}",
                 "objective": f"Catch **{amount} {broad_target}** at **{site['name']}**. Any prey that fits the category counts.",
                 "description": (
@@ -13410,8 +13419,12 @@ def apply_role_quest_reward(cat_name, cat, quest):
     elif reward == "skill_practice":
         skill = infer_role_quest_skill(quest)
         skills = cat.setdefault("role_quest_skill_progress", {})
-        skills[skill] = int(skills.get(skill, 0) or 0) + 1
-        text = f"🐾 **Skill Practice:** {cat_name} gains **+1 {skill} point** from what they practised during the quest. These are deliberately tiny RP progress markers, not large roll boosts."
+        skill_gain = 2 if cat_has_connection_perk(cat, "quick-study") else 1
+        skills[skill] = int(skills.get(skill, 0) or 0) + skill_gain
+        if skill_gain == 2:
+            text = f"🐾 **Skill Practice + Quick Study:** {cat_name} gains **+2 {skill} points** from what they practised during the quest."
+        else:
+            text = f"🐾 **Skill Practice:** {cat_name} gains **+1 {skill} point** from what they practised during the quest. These are deliberately tiny RP progress markers, not large roll boosts."
     elif reward == "nest_upgrade":
         item = random.choice(ROLE_QUEST_NEST_UPGRADES)
         cat.setdefault("role_quest_nest_upgrades", []).append({"item": item, "moon": int(data.get("moon", 0)), "source": source})
@@ -13802,10 +13815,844 @@ async def monthly_quest_report():
         await send_quest_announcement(channel, message)
 
 
+
+# Numerical progress tracking for monthly hunting quests. Older active hunting
+# quests are upgraded lazily so a deployment does not wipe the current moon.
+QUEST_PREY_CATEGORIES = {
+    "birds": {
+        "bird", "birds", "sparrow", "sparrows", "pigeon", "pigeons", "rock pigeon", "rock pigeons",
+        "ptarmigan", "ptarmigans", "starling", "starlings", "gull", "gulls", "finch", "finches",
+        "lark", "larks", "robin", "robins", "blue jay", "blue jays", "woodpecker", "woodpeckers",
+        "crow", "crows", "magpie", "magpies", "rock wren", "rock wrens", "red-winged blackbird", "red-winged blackbirds",
+        "blackbird", "blackbirds", "nestling bird", "nestling birds", "duck", "ducks", "duckling", "ducklings", "loon", "loons",
+        "coot", "coots", "kingfisher", "kingfishers", "heron", "herons", "canada goose",
+        "canada geese", "goose", "geese", "nighthawk", "nighthawks", "owl", "owls", "vulture",
+        "vultures", "hawk", "hawks", "red-tailed hawk", "red-tailed hawks", "peregrine falcon",
+        "peregrine falcons", "falcon", "falcons", "golden eagle", "golden eagles", "eagle", "eagles"
+    },
+    "fish": {
+        "fish", "trout", "trouts", "cutthroat trout", "bull trout", "perch", "arctic char", "char",
+        "mountain whitefish", "whitefish", "minnow", "minnows", "walleye", "walleyes", "catfish"
+    },
+    "small prey": {
+        "small prey", "mouse", "mice", "vole", "voles", "water vole", "water voles", "shrew", "shrews",
+        "common shrew", "common shrews", "pika", "pikas", "squirrel", "squirrels", "red squirrel",
+        "red squirrels", "chipmunk", "chipmunks", "snowshoe hare", "snowshoe hares", "hare", "hares",
+        "marmot", "marmots", "frog", "frogs", "bat", "bats", "salamander", "salamanders", "spotted salamander",
+        "spotted salamanders", "garter snake", "garter snakes", "snake", "snakes", "turtle", "turtles",
+        "crayfish", "rat", "rats", "barn rat", "barn rats"
+    }
+}
+
+
+def normalize_quest_prey_name(prey):
+    clean = re.sub(r"\s+", " ", str(prey or "").strip().casefold().replace("’", "'"))
+    for article in ("a ", "an ", "the "):
+        if clean.startswith(article):
+            clean = clean[len(article):].strip()
+            break
+    return clean
+
+
+def classify_quest_prey(prey):
+    clean = normalize_quest_prey_name(prey)
+    for category, names in QUEST_PREY_CATEGORIES.items():
+        if clean in names:
+            return category
+    return None
+
+
+def ensure_hunting_quest_progress(quest):
+    if not isinstance(quest, dict) or quest.get("category") != "hunting":
+        return None
+
+    try:
+        required = int(quest.get("hunt_required", 0) or 0)
+    except (TypeError, ValueError):
+        required = 0
+
+    if required <= 0:
+        objective = str(quest.get("objective") or "")
+        match = re.search(r"Catch\s+\*\*(\d+)", objective, flags=re.IGNORECASE)
+        if not match:
+            match = re.search(r"Catch\s+(\d+)", str(quest.get("title") or ""), flags=re.IGNORECASE)
+        required = int(match.group(1)) if match else 1
+        quest["hunt_required"] = required
+
+    target = str(quest.get("hunt_target") or quest.get("effect", {}).get("target") or "small prey").strip().casefold()
+    if target not in QUEST_PREY_CATEGORIES:
+        target = "small prey"
+    quest["hunt_target"] = target
+
+    site = str(quest.get("hunt_site") or "").strip()
+    if not site:
+        objective = str(quest.get("objective") or "")
+        site_match = re.search(r"at\s+\*\*([^*]+)\*\*", objective, flags=re.IGNORECASE)
+        if site_match:
+            site = site_match.group(1).strip()
+            quest["hunt_site"] = site
+
+    catches = quest.get("hunt_catches")
+    if not isinstance(catches, list):
+        catches = []
+        quest["hunt_catches"] = catches
+
+    return required, target, catches
+
+
+def hunt_location_key(name):
+    clean = str(name or "").casefold().replace("’", "'").strip()
+    clean = re.sub(r"[^a-z0-9]+", "", clean)
+    if clean.startswith("the"):
+        clean = clean[3:]
+    return clean
+
+
+def hunting_quest_channel_id(quest):
+    progress = ensure_hunting_quest_progress(quest)
+    if not progress:
+        return None
+    site_key = hunt_location_key(quest.get("hunt_site"))
+    if not site_key:
+        return None
+    for channel_id, info in HUNT_CHANNELS.items():
+        if hunt_location_key(info.get("location")) == site_key:
+            return channel_id
+    return None
+
+
+def hunting_quest_contributor_counts(quest):
+    progress = ensure_hunting_quest_progress(quest)
+    counts = {}
+    if not progress:
+        return counts
+    for catch in progress[2]:
+        if not isinstance(catch, dict):
+            continue
+        cat_name = str(catch.get("cat") or "").strip()
+        if cat_name:
+            counts[cat_name] = counts.get(cat_name, 0) + 1
+    return counts
+
+
+def hunting_quest_progress_bar(current, required, width=10):
+    if required <= 0:
+        return "░" * width
+    filled = min(width, max(0, round((current / required) * width)))
+    return "█" * filled + "░" * (width - filled)
+
+
+def award_hunting_quest_contributor_history(group, quest, final_cat_name=None):
+    if quest.get("hunt_contributor_history_awarded"):
+        return
+
+    progress = ensure_hunting_quest_progress(quest)
+    if not progress:
+        return
+    required, target, catches = progress
+    counts = hunting_quest_contributor_counts(quest)
+    if not counts:
+        quest["hunt_contributor_history_awarded"] = True
+        return
+
+    sole_contributor = len(counts) == 1
+    for cat_name, count in counts.items():
+        cat = data.get("cats", {}).get(cat_name)
+        if not isinstance(cat, dict):
+            continue
+        prepare_cat_record(cat_name, cat)
+        catch_word = "catch" if count == 1 else "catches"
+        if final_cat_name == cat_name and sole_contributor and count >= required:
+            entry = (
+                f"Quest Champion — single-pawedly completed {group}'s monthly hunting quest "
+                f"with all {required} {target} catches"
+            )
+        elif final_cat_name == cat_name:
+            entry = (
+                f"Quest Finisher — landed the final catch that completed {group}'s monthly hunting quest "
+                f"({count} {catch_word} contributed)"
+            )
+        else:
+            entry = (
+                f"Quest Hunter — helped complete {group}'s monthly hunting quest "
+                f"({count} {catch_word} contributed)"
+            )
+        add_history(cat, entry)
+
+    quest["hunt_contributor_history_awarded"] = True
+
+
+def format_hunting_quest_progress(group, quest):
+    progress = ensure_hunting_quest_progress(quest)
+    if not progress:
+        return None
+    required, target, catches = progress
+    current = min(len(catches), required)
+    remaining = max(0, required - current)
+    counts = hunting_quest_contributor_counts(quest)
+    contributors = ", ".join(
+        f"**{name}** ×{count}" for name, count in sorted(counts.items(), key=lambda item: (-item[1], item[0].casefold()))
+    ) or "Nobody yet"
+    status = quest.get("status", "Pending")
+    return (
+        f"### {group}: {quest.get('title', 'Hunting Quest')}\n"
+        f"**Status:** {status}\n"
+        f"**Target:** {required} {target}\n"
+        f"**Progress:** **{current}/{required}** caught • **{remaining} remaining**\n"
+        f"`{hunting_quest_progress_bar(current, required)}`\n"
+        f"**Contributors:** {contributors}"
+    )
+
+
+
+# ─────────────────────────────
+# CONNECTION TOKENS + PERKS
+# ─────────────────────────────
+# Monthly Clan/Outsider quests award one Connection Token the first time an OC
+# is registered as a contributor, then one more to every registered contributor
+# if that quest is successfully completed. This is deliberately per-quest, not
+# per catch/message, so the currency cannot be farmed by repeating one action.
+
+CONNECTION_PERKS_LESSER = [
+    {"key": "friendly-face", "name": "Friendly Face", "emoji": "🙂", "cost": 2, "effect": "Cats around camp tend to begin with a warmer, more favourable impression of this OC. It never forces another player's reaction."},
+    {"key": "gentle-paws", "name": "Gentle Paws", "emoji": "🫶", "cost": 2, "effect": "Known for being especially comforting and careful with upset, frightened, injured, young, or elderly cats."},
+    {"key": "good-listener", "name": "Good Listener", "emoji": "👂", "cost": 2, "effect": "Has a reputation for listening without immediately judging; Clanmates may be more inclined to confide in them."},
+    {"key": "peacemaker", "name": "Peacemaker", "emoji": "🕊️", "cost": 2, "effect": "Known for cooling down everyday disagreements and helping cats find common ground."},
+    {"key": "camp-comedian", "name": "Camp Comedian", "emoji": "😂", "cost": 2, "effect": "Has a reputation for making Clanmates laugh and lightening the mood around camp."},
+    {"key": "heartthrob", "name": "Heartthrob", "emoji": "💘", "cost": 2, "effect": "Known for being particularly charming or attractive. Other players may choose for their OCs to notice or develop a crush; attraction is never automatic."},
+    {"key": "kit-favourite", "name": "Kit Favourite", "emoji": "🐾", "cost": 2, "effect": "Kits tend to warm up to this OC quickly and may seek them out for games, stories, or attention."},
+    {"key": "elder-approved", "name": "Elder Approved", "emoji": "🌿", "cost": 2, "effect": "Has earned a reputation among elders for being respectful, useful, patient, or pleasantly entertaining."},
+    {"key": "reliable-paw", "name": "Reliable Paw", "emoji": "✅", "cost": 2, "effect": "Clanmates generally know this OC as someone who follows through when they offer to help."},
+    {"key": "natural-teacher", "name": "Natural Teacher", "emoji": "📚", "cost": 2, "effect": "Known for being patient and approachable when showing another cat how to do something."},
+    {"key": "storyteller", "name": "Storyteller", "emoji": "📖", "cost": 2, "effect": "Has become known around camp for entertaining, memorable, dramatic, or ridiculous stories."},
+    {"key": "gift-giver", "name": "Gift Giver", "emoji": "🎁", "cost": 2, "effect": "Known for remembering others and leaving thoughtful little prey, feathers, flowers, stones, moss, or trinkets."},
+    {"key": "calm-presence", "name": "Calm Presence", "emoji": "🌙", "cost": 2, "effect": "Their company tends to feel grounding during ordinary stressful or emotional moments."},
+    {"key": "bright-spirit", "name": "Bright Spirit", "emoji": "☀️", "cost": 2, "effect": "Has a cheerful reputation and tends to lift the mood when they arrive."},
+    {"key": "welcoming-soul", "name": "Welcoming Soul", "emoji": "🏡", "cost": 2, "effect": "Especially good at making newcomers, found cats, visitors, or awkward Clanmates feel included."},
+    {"key": "trustworthy", "name": "Trustworthy", "emoji": "🤝", "cost": 2, "effect": "Has built a reputation for discretion and reliability; cats may be more comfortable trusting them with small responsibilities or personal matters."},
+    {"key": "good-sport", "name": "Good Sport", "emoji": "🏅", "cost": 2, "effect": "Known for taking jokes, losses, friendly rivalries, and competitions in stride without becoming a sore loser."},
+    {"key": "camp-helper", "name": "Camp Helper", "emoji": "🪹", "cost": 2, "effect": "Frequently noticed lending a paw with the small unglamorous jobs that keep camp running."},
+    {"key": "curious-mind", "name": "Curious Mind", "emoji": "🔎", "cost": 2, "effect": "Known for asking questions, investigating odd little details, and genuinely wanting to learn."},
+    {"key": "easy-company", "name": "Easy Company", "emoji": "🌼", "cost": 2, "effect": "Has a reputation as an easygoing cat to share a patrol, meal, walk, or quiet afternoon with."},
+]
+
+CONNECTION_PERKS_GREATER = [
+    {"key": "imposing-figure", "name": "Imposing Figure", "emoji": "⚔️", "cost": 5, "effect": "An intimidating presence. Gain +1 to battle rolls. Other OCs may reasonably find them more threatening, but no player's reaction is forced."},
+    {"key": "excellent-hunter", "name": "Excellent Hunter", "emoji": "🎯", "cost": 5, "requires_detail": "the OC's second hunting specialty", "effect": "Choose a second hunting specialty in addition to the OC's normal one. The chosen specialty is saved with the badge on /catinfo."},
+    {"key": "great-tracker", "name": "Great Tracker", "emoji": "🐾", "cost": 5, "effect": "Once per moon, use /quest track in a hunting channel to choose one specific prey species that actually lives there instead of receiving a random /hunt result."},
+    {"key": "swift-paws", "name": "Swift Paws", "emoji": "💨", "cost": 5, "effect": "Gain +1 to chase and escape rolls where raw speed is the deciding factor."},
+    {"key": "sure-footed", "name": "Sure-Footed", "emoji": "🪨", "cost": 5, "effect": "Gain +1 to climbing, balance, and dangerous-footing rolls."},
+    {"key": "strong-swimmer", "name": "Strong Swimmer", "emoji": "🌊", "cost": 5, "effect": "Gain +1 to swimming and water-navigation rolls."},
+    {"key": "keen-nose", "name": "Keen Nose", "emoji": "👃", "cost": 5, "effect": "Gain +1 to scenting and tracking rolls when following a trail."},
+    {"key": "eagle-eye", "name": "Eagle Eye", "emoji": "👁️", "cost": 5, "effect": "Gain +1 to spotting, searching, and visually locating something hidden or distant."},
+    {"key": "guardian", "name": "Guardian", "emoji": "🛡️", "cost": 5, "effect": "Gain +1 to a battle roll when the action is specifically being taken to defend another cat from immediate harm."},
+    {"key": "ambush-expert", "name": "Ambush Expert", "emoji": "🌑", "cost": 5, "effect": "Gain +1 to a hunting roll when CODY's prey prompt explicitly says the prey is distracted, asleep, unaware, or cannot see the hunter."},
+    {"key": "fishers-instinct", "name": "Fisher's Instinct", "emoji": "🐟", "cost": 5, "effect": "Gain +1 to fishing rolls."},
+    {"key": "survivalist", "name": "Survivalist", "emoji": "🌲", "cost": 5, "effect": "Gain +1 to rolls made specifically to flee or disengage from predator/threat encounters."},
+    {"key": "weatherwise", "name": "Weatherwise", "emoji": "⛈️", "cost": 5, "effect": "Reduce one severe-weather hunting or fishing penalty affecting this OC by 1 point. This cannot turn a penalty into a bonus."},
+    {"key": "iron-stomach", "name": "Iron Stomach", "emoji": "🍖", "cost": 5, "effect": "Hunger penalties to physical hunting/fishing rolls are treated as 1 point less severe for this OC, to a minimum penalty of 0."},
+    {"key": "quick-study", "name": "Quick Study", "emoji": "🧠", "cost": 5, "effect": "Whenever the role-quest Skill Practice reward is rolled, this OC gains +2 practice points instead of +1."},
+    {"key": "battle-instinct", "name": "Battle Instinct", "emoji": "🔥", "cost": 5, "effect": "Once per moon, reroll one failed battle roll and keep the second result."},
+    {"key": "lucky-break", "name": "Lucky Break", "emoji": "🍀", "cost": 5, "effect": "Once per moon, add +1 to one non-medical physical roll of the player's choice."},
+    {"key": "trailblazer", "name": "Trailblazer", "emoji": "🗺️", "cost": 5, "effect": "Gain +1 to pathfinding, navigation, and finding-safe-route rolls."},
+    {"key": "natural-leader", "name": "Natural Leader", "emoji": "⭐", "cost": 5, "effect": "Has a strong reputation for taking charge when things become uncertain. Cats may look to them for direction, but this grants no formal Clan authority."},
+    {"key": "famous-face", "name": "Famous Face", "emoji": "✨", "cost": 5, "effect": "Their reputation has spread beyond their immediate circle. Clanmates and cats met at Gatherings may plausibly recognize them by name or reputation; recognition is never forced."},
+]
+
+CONNECTION_PERKS = {perk["key"]: perk for perk in CONNECTION_PERKS_LESSER + CONNECTION_PERKS_GREATER}
+
+
+def normalize_connection_perk_key(value):
+    clean = str(value or "").strip().casefold().replace("’", "'")
+    clean = re.sub(r"[^a-z0-9]+", "-", clean).strip("-")
+    for key, perk in CONNECTION_PERKS.items():
+        if clean in {key, normalize_connection_perk_key_name(perk["name"])}:
+            return key
+    return None
+
+
+def normalize_connection_perk_key_name(value):
+    clean = str(value or "").strip().casefold().replace("’", "'")
+    return re.sub(r"[^a-z0-9]+", "-", clean).strip("-")
+
+
+def cat_connection_perks(cat):
+    raw = cat.get("connection_perks", [])
+    if not isinstance(raw, list):
+        raw = []
+        cat["connection_perks"] = raw
+    cleaned = []
+    seen = set()
+    for entry in raw:
+        if isinstance(entry, str):
+            key = normalize_connection_perk_key(entry)
+            detail = None
+            moon = None
+        elif isinstance(entry, dict):
+            key = normalize_connection_perk_key(entry.get("key") or entry.get("name"))
+            detail = str(entry.get("detail") or "").strip() or None
+            moon = entry.get("moon")
+        else:
+            continue
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        cleaned.append({"key": key, "detail": detail, "moon": moon})
+    cat["connection_perks"] = cleaned
+    return cleaned
+
+
+def cat_has_connection_perk(cat, perk_key):
+    canonical = normalize_connection_perk_key(perk_key)
+    if not canonical:
+        return False
+    return any(entry.get("key") == canonical for entry in cat_connection_perks(cat))
+
+
+def format_connection_perk_badges(cat):
+    badges = []
+    for entry in cat_connection_perks(cat):
+        perk = CONNECTION_PERKS.get(entry.get("key"))
+        if not perk:
+            continue
+        shown = f"{perk['emoji']} {perk['name']}"
+        if entry.get("detail"):
+            shown += f" ({entry['detail']})"
+        badges.append(shown)
+    return " • ".join(badges)
+
+
+def quest_contributor_entries(quest):
+    contributors = quest.get("contributors")
+    if not isinstance(contributors, list):
+        contributors = []
+        quest["contributors"] = contributors
+    return contributors
+
+
+def quest_contributor_names(quest):
+    names = []
+    seen = set()
+    for entry in quest_contributor_entries(quest):
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("cat") or "").strip()
+        if not name or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        names.append(name)
+    return names
+
+
+def register_monthly_quest_contributor(group, quest, cat_name, cat, owner_id=None):
+    contributors = quest_contributor_entries(quest)
+    if any(str(entry.get("cat") or "").casefold() == cat_name.casefold() for entry in contributors if isinstance(entry, dict)):
+        return False, int(cat.get("role_quest_connection_tokens", 0) or 0)
+
+    contributors.append({
+        "cat": cat_name,
+        "owner_id": owner_id or oc_owner_id(cat),
+        "joined_at": datetime.now(TZ).isoformat(),
+        "contribution_token_awarded": True,
+    })
+    cat["role_quest_connection_tokens"] = int(cat.get("role_quest_connection_tokens", 0) or 0) + 1
+    return True, cat["role_quest_connection_tokens"]
+
+
+def award_monthly_quest_pass_tokens(group, quest):
+    if quest.get("connection_pass_tokens_awarded"):
+        return []
+    awarded = []
+    for cat_name in quest_contributor_names(quest):
+        cat = data.get("cats", {}).get(cat_name)
+        if not isinstance(cat, dict):
+            continue
+        prepare_cat_record(cat_name, cat)
+        cat["role_quest_connection_tokens"] = int(cat.get("role_quest_connection_tokens", 0) or 0) + 1
+        awarded.append(cat_name)
+    quest["connection_pass_tokens_awarded"] = True
+    quest["connection_pass_token_cats"] = awarded
+    return awarded
+
+
+def sync_hunting_contributors_for_tokens(group, quest):
+    """Make hunting catches and the generic contributor list agree without double-paying."""
+    progress = ensure_hunting_quest_progress(quest)
+    if not progress:
+        return []
+    newly_awarded = []
+    existing = {name.casefold() for name in quest_contributor_names(quest)}
+    for catch in progress[2]:
+        if not isinstance(catch, dict):
+            continue
+        cat_name = str(catch.get("cat") or "").strip()
+        if not cat_name or cat_name.casefold() in existing:
+            continue
+        cat = data.get("cats", {}).get(cat_name)
+        if not isinstance(cat, dict):
+            continue
+        prepare_cat_record(cat_name, cat)
+        added, _balance = register_monthly_quest_contributor(group, quest, cat_name, cat, catch.get("owner_id"))
+        if added:
+            existing.add(cat_name.casefold())
+            newly_awarded.append(cat_name)
+    return newly_awarded
+
+
+def connection_perk_catalog_text():
+    lines = [
+        "🏅 **CONNECTION PERKS**",
+        "",
+        "Earn **1 Connection Token** the first time one of your OCs contributes to their Clan/Outsider monthly quest. If that quest succeeds, every registered contributor earns **+1 more**.",
+        "",
+        "Redeem with `/quest redeemperk`. Redeemed perks become permanent badges on `/catinfo`.",
+        "",
+        "**RP rule:** reputation perks create an opening for RP, but never force another player's OC to like, trust, fear, recognize, or crush on yours.",
+        "**Roll rule:** only **one Greater Perk** may modify the same roll unless staff explicitly says otherwise.",
+        "",
+        "## 🤍 Lesser Perks — 2 Tokens",
+    ]
+    for perk in CONNECTION_PERKS_LESSER:
+        lines.append(f"{perk['emoji']} **{perk['name']}** — {perk['effect']}")
+    lines.extend(["", "## 🌟 Greater Perks — 5 Tokens"])
+    for perk in CONNECTION_PERKS_GREATER:
+        lines.append(f"{perk['emoji']} **{perk['name']}** — {perk['effect']}")
+    return "\n".join(lines)
+
+
 quest_group = app_commands.Group(
     name="quest",
     description="Quest commands"
 )
+
+
+
+@quest_group.command(name="progress", description="View current monthly quest progress, including prey still needed")
+async def quest_progress(interaction: discord.Interaction):
+    async with data_lock:
+        reset_legacy_quest_data_if_needed()
+        blocks = []
+
+        for group_name in QUEST_GROUP_ORDER:
+            quest = data.get("active_quests_v2", {}).get(group_name)
+            if not quest:
+                blocks.append(f"### {group_name}\nNo active monthly quest right now.")
+                continue
+
+            if quest.get("category") == "hunting":
+                block = format_hunting_quest_progress(group_name, quest)
+                if block:
+                    blocks.append(block)
+                    continue
+
+            contributor_names = quest_contributor_names(quest)
+            contributor_text = ", ".join(f"**{name}**" for name in contributor_names) if contributor_names else "Nobody yet"
+            blocks.append(
+                f"### {group_name}: {quest.get('title', 'Quest')}\n"
+                f"**Category:** {QUEST_CATEGORY_LABELS.get(quest.get('category'), 'Quest')}\n"
+                f"**Status:** {quest.get('status', 'Pending')}\n"
+                f"**Contributors:** {contributor_text}\n"
+                "This quest does not use a numerical prey counter."
+            )
+
+    message = "📊 **Monthly Quest Progress**\n\n" + "\n\n━━━━━━━━━━━━━━━\n\n".join(blocks)
+    chunks = split_allegiance_text(message, max_length=1850)
+    await interaction.response.send_message(chunks[0])
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk)
+
+
+@quest_group.command(name="catch", description="Record prey your OC caught toward their Clan's active hunting quest")
+@app_commands.describe(
+    cat_name="OC who caught the prey",
+    prey="What they caught, for example mouse, trout, frog, sparrow, or vole"
+)
+async def quest_catch(interaction: discord.Interaction, cat_name: str, prey: str):
+    completion_announcement = None
+
+    async with data_lock:
+        reset_legacy_quest_data_if_needed()
+        resolved_name = resolve_cat_name_casefold(cat_name)
+        if not resolved_name:
+            await interaction.response.send_message(f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
+            return
+
+        cat = data["cats"][resolved_name]
+        prepare_cat_record(resolved_name, cat)
+        if bool(cat.get("is_npc", False)):
+            await interaction.response.send_message("❌ Monthly quest catch credit is for player OCs, not NPCs.", ephemeral=True)
+            return
+        if cat.get("status", "Alive") != "Alive":
+            await interaction.response.send_message(f"❌ **{resolved_name}** is not currently a living OC.", ephemeral=True)
+            return
+
+        owner_id = oc_owner_id(cat)
+        if not is_staff(interaction) and owner_id != str(interaction.user.id):
+            await interaction.response.send_message(
+                f"❌ You can only record catches for your own OCs. **{resolved_name}** is not registered to you.",
+                ephemeral=True
+            )
+            return
+
+        group_name = cat.get("clan")
+        if group_name not in QUEST_GROUP_ORDER:
+            group_name = "Outsider" if group_name == "Outsider" else None
+        if not group_name:
+            await interaction.response.send_message(
+                f"❌ I could not match **{resolved_name}** to a Clan/Outsider monthly quest.",
+                ephemeral=True
+            )
+            return
+
+        quest = data.get("active_quests_v2", {}).get(group_name)
+        if not quest:
+            await interaction.response.send_message(f"❌ **{group_name}** does not currently have an active monthly quest.", ephemeral=True)
+            return
+        if quest.get("category") != "hunting":
+            await interaction.response.send_message(
+                f"❌ **{group_name}**'s current quest is **{QUEST_CATEGORY_LABELS.get(quest.get('category'), 'not a hunting quest')}**, so prey cannot be added to it.",
+                ephemeral=True
+            )
+            return
+        if quest.get("status") != "Pending":
+            await interaction.response.send_message(
+                f"❌ **{group_name}**'s hunting quest is already **{quest.get('status', 'finished')}**.",
+                ephemeral=True
+            )
+            return
+
+        required, target, catches = ensure_hunting_quest_progress(quest)
+        expected_channel_id = hunting_quest_channel_id(quest)
+        if expected_channel_id and interaction.channel_id != expected_channel_id:
+            site = quest.get("hunt_site") or "the quest hunting ground"
+            await interaction.response.send_message(
+                f"❌ This catch needs to be recorded in **{site}** so CODY knows it came from the correct quest location. "
+                f"Use `/quest catch` in <#{expected_channel_id}>.",
+                ephemeral=True
+            )
+            return
+
+        prey_name = normalize_quest_prey_name(prey)
+        prey_category = classify_quest_prey(prey_name)
+        if prey_category is None:
+            await interaction.response.send_message(
+                f"❌ I don't recognize **{prey}** as quest-counting prey yet. This quest needs **{target}**. "
+                "If it should count, staff can add that species to CODY's prey list.",
+                ephemeral=True
+            )
+            return
+        if prey_category != target:
+            await interaction.response.send_message(
+                f"❌ **{prey.title()}** counts as **{prey_category}**, but {group_name}'s current quest needs **{target}**.",
+                ephemeral=True
+            )
+            return
+
+        # Bring any catches already recorded on this still-active quest into the
+        # contributor/token system once. This matters when the feature is deployed
+        # in the middle of a moon and prevents earlier helpers being left out.
+        sync_hunting_contributors_for_tokens(group_name, quest)
+
+        # The first valid catch this OC contributes to this monthly quest earns
+        # exactly one Connection Token. Further catches in the same quest do not.
+        contribution_token_awarded, token_balance = register_monthly_quest_contributor(
+            group_name, quest, resolved_name, cat, owner_id
+        )
+
+        catches.append({
+            "cat": resolved_name,
+            "owner_id": owner_id,
+            "prey": prey_name,
+            "category": prey_category,
+            "recorded_by": str(interaction.user.id),
+            "recorded_at": datetime.now(TZ).isoformat()
+        })
+        current = len(catches)
+        remaining = max(0, required - current)
+        quest["hunt_catches"] = catches
+        data["active_quests_v2"][group_name] = quest
+
+        completed_now = current >= required
+        reward_text = None
+        if completed_now:
+            reward_text = apply_quest_success(group_name, quest)
+            quest["status"] = "Completed"
+            quest["completed_at"] = datetime.now(TZ).isoformat()
+            quest["completed_by"] = resolved_name
+            quest["completed_by_owner_id"] = owner_id
+            quest["reward_result"] = reward_text
+            # Every OC who helped this successful monthly quest earns the second token.
+            pass_token_cats = award_monthly_quest_pass_tokens(group_name, quest)
+            award_hunting_quest_contributor_history(group_name, quest, final_cat_name=resolved_name)
+            data.setdefault("quest_history_v2", []).append(copy.deepcopy(quest))
+            data["active_quests_v2"][group_name] = quest
+
+            counts = hunting_quest_contributor_counts(quest)
+            contributors = ", ".join(
+                f"**{name}** ×{count}" for name, count in sorted(counts.items(), key=lambda item: (-item[1], item[0].casefold()))
+            )
+            history_mark = "Quest Champion" if len(counts) == 1 and counts.get(resolved_name, 0) >= required else "Quest Finisher"
+            completion_announcement = (
+                "🎯 **HUNTING QUEST COMPLETE!**\n"
+                f"{clan_mention(group_name)}\n\n"
+                f"**{group_name}: {quest.get('title', 'Hunting Quest')}**\n"
+                f"The final **{prey_name}** was caught by **{resolved_name}**!\n"
+                f"**Progress:** {required}/{required} {target} caught ✅\n"
+                f"**Quest Hunters:** {contributors}\n\n"
+                f"🏆 **{resolved_name}** earned the **{history_mark}** mark in their OC history for completing the hunt.\n"
+                + (f"🤝 **Quest Success:** {', '.join(pass_token_cats)} each earned **+1 Connection Token** for the quest passing.\n" if pass_token_cats else "")
+                + f"🎁 **Reward:** {reward_text}"
+            )
+
+        save_data(data)
+
+    if completion_announcement:
+        channel = bot.get_channel(QUEST_CHANNEL_ID)
+        if channel:
+            await send_long_message(channel, completion_announcement)
+        token_note = " You also earned **+1 Connection Token** for contributing." if contribution_token_awarded else ""
+        await interaction.response.send_message(
+            f"✅ **{resolved_name}** recorded **{prey_name}** and completed **{group_name}'s hunting quest!** 🎉{token_note}",
+            ephemeral=True
+        )
+    else:
+        token_note = (
+            f" 🤝 First contribution recorded: **+1 Connection Token** (balance: **{token_balance}**)."
+            if contribution_token_awarded else ""
+        )
+        await interaction.response.send_message(
+            f"✅ **{resolved_name}** recorded **{prey_name}** for {group_name}'s hunting quest. "
+            f"Progress is now **{current}/{required}** — **{remaining} more {target}** needed.{token_note}",
+            ephemeral=True
+        )
+
+
+
+@quest_group.command(name="contribute", description="Record your OC as a contributor to their current non-hunting monthly quest")
+@app_commands.describe(cat_name="Your OC who contributed to the current monthly quest")
+async def quest_contribute(interaction: discord.Interaction, cat_name: str):
+    async with data_lock:
+        reset_legacy_quest_data_if_needed()
+        resolved_name = resolve_cat_name_casefold(cat_name)
+        if not resolved_name:
+            await interaction.response.send_message(f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
+            return
+        cat = data["cats"][resolved_name]
+        prepare_cat_record(resolved_name, cat)
+        if bool(cat.get("is_npc", False)):
+            await interaction.response.send_message("❌ Connection Tokens are for player OCs, not NPCs.", ephemeral=True)
+            return
+        if cat.get("status", "Alive") != "Alive":
+            await interaction.response.send_message(f"❌ **{resolved_name}** is not currently a living OC.", ephemeral=True)
+            return
+        owner_id = oc_owner_id(cat)
+        if not is_staff(interaction) and owner_id != str(interaction.user.id):
+            await interaction.response.send_message(
+                f"❌ You can only record quest contributions for your own OCs. **{resolved_name}** is not registered to you.",
+                ephemeral=True
+            )
+            return
+        group_name = cat.get("clan")
+        if group_name not in QUEST_GROUP_ORDER:
+            group_name = "Outsider" if group_name == "Outsider" else None
+        if not group_name:
+            await interaction.response.send_message(f"❌ I could not match **{resolved_name}** to a monthly quest group.", ephemeral=True)
+            return
+        quest = data.get("active_quests_v2", {}).get(group_name)
+        if not quest:
+            await interaction.response.send_message(f"❌ **{group_name}** does not currently have an active monthly quest.", ephemeral=True)
+            return
+        if quest.get("status") != "Pending":
+            await interaction.response.send_message(f"❌ **{group_name}**'s current quest is already **{quest.get('status', 'finished')}**.", ephemeral=True)
+            return
+        if quest.get("category") == "hunting":
+            await interaction.response.send_message(
+                "🐭 Hunting contributions are registered automatically from a valid `/quest catch`, so use that command instead.",
+                ephemeral=True
+            )
+            return
+        added, balance = register_monthly_quest_contributor(group_name, quest, resolved_name, cat, owner_id)
+        if not added:
+            await interaction.response.send_message(
+                f"🤝 **{resolved_name}** is already registered as a contributor to this moon's **{group_name}** quest. "
+                "Each OC earns the contribution token only once per monthly quest.",
+                ephemeral=True
+            )
+            return
+        data["active_quests_v2"][group_name] = quest
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🤝 **Quest Contribution Recorded!**\n**{resolved_name}** helped with **{group_name}'s** current monthly quest and earned **+1 Connection Token**.\n"
+        f"**Token balance:** {balance}\n\nIf the quest successfully passes, {resolved_name} will automatically earn **+1 more**.",
+        ephemeral=True
+    )
+
+
+@quest_group.command(name="perks", description="View every Connection Token perk and its cost")
+async def quest_perks(interaction: discord.Interaction):
+    chunks = split_allegiance_text(connection_perk_catalog_text(), max_length=1850)
+    await interaction.response.send_message(chunks[0])
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk)
+
+
+@quest_group.command(name="redeemperk", description="Spend Connection Tokens on a permanent perk badge for your OC")
+@app_commands.describe(
+    cat_name="Your OC redeeming the perk",
+    perk="Perk name; start typing to search",
+    detail="Only needed when a perk asks you to choose something, such as Excellent Hunter's second specialty"
+)
+async def quest_redeem_perk(interaction: discord.Interaction, cat_name: str, perk: str, detail: str = ""):
+    async with data_lock:
+        resolved_name = resolve_cat_name_casefold(cat_name)
+        if not resolved_name:
+            await interaction.response.send_message(f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
+            return
+        cat = data["cats"][resolved_name]
+        prepare_cat_record(resolved_name, cat)
+        if bool(cat.get("is_npc", False)):
+            await interaction.response.send_message("❌ Connection Perks are for player OCs, not NPCs.", ephemeral=True)
+            return
+        if cat.get("status", "Alive") != "Alive":
+            await interaction.response.send_message(f"❌ **{resolved_name}** is not currently a living OC.", ephemeral=True)
+            return
+        owner_id = oc_owner_id(cat)
+        if not is_staff(interaction) and owner_id != str(interaction.user.id):
+            await interaction.response.send_message(
+                f"❌ You can only redeem perks for your own OCs. **{resolved_name}** is not registered to you.",
+                ephemeral=True
+            )
+            return
+        perk_key = normalize_connection_perk_key(perk)
+        perk_info = CONNECTION_PERKS.get(perk_key) if perk_key else None
+        if not perk_info:
+            await interaction.response.send_message("❌ I couldn't find that perk. Use `/quest perks` to see the full list.", ephemeral=True)
+            return
+        if cat_has_connection_perk(cat, perk_key):
+            await interaction.response.send_message(f"❌ **{resolved_name}** already has **{perk_info['name']}**.", ephemeral=True)
+            return
+        required_detail = perk_info.get("requires_detail")
+        clean_detail = str(detail or "").strip()
+        if required_detail and not clean_detail:
+            await interaction.response.send_message(
+                f"❌ **{perk_info['name']}** needs one extra choice: **{required_detail}**. Run the command again and fill in `detail`.",
+                ephemeral=True
+            )
+            return
+        balance = int(cat.get("role_quest_connection_tokens", 0) or 0)
+        cost = int(perk_info["cost"])
+        if balance < cost:
+            await interaction.response.send_message(
+                f"❌ **{resolved_name}** has **{balance} Connection Token{'s' if balance != 1 else ''}**, but **{perk_info['name']}** costs **{cost}**.",
+                ephemeral=True
+            )
+            return
+        cat["role_quest_connection_tokens"] = balance - cost
+        cat_connection_perks(cat).append({
+            "key": perk_key,
+            "detail": clean_detail or None,
+            "moon": int(data.get("moon", 0)),
+            "redeemed_at": datetime.now(TZ).isoformat(),
+        })
+        add_history(cat, f"Connection Perk — redeemed {perk_info['name']}" + (f" ({clean_detail})" if clean_detail else ""))
+        save_data(data)
+        remaining = cat["role_quest_connection_tokens"]
+
+    detail_line = f"\n**Choice:** {clean_detail}" if clean_detail else ""
+    await interaction.response.send_message(
+        f"🏅 **PERK REDEEMED!**\n\n{perk_info['emoji']} **{resolved_name} — {perk_info['name']}**{detail_line}\n"
+        f"{perk_info['effect']}\n\n💰 **Cost:** {cost} Connection Tokens • **Remaining:** {remaining}\n"
+        "This badge is now permanently shown on the OC's `/catinfo` profile."
+    )
+
+
+@quest_redeem_perk.autocomplete("perk")
+async def quest_redeem_perk_autocomplete(interaction: discord.Interaction, current: str):
+    needle = str(current or "").casefold().strip()
+    matches = []
+    for perk in CONNECTION_PERKS_LESSER + CONNECTION_PERKS_GREATER:
+        label = f"{perk['name']} — {perk['cost']} tokens"
+        if not needle or needle in perk["name"].casefold() or needle in perk["effect"].casefold():
+            matches.append(app_commands.Choice(name=label[:100], value=perk["key"]))
+        if len(matches) >= 25:
+            break
+    return matches
+
+
+@quest_group.command(name="track", description="Great Tracker perk: once per moon, choose a specific prey encounter in this hunting channel")
+@app_commands.describe(cat_name="Your OC with the Great Tracker perk", prey="Specific prey species to track in this location")
+async def quest_track(interaction: discord.Interaction, cat_name: str, prey: str):
+    channel_info = HUNT_CHANNELS.get(interaction.channel_id)
+    if not channel_info:
+        await interaction.response.send_message("❌ `/quest track` only works inside a configured hunting/territory channel.", ephemeral=True)
+        return
+    location = channel_info["location"]
+    if location in NO_PREY_HUNT_PROMPTS:
+        await interaction.response.send_message(f"❌ **{location}** is not a prey hunting ground, so Great Tracker cannot select prey here.", ephemeral=True)
+        return
+
+    async with data_lock:
+        resolved_name = resolve_cat_name_casefold(cat_name)
+        if not resolved_name:
+            await interaction.response.send_message(f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
+            return
+        cat = data["cats"][resolved_name]
+        prepare_cat_record(resolved_name, cat)
+        owner_id = oc_owner_id(cat)
+        if not is_staff(interaction) and owner_id != str(interaction.user.id):
+            await interaction.response.send_message(f"❌ You can only use Great Tracker for your own OCs.", ephemeral=True)
+            return
+        if not cat_has_connection_perk(cat, "great-tracker"):
+            await interaction.response.send_message(f"❌ **{resolved_name}** has not redeemed the **Great Tracker** perk.", ephemeral=True)
+            return
+        moon = int(data.get("moon", 0))
+        uses = cat.setdefault("connection_perk_moon_uses", {})
+        try:
+            last_used_moon = int(uses.get("great-tracker", -999))
+        except (TypeError, ValueError):
+            last_used_moon = -999
+        if last_used_moon == moon:
+            await interaction.response.send_message(f"❌ **{resolved_name}** already used **Great Tracker** during Moon {moon}.", ephemeral=True)
+            return
+
+        available_species = sorted({species for (prompt_location, species) in HUNT_PROMPTS if prompt_location == location})
+        requested = str(prey or "").strip().casefold()
+        species = next((name for name in available_species if name.casefold() == requested), None)
+        if not species:
+            shown = ", ".join(available_species)
+            await interaction.response.send_message(
+                f"❌ **{prey}** is not available to track at **{location}**. Available prey: {shown}",
+                ephemeral=True
+            )
+            return
+        prompts = HUNT_PROMPTS.get((location, species), [])
+        prompt = random.choice(prompts) if prompts else hunt_fallback_prompt(location, species)
+        if location == "Reed Marsh" and species == "Beaver":
+            prompt += f"\n\n**If the beaver hunt fails:** {REED_MARSH_BEAVER_FAIL_THREAT}"
+        uses["great-tracker"] = moon
+        cat["connection_perk_moon_uses"] = uses
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"🐾 **Great Tracker — {location}**\n**{resolved_name}** deliberately tracks down **{species}**. "
+        f"This uses their Great Tracker attempt for **Moon {moon}**.\n\n{prompt}",
+        allowed_mentions=discord.AllowedMentions.none()
+    )
+
+
+@quest_track.autocomplete("prey")
+async def quest_track_prey_autocomplete(interaction: discord.Interaction, current: str):
+    channel_info = HUNT_CHANNELS.get(interaction.channel_id)
+    if not channel_info:
+        return []
+    location = channel_info["location"]
+    needle = str(current or "").casefold().strip()
+    species = sorted({name for (prompt_location, name) in HUNT_PROMPTS if prompt_location == location})
+    return [
+        app_commands.Choice(name=name[:100], value=name)
+        for name in species if not needle or needle in name.casefold()
+    ][:25]
 
 
 @quest_group.command(name="force", description="Force-post a new quest cycle and keep the monthly schedule")
@@ -13884,6 +14731,16 @@ async def quest_complete(
         quest["completed_at"] = datetime.now(TZ).isoformat()
         quest["reward_result"] = reward_text
 
+        if quest.get("category") == "hunting":
+            ensure_hunting_quest_progress(quest)
+            # If this active hunt already had catches before this feature deployed,
+            # migrate those hunters into the contributor list and give their one
+            # contribution token before awarding the success token.
+            sync_hunting_contributors_for_tokens(selected_group, quest)
+            award_hunting_quest_contributor_history(selected_group, quest)
+
+        pass_token_cats = award_monthly_quest_pass_tokens(selected_group, quest)
+
         data.setdefault("quest_history_v2", [])
         data["quest_history_v2"].append(copy.deepcopy(quest))
         data["active_quests_v2"][selected_group] = quest
@@ -13895,7 +14752,8 @@ async def quest_complete(
         f"{clan_mention(selected_group)}\n\n"
         f"**{selected_group}: {quest.get('title', 'Quest')}**\n"
         f"Category: **{QUEST_CATEGORY_LABELS.get(quest.get('category'), 'Quest')}**\n\n"
-        f"🎁 **Reward:** {reward_text}"
+        + (f"🤝 **Quest Success:** {', '.join(pass_token_cats)} each earned **+1 Connection Token** for helping the quest pass.\n\n" if pass_token_cats else "")
+        + f"🎁 **Reward:** {reward_text}"
     )
 
     channel = bot.get_channel(QUEST_CHANNEL_ID)
@@ -14779,6 +15637,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
         role_collection_text = role_quest_collection_summary(cat)
         role_skill_text = role_quest_skill_summary(cat)
         role_streak = int(cat.get("role_quest_streak", 0) or 0)
+        connection_perk_text = format_connection_perk_badges(cat)
 
         age_text = f"{cat.get('age', 0)} moons"
         age_freeze_text = freeze_remaining_text(cat, "freeze_age", "freeze_age_until")
@@ -14835,7 +15694,8 @@ async def catinfo(interaction: discord.Interaction, name: str):
             f"**Hunger**: {hunger_text}\n"
             f"**Role Quest Bonus**: {role_bonus_text}\n"
             f"**Role Quest Streak**: {role_streak} completed\n"
-            f"**Quest Keepsakes**: {role_collection_text}\n"
+            + (f"**Perks**: {connection_perk_text}\n" if connection_perk_text else "")
+            + f"**Quest Keepsakes**: {role_collection_text}\n"
             f"**Quest Skill Practice**: {role_skill_text}\n"
             f"**Mentor**: {mentor}\n"
             f"**Apprentices**: {apprentices_text}\n"
@@ -15522,7 +16382,7 @@ async def bothelp(interaction: discord.Interaction):
         "Rare ambient hazards can also occur at Frozen Falls and Toadstool Glade after recent RP activity; these only post a roll prompt and never apply injuries automatically.\n\n"
 
         "📜 **Quest / Story Commands**\n"
-        "Current quests/events post on the 1st of every month at 9 AM and stay active until the next month. Hunting objectives use broad prey categories such as birds, fish, or small prey. Reminders post with 14 days, 7 days, and 3 days remaining. The pool rolls 35% hunting, 20% social, 20% herb patrol, 10% sickness/crisis, and 15% wild animal events.\n"
+        "Current quests/events post on the 1st of every month at 9 AM and stay active until the next month. Hunting objectives use broad prey categories such as birds, fish, or small prey. Use `/quest progress` to see quest progress and contributors. Hunting quests use `/quest catch [Cat] [Prey]`; non-hunting quests use `/quest contribute [Cat]`. An OC earns 1 Connection Token for their first contribution to a monthly quest and another if that quest succeeds. Use `/quest perks` to view the permanent badges those tokens can buy. Reminders post with 14 days, 7 days, and 3 days remaining. The pool rolls 35% hunting, 20% social, 20% herb patrol, 10% sickness/crisis, and 15% wild animal events.\n"
         "Starting September 1, two optional role-specific quests run alongside the monthly quests, using two different role groups whenever possible. Each role cycles through all of its prompts before repeating. There is no penalty if nobody completes them. Use `/quest role` to view both. One-use Lucky Paw, Well Rested, and StarClan blessing charges are saved on `/catinfo`; staff can mark them spent with `/quest usebonus`.\n"
         "`/gatheringreport [ClanName]` — View recent story updates, quest results, injuries, rank changes, and major events for a specific Clan.\n"
         "`/rollhelp` — Helps calculate whether an OC caught their prey by adding the roll, prey modifier, specialty prey bonus, weather modifier, quest modifier, hunger modifier, and any other modifier against the OC’s required hunting number.\n\n"
