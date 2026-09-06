@@ -899,6 +899,34 @@ async def staff_command_check(interaction: discord.Interaction):
     return True
 
 
+def is_moderator_or_above(interaction: discord.Interaction):
+    """True for Echostone Moderators and Discord administrators; Helpers are excluded."""
+    member = interaction.user
+    if member_has_role_id(member, MODERATOR_ROLE_ID):
+        return True
+    permissions = getattr(member, "guild_permissions", None)
+    return bool(permissions and getattr(permissions, "administrator", False))
+
+
+async def moderator_command_check(interaction: discord.Interaction):
+    """Moderator+ permission gate for sensitive OC economy/profile adjustments."""
+    if not is_moderator_or_above(interaction):
+        await interaction.response.send_message(
+            "❌ This command is restricted to Moderators and above.",
+            ephemeral=True
+        )
+        return False
+
+    if interaction.channel_id != COMMAND_CHANNEL_ID:
+        await interaction.response.send_message(
+            "Use bot commands in the command channel only.",
+            ephemeral=True
+        )
+        return False
+
+    return True
+
+
 def member_has_role_id(member, role_id):
     return any(role.id == role_id for role in getattr(member, "roles", []))
 
@@ -8230,7 +8258,7 @@ async def botinfo(interaction: discord.Interaction):
 
         "📜 **Quest / Gathering Commands**\n"
         "`/quest force` — Quest manager only. Clear and force-post replacement quests while keeping the monthly first-of-the-month schedule\n"
-        "`/quest progress` — View current monthly quest status, contributors, and exactly how much prey is still needed\n`/quest catch [Cat] [Prey]` — Record a hunting-quest catch; the OC's first contribution earns a Connection Token\n`/quest contribute [Cat]` — Record your OC as a contributor to a non-hunting monthly quest\n`/quest perks` — View all Connection Perks and token costs\n`/quest redeemperk [Cat] [Perk]` — Spend Connection Tokens on a permanent perk badge\n`/quest track [Cat] [Prey]` — Great Tracker perk: once per moon, choose a specific prey encounter\n`/quest complete [Clan]` — Staff only. Complete a quest and award success tokens to registered contributors\n`/quest role` — View the current optional role-specific quests\n`/quest rolecomplete [Cat] [Quest Number]` — Staff only. Complete role quest 1 or 2 with an eligible OC and award a random personal reward\n`/quest rolereroll [Quest Number]` — Staff only. Replace role quest 1 or 2\n`/quest usebonus [Cat] [Bonus]` — Staff only. Mark a saved one-use quest bonus as spent after the roll/activity\n`/resetquest [Clan/Outsider/All]` — Staff only. Replace one or all active quests/events while keeping the current due date\n"
+        "`/quest progress` — View current monthly quest status, contributors, and exactly how much prey is still needed\n`/quest catch [Cat] [Prey]` — Record a hunting-quest catch; the OC's first contribution earns a Connection Token\n`/quest contribute [Cat]` — Record your OC as a contributor to a non-hunting monthly quest\n`/quest perks` — View all Connection Perks and token costs\n`/quest redeemperk [Cat] [Perk]` — Spend Connection Tokens on a permanent perk badge\n`/quest addtokens [Cat] [Amount] [Reason]` — Moderator+ only. Manually award Connection Tokens (for example, Cat of the Moon)\n`/quest removetokens [Cat] [Amount] [Reason]` — Moderator+ only. Manually remove Connection Tokens\n`/quest removeperk [Cat] [Perk] [Reason]` — Moderator+ only. Remove a redeemed perk; does not automatically refund tokens\n`/quest track [Cat] [Prey]` — Great Tracker perk: once per moon, choose a specific prey encounter\n`/quest complete [Clan]` — Staff only. Complete a quest and award success tokens to registered contributors\n`/quest role` — View the current optional role-specific quests\n`/quest rolecomplete [Cat] [Quest Number]` — Staff only. Complete role quest 1 or 2 with an eligible OC and award a random personal reward\n`/quest rolereroll [Quest Number]` — Staff only. Replace role quest 1 or 2\n`/quest usebonus [Cat] [Bonus]` — Staff only. Mark a saved one-use quest bonus as spent after the roll/activity\n`/resetquest [Clan/Outsider/All]` — Staff only. Replace one or all active quests/events while keeping the current due date\n"
         "`/gatheringreport [ClanName]` — Generate a Clan-specific report including recent promotions, deaths, injuries, quest results, and major story changes\n"
         "`Automatic Gatherings` — The full Gathering runs on the last Thursday; the Medicine Cat Gathering runs on the second Thursday. Votes open 7 days early and close after 3 days. Neither Gathering may be skipped two months in a row.\n"
         "`/rollhelp` — Helps calculate whether an OC caught their prey using their roll, modifiers, and required hunting number\n\n"
@@ -14495,6 +14523,169 @@ async def quest_perks(interaction: discord.Interaction):
     await interaction.response.send_message(chunks[0])
     for chunk in chunks[1:]:
         await interaction.followup.send(chunk)
+
+
+@quest_group.command(name="addtokens", description="Moderator+: manually add Connection Tokens to an OC")
+@app_commands.describe(
+    cat_name="OC receiving the tokens",
+    amount="Number of Connection Tokens to add",
+    reason="Optional reason, such as Cat of the Moon"
+)
+async def quest_add_tokens(interaction: discord.Interaction, cat_name: str, amount: int, reason: str = ""):
+    if not await moderator_command_check(interaction):
+        return
+    if amount <= 0:
+        await interaction.response.send_message("❌ `amount` must be at least 1.", ephemeral=True)
+        return
+    if amount > 100:
+        await interaction.response.send_message("❌ For safety, add no more than 100 tokens in one command.", ephemeral=True)
+        return
+
+    clean_reason = str(reason or "").strip()
+    async with data_lock:
+        resolved_name = resolve_cat_name_casefold(cat_name)
+        if not resolved_name:
+            await interaction.response.send_message(f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
+            return
+        cat = data["cats"][resolved_name]
+        prepare_cat_record(resolved_name, cat)
+        if bool(cat.get("is_npc", False)):
+            await interaction.response.send_message("❌ Connection Tokens are for player OCs, not NPCs.", ephemeral=True)
+            return
+
+        old_balance = max(0, int(cat.get("role_quest_connection_tokens", 0) or 0))
+        new_balance = old_balance + amount
+        cat["role_quest_connection_tokens"] = new_balance
+        if clean_reason:
+            add_history(cat, f"Connection Tokens — +{amount} ({clean_reason})")
+        save_data(data)
+
+    reason_line = f"\n**Reason:** {clean_reason}" if clean_reason else ""
+    await interaction.response.send_message(
+        f"🤝 **TOKENS ADDED!**\n**{resolved_name}** received **+{amount} Connection Token{'s' if amount != 1 else ''}**."
+        f"{reason_line}\n**Balance:** {old_balance} → **{new_balance}**"
+    )
+
+
+@quest_group.command(name="removetokens", description="Moderator+: manually remove Connection Tokens from an OC")
+@app_commands.describe(
+    cat_name="OC losing the tokens",
+    amount="Number of Connection Tokens to remove",
+    reason="Optional reason for the adjustment"
+)
+async def quest_remove_tokens(interaction: discord.Interaction, cat_name: str, amount: int, reason: str = ""):
+    if not await moderator_command_check(interaction):
+        return
+    if amount <= 0:
+        await interaction.response.send_message("❌ `amount` must be at least 1.", ephemeral=True)
+        return
+    if amount > 100:
+        await interaction.response.send_message("❌ For safety, remove no more than 100 tokens in one command.", ephemeral=True)
+        return
+
+    clean_reason = str(reason or "").strip()
+    async with data_lock:
+        resolved_name = resolve_cat_name_casefold(cat_name)
+        if not resolved_name:
+            await interaction.response.send_message(f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
+            return
+        cat = data["cats"][resolved_name]
+        prepare_cat_record(resolved_name, cat)
+        if bool(cat.get("is_npc", False)):
+            await interaction.response.send_message("❌ Connection Tokens are for player OCs, not NPCs.", ephemeral=True)
+            return
+
+        old_balance = max(0, int(cat.get("role_quest_connection_tokens", 0) or 0))
+        if amount > old_balance:
+            await interaction.response.send_message(
+                f"❌ **{resolved_name}** only has **{old_balance} Connection Token{'s' if old_balance != 1 else ''}**. "
+                "I won't reduce the balance below zero.",
+                ephemeral=True
+            )
+            return
+        new_balance = old_balance - amount
+        cat["role_quest_connection_tokens"] = new_balance
+        if clean_reason:
+            add_history(cat, f"Connection Tokens — -{amount} ({clean_reason})")
+        save_data(data)
+
+    reason_line = f"\n**Reason:** {clean_reason}" if clean_reason else ""
+    await interaction.response.send_message(
+        f"🤝 **TOKENS REMOVED!**\n**{resolved_name}** lost **{amount} Connection Token{'s' if amount != 1 else ''}**."
+        f"{reason_line}\n**Balance:** {old_balance} → **{new_balance}**"
+    )
+
+
+@quest_group.command(name="removeperk", description="Moderator+: remove a redeemed Connection Perk from an OC")
+@app_commands.describe(
+    cat_name="OC whose redeemed perk should be removed",
+    perk="Redeemed perk to remove",
+    reason="Optional reason for the removal"
+)
+async def quest_remove_perk(interaction: discord.Interaction, cat_name: str, perk: str, reason: str = ""):
+    if not await moderator_command_check(interaction):
+        return
+
+    clean_reason = str(reason or "").strip()
+    async with data_lock:
+        resolved_name = resolve_cat_name_casefold(cat_name)
+        if not resolved_name:
+            await interaction.response.send_message(f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
+            return
+        cat = data["cats"][resolved_name]
+        prepare_cat_record(resolved_name, cat)
+        if bool(cat.get("is_npc", False)):
+            await interaction.response.send_message("❌ Connection Perks are for player OCs, not NPCs.", ephemeral=True)
+            return
+
+        perk_key = normalize_connection_perk_key(perk)
+        perk_info = CONNECTION_PERKS.get(perk_key) if perk_key else None
+        if not perk_info:
+            await interaction.response.send_message("❌ I couldn't find that perk. Use `/quest perks` to see the full list.", ephemeral=True)
+            return
+
+        owned = cat_connection_perks(cat)
+        if not any(entry.get("key") == perk_key for entry in owned):
+            await interaction.response.send_message(
+                f"❌ **{resolved_name}** has not redeemed **{perk_info['name']}**.",
+                ephemeral=True
+            )
+            return
+
+        cat["connection_perks"] = [entry for entry in owned if entry.get("key") != perk_key]
+        if clean_reason:
+            add_history(cat, f"Connection Perk Removed — {perk_info['name']} ({clean_reason})")
+        save_data(data)
+        balance = max(0, int(cat.get("role_quest_connection_tokens", 0) or 0))
+
+    reason_line = f"\n**Reason:** {clean_reason}" if clean_reason else ""
+    await interaction.response.send_message(
+        f"🗑️ **PERK REMOVED!**\n{perk_info['emoji']} **{resolved_name} — {perk_info['name']}** has been removed from `/catinfo`."
+        f"{reason_line}\n\n**No tokens were automatically refunded.** Current balance: **{balance}**. "
+        "Use `/quest addtokens` separately if a refund is appropriate."
+    )
+
+
+@quest_remove_perk.autocomplete("perk")
+async def quest_remove_perk_autocomplete(interaction: discord.Interaction, current: str):
+    needle = str(current or "").casefold().strip()
+    cat_name = str(getattr(interaction.namespace, "cat_name", "") or "").strip()
+    owned_keys = None
+    resolved_name = resolve_cat_name_casefold(cat_name) if cat_name else None
+    if resolved_name:
+        cat = data.get("cats", {}).get(resolved_name, {})
+        owned_keys = {entry.get("key") for entry in cat_connection_perks(cat)}
+
+    matches = []
+    for perk_info in CONNECTION_PERKS_LESSER + CONNECTION_PERKS_GREATER:
+        if owned_keys is not None and perk_info["key"] not in owned_keys:
+            continue
+        if needle and needle not in perk_info["name"].casefold():
+            continue
+        matches.append(app_commands.Choice(name=perk_info["name"][:100], value=perk_info["key"]))
+        if len(matches) >= 25:
+            break
+    return matches
 
 
 @quest_group.command(name="redeemperk", description="Spend Connection Tokens on a permanent perk badge for your OC")
