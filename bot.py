@@ -2940,18 +2940,30 @@ def timeline_current_role_matches(cat, clan_name, position):
     )
 
 
-def timeline_cat_summary(cat_name, max_entries=5):
+def timeline_cat_summary(cat_name, max_entries=8):
+    """Format a cat's complete high-rank progression as separate chronological lines."""
     entries = timeline_entries_for_cat(cat_name)
     if not entries:
         return None
+
     shown = entries[-max_entries:]
-    pieces = [
-        f"{TIMELINE_POSITION_ICONS.get(entry.get('position'), '🐾')} {entry.get('clan')} {entry.get('position')} ({timeline_period_text(entry)})"
-        for entry in shown
-    ]
+    lines = []
     if len(entries) > max_entries:
-        pieces.insert(0, f"+{len(entries) - max_entries} older")
-    return "; ".join(pieces)
+        lines.append(f"• +{len(entries) - max_entries} older leadership term(s)")
+
+    # Keep every documented step visible, so promotions such as Deputy -> Leader
+    # and Medicine Cat Apprentice -> Medicine Cat read as an actual career history.
+    clans = {str(entry.get("clan") or "Unknown") for entry in shown}
+    show_clan = len(clans) > 1
+    for entry in shown:
+        position = str(entry.get("position") or "Unknown")
+        icon = TIMELINE_POSITION_ICONS.get(position, "🐾")
+        clan_prefix = f"{TIMELINE_CLAN_ICONS.get(entry.get('clan'), '🐾')} {entry.get('clan')} • " if show_clan else ""
+        lines.append(
+            f"• {icon} {clan_prefix}**{position}** — {timeline_period_text(entry)}"
+        )
+
+    return "\n".join(lines)
 
 
 def timeline_snapshot_text(month, year, clan_name=None):
@@ -3063,7 +3075,7 @@ async def timeline_month(
         await interaction.followup.send(chunk)
 
 
-@timeline_group.command(name="cat", description="View one cat's documented high-rank history")
+@timeline_group.command(name="cat", description="View one cat's full documented high-rank progression")
 @app_commands.describe(cat_name="Registered cat to look up")
 @app_commands.autocomplete(cat_name=timeline_cat_autocomplete)
 async def timeline_cat(interaction: discord.Interaction, cat_name: str):
@@ -3075,14 +3087,36 @@ async def timeline_cat(interaction: discord.Interaction, cat_name: str):
             f"📜 **{display_name}** has no documented leadership timeline entries yet."
         )
         return
+
     shown_display_name = timeline_display_cat_name(display_name)
-    lines = [f"📜 **{shown_display_name}'s Leadership Timeline**"]
+    clans = []
     for entry in entries:
-        lines.append(
-            f"• {TIMELINE_POSITION_ICONS.get(entry.get('position'), '🐾')} {TIMELINE_CLAN_ICONS.get(entry.get('clan'), '🐾')} **{entry.get('clan')} {entry.get('position')}** — "
-            f"{timeline_period_text(entry)}"
-        )
-    await interaction.response.send_message("\n".join(lines)[:1900])
+        clan_name = str(entry.get("clan") or "Unknown")
+        if clan_name not in clans:
+            clans.append(clan_name)
+
+    lines = [f"📜 **{shown_display_name}**"]
+    if len(clans) == 1:
+        clan_name = clans[0]
+        lines.append(f"{TIMELINE_CLAN_ICONS.get(clan_name, '🐾')} **{clan_name}**")
+
+    # Show every stage of the cat's high-rank career separately and in order.
+    # Example: Deputy -> Leader, or Medicine Cat Apprentice -> Medicine Cat.
+    for entry in entries:
+        position = str(entry.get("position") or "Unknown")
+        icon = TIMELINE_POSITION_ICONS.get(position, "🐾")
+        if len(clans) > 1:
+            clan_name = str(entry.get("clan") or "Unknown")
+            lines.append(
+                f"{icon} **{position}** • {TIMELINE_CLAN_ICONS.get(clan_name, '🐾')} {clan_name} — {timeline_period_text(entry)}"
+            )
+        else:
+            lines.append(f"{icon} **{position}** — {timeline_period_text(entry)}")
+
+    chunks = split_allegiance_text("\n".join(lines), max_length=1850)
+    await interaction.response.send_message(chunks[0])
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk)
 
 
 @timeline_group.command(name="add", description="Moderator+: add a historical or current high-rank term")
@@ -16582,7 +16616,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
             f"**Role Quest Bonus**: {role_bonus_text}\n"
             f"**Role Quest Streak**: {role_streak} completed\n"
             + (f"**Perks**: {connection_perk_text}\n" if connection_perk_text else "")
-            + (f"**Leadership History**: {leadership_timeline_text}\n" if leadership_timeline_text else "")
+            + (f"**Leadership History:**\n{leadership_timeline_text}\n" if leadership_timeline_text else "")
             + f"**Quest Keepsakes**: {role_collection_text}\n"
             f"**Quest Skill Practice**: {role_skill_text}\n"
             f"**Mentor**: {mentor}\n"
