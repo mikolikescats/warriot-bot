@@ -1331,6 +1331,7 @@ def prepare_cat_record(name, cat):
     cat.setdefault("afterlife", None)
     cat.setdefault("faction", None)
     cat.setdefault("death_moon", None)
+    cat.setdefault("cause_of_death", None)
     cat.setdefault("hunger_level", "Satisfied")
     cat.setdefault("last_fed", None)
     cat.setdefault("last_hunger_update", None)
@@ -2815,6 +2816,32 @@ def timeline_display_cat_name(cat_name):
     return display_cat_name(resolved_name, cat)
 
 
+def timeline_cause_of_death(cat_name):
+    """Return a saved cause of death for a registered deceased cat, if one exists."""
+    resolved_name = resolve_cat_name_casefold(cat_name)
+    if not resolved_name:
+        return None
+
+    cat = data.get("cats", {}).get(resolved_name)
+    if not isinstance(cat, dict):
+        return None
+    prepare_cat_record(resolved_name, cat)
+
+    if allegiance_tracker_status(cat).casefold() != "dead":
+        return None
+
+    cause = str(cat.get("cause_of_death") or "").strip()
+    return cause or None
+
+
+def timeline_is_last_entry_for_cat(entry):
+    """True when this is the cat's latest documented high-rank term."""
+    entries = timeline_entries_for_cat(entry.get("cat_name"))
+    if not entries:
+        return False
+    return str(entries[-1].get("id") or "").casefold() == str(entry.get("id") or "").casefold()
+
+
 def timeline_entry_active_in_month(entry, month, year):
     point = timeline_month_key(year, month)
     start, end = timeline_period_bounds(entry)
@@ -2963,6 +2990,10 @@ def timeline_cat_summary(cat_name, max_entries=8):
             f"• {icon} {clan_prefix}**{position}** — {timeline_period_text(entry)}"
         )
 
+    cause = timeline_cause_of_death(cat_name)
+    if cause:
+        lines.append(f"• 💀 **Cause of Death:** {cause}")
+
     return "\n".join(lines)
 
 
@@ -3001,6 +3032,9 @@ def timeline_full_text(clan_name=None):
             else:
                 for entry in position_entries:
                     lines.append(f"• **{timeline_display_cat_name(entry.get('cat_name', 'Unknown'))}** — {timeline_period_text(entry)}")
+                    cause = timeline_cause_of_death(entry.get("cat_name"))
+                    if cause and timeline_is_last_entry_for_cat(entry):
+                        lines.append(f"  ↳ 💀 **Cause of Death:** {cause}")
     return "\n".join(lines)
 
 
@@ -3112,6 +3146,10 @@ async def timeline_cat(interaction: discord.Interaction, cat_name: str):
             )
         else:
             lines.append(f"{icon} **{position}** — {timeline_period_text(entry)}")
+
+    cause = timeline_cause_of_death(display_name)
+    if cause:
+        lines.extend(["", f"💀 **Cause of Death:** {cause}"])
 
     chunks = split_allegiance_text("\n".join(lines), max_length=1850)
     await interaction.response.send_message(chunks[0])
@@ -8976,7 +9014,7 @@ async def botinfo(interaction: discord.Interaction):
         "📜 **Leadership Timeline Commands**\n"
         "`/timeline view [Clan]` — View the documented leadership history for one Clan or all four\n"
         "`/timeline month [Month] [Year] [Clan]` — See who held each high rank during a specific month; undocumented positions show as Unknown\n"
-        "`/timeline cat [Cat]` — View one cat's documented leadership history\n"
+        "`/timeline cat [Cat]` — View one cat's documented leadership history; deceased cats also show a saved cause of death\n"
         "`/timeline add` — Moderator+ only. Add a historical or ongoing Leader, Deputy, Medicine Cat, or Medicine Cat Apprentice term\n"
         "`/timeline edit` — Moderator+ only. Correct an existing timeline entry\n"
         "`/timeline remove` — Moderator+ only. Remove an incorrect timeline entry\n\n"
@@ -9016,7 +9054,8 @@ async def botinfo(interaction: discord.Interaction):
 
         "🛠️ **Staff Cat Management**\n"
         "`/cat add` — Add a new living cat\n"
-        "`/cat adddead` — Add a dead cat to records\n"
+        "`/cat adddead` — Add a dead cat to records, with an optional cause of death\n"
+        "`/cat causeofdeath [Cat] [Cause]` — Staff only. Add, update, view, or clear a deceased cat's cause of death; saved causes appear on the leadership timeline\n"
         "`/cat delete` — Permanently delete a cat\n"
         "`/cat rename` — Rename a cat and update all references\n"
         "`/cat rank` — Change rank manually\n"
@@ -11040,7 +11079,8 @@ async def cat_markdead(
     age="Age they died at in moons",
     clan="Clan they belonged to",
     rank="Rank they died as",
-    afterlife="Where they went after death"
+    afterlife="Where they went after death",
+    cause="Optional cause of death"
 )
 @app_commands.choices(clan=CLAN_CHOICES, rank=RANK_CHOICES, afterlife=AFTERLIFE_CHOICES)
 async def cat_adddead(
@@ -11049,7 +11089,8 @@ async def cat_adddead(
     age: int,
     clan: app_commands.Choice[str],
     rank: app_commands.Choice[str],
-    afterlife: app_commands.Choice[str]
+    afterlife: app_commands.Choice[str],
+    cause: str = None
 ):
     if not await staff_command_check(interaction):
         return
@@ -11072,9 +11113,14 @@ async def cat_adddead(
             "status": "Dead",
             "afterlife": afterlife.value,
             "death_moon": "Before records",
+            "cause_of_death": str(cause).strip() if cause else None,
             "born_moon": None,
             "history": [
-                f"Moon {data['moon']}: Added to records as deceased. Died as {rank.value} and went to {afterlife.value}."
+                (
+                    f"Moon {data['moon']}: Added to records as deceased. Died as {rank.value}"
+                    + (f" from {str(cause).strip()}" if cause else "")
+                    + f" and went to {afterlife.value}."
+                )
             ],
             "exclude_from_tinder": True
         }
@@ -11087,7 +11133,73 @@ async def cat_adddead(
         f"⚔ Rank at death: {rank.value}\n"
         f"🌙 Age at death: {age} moons\n"
         f"🌌 Afterlife: {afterlife.value}"
+        + (f"\n💀 Cause of Death: {str(cause).strip()}" if cause else "")
     )
+
+
+@cat_group.command(name="causeofdeath", description="Staff only: add, update, view, or clear a deceased cat's cause of death")
+@app_commands.describe(
+    name="Deceased cat name",
+    cause="Cause of death to save; leave blank to view the current cause",
+    clear="Set True to remove the saved cause of death"
+)
+@app_commands.autocomplete(name=timeline_cat_autocomplete)
+async def cat_cause_of_death(
+    interaction: discord.Interaction,
+    name: str,
+    cause: str = None,
+    clear: bool = False
+):
+    if not await staff_command_check(interaction):
+        return
+
+    resolved_name = resolve_cat_name_casefold(name)
+    if not resolved_name:
+        await interaction.response.send_message("Cat not found.", ephemeral=True)
+        return
+
+    if clear and str(cause or "").strip():
+        await interaction.response.send_message(
+            "❌ Use either `cause` to save a cause of death or `clear:True` to remove it, not both.",
+            ephemeral=True
+        )
+        return
+
+    async with data_lock:
+        cat = data["cats"][resolved_name]
+        prepare_cat_record(resolved_name, cat)
+
+        if allegiance_tracker_status(cat).casefold() != "dead":
+            await interaction.response.send_message(
+                f"❌ **{timeline_display_cat_name(resolved_name)}** is still alive. Cause of death can only be saved for deceased cats.",
+                ephemeral=True
+            )
+            return
+
+        current = str(cat.get("cause_of_death") or "").strip()
+
+        if clear:
+            cat["cause_of_death"] = None
+            add_history(cat, "Cause of death record cleared")
+            save_data(data)
+            response = f"🧹 Cleared the saved cause of death for **{timeline_display_cat_name(resolved_name)}**."
+        elif str(cause or "").strip():
+            clean_cause = str(cause).strip()
+            cat["cause_of_death"] = clean_cause
+            add_history(cat, f"Cause of death recorded as {clean_cause}")
+            save_data(data)
+            response = (
+                f"💀 **Cause of Death Updated**\n"
+                f"**{timeline_display_cat_name(resolved_name)}:** {clean_cause}\n"
+                f"This will now appear on their leadership timeline."
+            )
+        else:
+            response = (
+                f"💀 **{timeline_display_cat_name(resolved_name)}**\n"
+                f"**Cause of Death:** {current or 'Not recorded'}"
+            )
+
+    await interaction.response.send_message(response)
 
 
 @cat_group.command(name="delete", description="Delete a cat permanently")
