@@ -99,8 +99,8 @@ DECEASED_ALLEGIANCE_CHANNEL_ID = 1441546574697332787
 ALLEGIANCE_SLOT_LIMITS = {
     "Leader": 1,
     "Deputy": 1,
-    "Medicine Cat": 2,
-    "Medicine Cat Apprentice": 1,
+    "Medicine Cat": 3,
+    "Medicine Cat Apprentice": 2,
     "Pathfinder": 4,
     "Digger": 4,
     "Sporekeeper": 4,
@@ -1861,10 +1861,8 @@ def allegiance_sorted(cats):
 
 
 def allegiance_slot_limit(clan_name, rank_key):
-    # The reference boards use two Medicine Cat slots for BlizzardClan and one
-    # for TorrentClan, FossilClan, and SpruceClan.
-    if rank_key == "Medicine Cat" and clan_name != "BlizzardClan":
-        return 1
+    # All four Clans may have up to three Medicine Cats and two Medicine Cat
+    # Apprentices at the same time. Other rank capacities use the shared limits.
     return ALLEGIANCE_SLOT_LIMITS[rank_key]
 
 
@@ -1949,7 +1947,7 @@ def build_clan_allegiance_text(clan_name):
     ))
     lines.extend(allegiance_rank_lines(
         clan_name,
-        "Medicine Apprentice",
+        "Medicine Apprentices",
         by_rank("Medicine Cat Apprentice"),
         allegiance_slot_limit(clan_name, "Medicine Cat Apprentice"),
         show_mentor=True
@@ -2781,7 +2779,11 @@ def timeline_period_text(entry):
 
 
 def timeline_position_limit(clan_name, position):
-    if position == "Medicine Cat" and clan_name == "BlizzardClan":
+    # Keep historical medicine-team slots generous across every Clan so older
+    # overlapping tenures can be documented without players competing for space.
+    if position == "Medicine Cat":
+        return 3
+    if position == "Medicine Cat Apprentice":
         return 2
     return 1
 
@@ -3005,7 +3007,12 @@ def timeline_snapshot_text(month, year, clan_name=None):
         lines.extend(["", f"## {TIMELINE_CLAN_ICONS.get(clan, '🐾')} {clan}"])
         for position in TIMELINE_POSITIONS:
             holders = timeline_entries_at_month(clan, position, month, year)
-            label = "Medicine Cats" if position == "Medicine Cat" and timeline_position_limit(clan, position) > 1 else position
+            if position == "Medicine Cat" and timeline_position_limit(clan, position) > 1:
+                label = "Medicine Cats"
+            elif position == "Medicine Cat Apprentice" and timeline_position_limit(clan, position) > 1:
+                label = "Medicine Cat Apprentices"
+            else:
+                label = position
             if holders:
                 names = ", ".join(f"**{timeline_display_cat_name(entry.get('cat_name', 'Unknown'))}**" for entry in holders)
             else:
@@ -3025,7 +3032,12 @@ def timeline_full_text(clan_name=None):
                 if entry.get("clan") == clan and entry.get("position") == position
             ]
             position_entries.sort(key=lambda entry: timeline_period_bounds(entry)[0])
-            label = "Medicine Cats" if position == "Medicine Cat" and timeline_position_limit(clan, position) > 1 else position
+            if position == "Medicine Cat" and timeline_position_limit(clan, position) > 1:
+                label = "Medicine Cats"
+            elif position == "Medicine Cat Apprentice" and timeline_position_limit(clan, position) > 1:
+                label = "Medicine Cat Apprentices"
+            else:
+                label = position
             lines.append(f"## {TIMELINE_POSITION_ICONS[position]} {label}")
             if not position_entries:
                 lines.append("• Unknown")
