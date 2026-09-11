@@ -542,7 +542,9 @@ def fresh_default_data():
         "medicine_gathering_history": [],
         "last_gathering_skipped": None,
         "last_medicine_gathering_skipped": None,
-        "ambient_hazard_last_triggered": {}
+        "ambient_hazard_last_triggered": {},
+        "leadership_timeline": [],
+        "next_timeline_entry_id": 1
     }
 
 
@@ -2652,6 +2654,687 @@ async def ocowner_command(interaction: discord.Interaction, cat_name: str):
         allowed_mentions=discord.AllowedMentions.none()
     )
 
+
+# ─────────────────────────────
+# LEADERSHIP TIMELINE SYSTEM
+# ─────────────────────────────
+
+TIMELINE_POSITIONS = [
+    "Leader",
+    "Deputy",
+    "Medicine Cat",
+    "Medicine Cat Apprentice",
+]
+
+TIMELINE_POSITION_CHOICES = [
+    app_commands.Choice(name=position, value=position)
+    for position in TIMELINE_POSITIONS
+]
+
+TIMELINE_MONTH_CHOICES = [
+    app_commands.Choice(name=calendar.month_name[month], value=calendar.month_name[month])
+    for month in range(1, 13)
+]
+
+TIMELINE_CLAN_ICONS = {
+    "BlizzardClan": "❄️",
+    "FossilClan": "🦴",
+    "TorrentClan": "🌊",
+    "SpruceClan": "🌲",
+}
+
+TIMELINE_POSITION_ICONS = {
+    "Leader": "⭐",
+    "Deputy": "✨",
+    "Medicine Cat": "🌿",
+    "Medicine Cat Apprentice": "🌱",
+}
+
+TIMELINE_INF_MONTH = 9999 * 12 + 12
+
+
+def normalize_timeline_storage():
+    entries = data.setdefault("leadership_timeline", [])
+    if not isinstance(entries, list):
+        entries = []
+        data["leadership_timeline"] = entries
+
+    clean_entries = []
+    highest_id = 0
+    for raw in entries:
+        if not isinstance(raw, dict):
+            continue
+        entry = dict(raw)
+        entry_id = str(entry.get("id") or "").strip()
+        if not entry_id:
+            continue
+        match = re.fullmatch(r"TL(\d+)", entry_id, flags=re.IGNORECASE)
+        if match:
+            highest_id = max(highest_id, int(match.group(1)))
+            entry["id"] = f"TL{int(match.group(1)):04d}"
+        clean_entries.append(entry)
+
+    data["leadership_timeline"] = clean_entries
+    try:
+        next_id = int(data.get("next_timeline_entry_id", highest_id + 1) or highest_id + 1)
+    except (TypeError, ValueError):
+        next_id = highest_id + 1
+    data["next_timeline_entry_id"] = max(next_id, highest_id + 1, 1)
+    return clean_entries
+
+
+def timeline_next_entry_id():
+    normalize_timeline_storage()
+    value = int(data.get("next_timeline_entry_id", 1) or 1)
+    data["next_timeline_entry_id"] = value + 1
+    return f"TL{value:04d}"
+
+
+def timeline_month_number(value):
+    if isinstance(value, app_commands.Choice):
+        value = value.value
+    if isinstance(value, int):
+        return value if 1 <= value <= 12 else None
+    text = str(value or "").strip()
+    if text.isdigit():
+        number = int(text)
+        return number if 1 <= number <= 12 else None
+    for month in range(1, 13):
+        if calendar.month_name[month].casefold() == text.casefold():
+            return month
+        if calendar.month_abbr[month].casefold() == text.casefold():
+            return month
+    return None
+
+
+def timeline_month_key(year, month):
+    return int(year) * 12 + int(month)
+
+
+def timeline_validate_year(year):
+    try:
+        year = int(year)
+    except (TypeError, ValueError):
+        return None
+    if not 1900 <= year <= 2200:
+        return None
+    return year
+
+
+def timeline_period_bounds(entry):
+    start = timeline_month_key(entry["start_year"], entry["start_month"])
+    if entry.get("end_year") is None or entry.get("end_month") is None:
+        end = TIMELINE_INF_MONTH
+    else:
+        end = timeline_month_key(entry["end_year"], entry["end_month"])
+    return start, end
+
+
+def timeline_period_text(entry):
+    start = f"{calendar.month_name[int(entry['start_month'])]} {int(entry['start_year'])}"
+    if entry.get("end_month") is None or entry.get("end_year") is None:
+        end = "Present"
+    else:
+        end = f"{calendar.month_name[int(entry['end_month'])]} {int(entry['end_year'])}"
+    return f"{start} – {end}"
+
+
+def timeline_position_limit(clan_name, position):
+    if position == "Medicine Cat" and clan_name == "BlizzardClan":
+        return 2
+    return 1
+
+
+def timeline_entry_by_id(entry_id):
+    lookup = str(entry_id or "").strip().casefold()
+    for entry in normalize_timeline_storage():
+        if str(entry.get("id") or "").casefold() == lookup:
+            return entry
+    return None
+
+
+def timeline_entries_for_cat(cat_name):
+    lookup = str(cat_name or "").strip().casefold()
+    entries = [
+        entry for entry in normalize_timeline_storage()
+        if str(entry.get("cat_name") or "").casefold() == lookup
+    ]
+    return sorted(entries, key=lambda entry: timeline_period_bounds(entry)[0])
+
+
+def timeline_display_cat_name(cat_name):
+    """Display registered NPCs with the same (NPC) marker used elsewhere in CODY."""
+    resolved_name = resolve_cat_name_casefold(cat_name)
+    if not resolved_name:
+        return str(cat_name or "Unknown").strip() or "Unknown"
+
+    cat = data.get("cats", {}).get(resolved_name)
+    if not isinstance(cat, dict):
+        return resolved_name
+
+    return display_cat_name(resolved_name, cat)
+
+
+def timeline_entry_active_in_month(entry, month, year):
+    point = timeline_month_key(year, month)
+    start, end = timeline_period_bounds(entry)
+    return start <= point <= end
+
+
+def timeline_entries_at_month(clan_name, position, month, year):
+    matched = [
+        entry for entry in normalize_timeline_storage()
+        if entry.get("clan") == clan_name
+        and entry.get("position") == position
+        and timeline_entry_active_in_month(entry, month, year)
+    ]
+    return sorted(matched, key=lambda entry: str(entry.get("cat_name") or "").casefold())
+
+
+def timeline_conflicts(candidate, exclude_id=None):
+    """Return conflicts that would make the candidate historically impossible."""
+    candidate_start, candidate_end = timeline_period_bounds(candidate)
+    existing = [
+        entry for entry in normalize_timeline_storage()
+        if str(entry.get("id") or "").casefold() != str(exclude_id or "").casefold()
+    ]
+
+    # One OC cannot hold two different high-rank timeline terms in the same month.
+    cat_conflicts = []
+    for entry in existing:
+        if str(entry.get("cat_name") or "").casefold() != str(candidate.get("cat_name") or "").casefold():
+            continue
+        start, end = timeline_period_bounds(entry)
+        if max(start, candidate_start) <= min(end, candidate_end):
+            cat_conflicts.append(entry)
+    if cat_conflicts:
+        return "cat", cat_conflicts
+
+    same_slot = [
+        entry for entry in existing
+        if entry.get("clan") == candidate.get("clan")
+        and entry.get("position") == candidate.get("position")
+    ]
+    overlapping = []
+    for entry in same_slot:
+        start, end = timeline_period_bounds(entry)
+        if max(start, candidate_start) <= min(end, candidate_end):
+            overlapping.append(entry)
+
+    limit = timeline_position_limit(candidate.get("clan"), candidate.get("position"))
+    if not overlapping:
+        return None, []
+
+    # Check only interval boundary points; occupancy cannot change between them.
+    points = {candidate_start}
+    for entry in overlapping:
+        start, end = timeline_period_bounds(entry)
+        points.add(max(candidate_start, start))
+        if end < candidate_end and end < TIMELINE_INF_MONTH:
+            points.add(end + 1)
+
+    for point in sorted(points):
+        if point > candidate_end:
+            continue
+        active = []
+        for entry in overlapping:
+            start, end = timeline_period_bounds(entry)
+            if start <= point <= end:
+                active.append(entry)
+        if len(active) + 1 > limit:
+            return "position", active
+
+    return None, []
+
+
+def timeline_conflict_text(candidate, conflict_type, conflicts):
+    if conflict_type == "cat":
+        header = (
+            f"❌ **{candidate['cat_name']}** already has another leadership term overlapping this period. "
+            "A cat cannot hold two high-rank timeline positions in the same month."
+        )
+    else:
+        limit = timeline_position_limit(candidate["clan"], candidate["position"])
+        slot_word = "slot is" if limit == 1 else "slots are"
+        header = (
+            f"❌ **{candidate['clan']} {candidate['position']}** already has all {limit} historical {slot_word} "
+            "filled during part of that period."
+        )
+    lines = [header, ""]
+    for entry in conflicts:
+        lines.append(f"• **{timeline_display_cat_name(entry.get('cat_name', 'Unknown'))}** — {timeline_period_text(entry)}")
+    lines.append("\nAdjust the dates before adding or editing this entry.")
+    return "\n".join(lines)
+
+
+def timeline_validate_candidate(candidate):
+    if candidate.get("clan") not in CLAN_NAMES_ONLY:
+        return "❌ Timeline entries can only be registered for the four Clans."
+    if candidate.get("position") not in TIMELINE_POSITIONS:
+        return "❌ That is not a supported high-rank timeline position."
+    start_month = timeline_month_number(candidate.get("start_month"))
+    end_month = timeline_month_number(candidate.get("end_month")) if candidate.get("end_month") is not None else None
+    start_year = timeline_validate_year(candidate.get("start_year"))
+    end_year = timeline_validate_year(candidate.get("end_year")) if candidate.get("end_year") is not None else None
+    if start_month is None or start_year is None:
+        return "❌ Start month/year is invalid."
+    if (candidate.get("end_month") is None) != (candidate.get("end_year") is None):
+        return "❌ End month and end year must either both be provided or both be left blank for an ongoing term."
+    if candidate.get("end_month") is not None and (end_month is None or end_year is None):
+        return "❌ End month/year is invalid."
+    candidate["start_month"] = start_month
+    candidate["start_year"] = start_year
+    candidate["end_month"] = end_month
+    candidate["end_year"] = end_year
+    start, end = timeline_period_bounds(candidate)
+    if end < start:
+        return "❌ A leadership term cannot end before it begins."
+    return None
+
+
+def timeline_current_role_matches(cat, clan_name, position):
+    return (
+        allegiance_tracker_status(cat).casefold() != "dead"
+        and allegiance_tracker_clan(cat) == clan_name
+        and allegiance_tracker_rank(cat) == position
+    )
+
+
+def timeline_cat_summary(cat_name, max_entries=5):
+    entries = timeline_entries_for_cat(cat_name)
+    if not entries:
+        return None
+    shown = entries[-max_entries:]
+    pieces = [
+        f"{TIMELINE_POSITION_ICONS.get(entry.get('position'), '🐾')} {entry.get('clan')} {entry.get('position')} ({timeline_period_text(entry)})"
+        for entry in shown
+    ]
+    if len(entries) > max_entries:
+        pieces.insert(0, f"+{len(entries) - max_entries} older")
+    return "; ".join(pieces)
+
+
+def timeline_snapshot_text(month, year, clan_name=None):
+    month_name = calendar.month_name[month]
+    clans = [clan_name] if clan_name else CLAN_NAMES_ONLY
+    lines = [f"📜 **Echostone Mountain Leadership — {month_name} {year}**"]
+    for clan in clans:
+        lines.extend(["", f"## {TIMELINE_CLAN_ICONS.get(clan, '🐾')} {clan}"])
+        for position in TIMELINE_POSITIONS:
+            holders = timeline_entries_at_month(clan, position, month, year)
+            label = "Medicine Cats" if position == "Medicine Cat" and timeline_position_limit(clan, position) > 1 else position
+            if holders:
+                names = ", ".join(f"**{timeline_display_cat_name(entry.get('cat_name', 'Unknown'))}**" for entry in holders)
+            else:
+                names = "**Unknown**"
+            lines.append(f"{TIMELINE_POSITION_ICONS[position]} **{label}:** {names}")
+    return "\n".join(lines)
+
+
+def timeline_full_text(clan_name=None):
+    clans = [clan_name] if clan_name else CLAN_NAMES_ONLY
+    lines = ["📜 **Echostone Mountain Leadership Timeline**"]
+    for clan in clans:
+        lines.extend(["", f"# {TIMELINE_CLAN_ICONS.get(clan, '🐾')} {clan}"])
+        for position in TIMELINE_POSITIONS:
+            position_entries = [
+                entry for entry in normalize_timeline_storage()
+                if entry.get("clan") == clan and entry.get("position") == position
+            ]
+            position_entries.sort(key=lambda entry: timeline_period_bounds(entry)[0])
+            label = "Medicine Cats" if position == "Medicine Cat" and timeline_position_limit(clan, position) > 1 else position
+            lines.append(f"## {TIMELINE_POSITION_ICONS[position]} {label}")
+            if not position_entries:
+                lines.append("• Unknown")
+            else:
+                for entry in position_entries:
+                    lines.append(f"• **{timeline_display_cat_name(entry.get('cat_name', 'Unknown'))}** — {timeline_period_text(entry)}")
+    return "\n".join(lines)
+
+
+async def timeline_cat_autocomplete(interaction: discord.Interaction, current: str):
+    # Include every registered cat, including NPCs and deceased cats. NPCs are
+    # labelled in the menu, but their raw registered name remains the command value.
+    needle = str(current or "").casefold().strip()
+    matches = []
+    for cat_name, cat in data.get("cats", {}).items():
+        shown_name = display_cat_name(cat_name, cat)
+        if needle and needle not in cat_name.casefold() and needle not in shown_name.casefold():
+            continue
+        matches.append((cat_name, shown_name))
+    matches.sort(key=lambda item: item[0].casefold())
+    return [
+        app_commands.Choice(name=shown_name[:100], value=cat_name[:100])
+        for cat_name, shown_name in matches[:25]
+    ]
+
+
+async def timeline_entry_autocomplete(interaction: discord.Interaction, current: str):
+    needle = str(current or "").casefold().strip()
+    choices = []
+    for entry in reversed(normalize_timeline_storage()):
+        label = (
+            f"{entry.get('id')} • {timeline_display_cat_name(entry.get('cat_name'))} • {entry.get('clan')} {entry.get('position')} • "
+            f"{timeline_period_text(entry)}"
+        )
+        if needle and needle not in label.casefold():
+            continue
+        choices.append(app_commands.Choice(name=label[:100], value=str(entry.get("id"))[:100]))
+        if len(choices) >= 25:
+            break
+    return choices
+
+
+timeline_group = app_commands.Group(
+    name="timeline",
+    description="View and manage Clan leadership history"
+)
+
+
+@timeline_group.command(name="view", description="View the documented leadership timeline")
+@app_commands.describe(clan="Optional Clan; leave blank to view all four")
+@app_commands.choices(clan=CLAN_ONLY_CHOICES)
+async def timeline_view(interaction: discord.Interaction, clan: app_commands.Choice[str] = None):
+    text = timeline_full_text(clan.value if clan else None)
+    chunks = split_allegiance_text(text, max_length=1850)
+    await interaction.response.send_message(chunks[0])
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk)
+
+
+@timeline_group.command(name="month", description="See who held each high rank in a specific month and year")
+@app_commands.describe(month="Month to look up", year="Year to look up", clan="Optional Clan; leave blank for all four")
+@app_commands.choices(month=TIMELINE_MONTH_CHOICES, clan=CLAN_ONLY_CHOICES)
+async def timeline_month(
+    interaction: discord.Interaction,
+    month: app_commands.Choice[str],
+    year: int,
+    clan: app_commands.Choice[str] = None,
+):
+    month_number = timeline_month_number(month)
+    year_value = timeline_validate_year(year)
+    if month_number is None or year_value is None:
+        await interaction.response.send_message("❌ Please choose a valid month and year.", ephemeral=True)
+        return
+    text = timeline_snapshot_text(month_number, year_value, clan.value if clan else None)
+    chunks = split_allegiance_text(text, max_length=1850)
+    await interaction.response.send_message(chunks[0])
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk)
+
+
+@timeline_group.command(name="cat", description="View one cat's documented high-rank history")
+@app_commands.describe(cat_name="Registered cat to look up")
+@app_commands.autocomplete(cat_name=timeline_cat_autocomplete)
+async def timeline_cat(interaction: discord.Interaction, cat_name: str):
+    resolved_name = resolve_cat_name_casefold(cat_name)
+    display_name = resolved_name or str(cat_name).strip()
+    entries = timeline_entries_for_cat(display_name)
+    if not entries:
+        await interaction.response.send_message(
+            f"📜 **{display_name}** has no documented leadership timeline entries yet."
+        )
+        return
+    shown_display_name = timeline_display_cat_name(display_name)
+    lines = [f"📜 **{shown_display_name}'s Leadership Timeline**"]
+    for entry in entries:
+        lines.append(
+            f"• {TIMELINE_POSITION_ICONS.get(entry.get('position'), '🐾')} {TIMELINE_CLAN_ICONS.get(entry.get('clan'), '🐾')} **{entry.get('clan')} {entry.get('position')}** — "
+            f"{timeline_period_text(entry)}"
+        )
+    await interaction.response.send_message("\n".join(lines)[:1900])
+
+
+@timeline_group.command(name="add", description="Moderator+: add a historical or current high-rank term")
+@app_commands.describe(
+    cat_name="Registered living, deceased, or NPC cat",
+    clan="Clan they held the position in",
+    position="High-rank position",
+    start_month="Month the term began",
+    start_year="Year the term began",
+    end_month="Historical term only; leave blank if they still hold the position",
+    end_year="Historical term only; leave blank if they still hold the position",
+)
+@app_commands.choices(
+    clan=CLAN_ONLY_CHOICES,
+    position=TIMELINE_POSITION_CHOICES,
+    start_month=TIMELINE_MONTH_CHOICES,
+    end_month=TIMELINE_MONTH_CHOICES,
+)
+@app_commands.autocomplete(cat_name=timeline_cat_autocomplete)
+async def timeline_add(
+    interaction: discord.Interaction,
+    cat_name: str,
+    clan: app_commands.Choice[str],
+    position: app_commands.Choice[str],
+    start_month: app_commands.Choice[str],
+    start_year: int,
+    end_month: app_commands.Choice[str] = None,
+    end_year: int = None,
+):
+    if not await moderator_command_check(interaction):
+        return
+
+    resolved_name = resolve_cat_name_casefold(cat_name)
+    if not resolved_name:
+        await interaction.response.send_message(
+            f"❌ **{cat_name}** is not registered in CODY. Add the living, deceased, or NPC cat record first.",
+            ephemeral=True,
+        )
+        return
+
+    candidate = {
+        "cat_name": resolved_name,
+        "clan": clan.value,
+        "position": position.value,
+        "start_month": timeline_month_number(start_month),
+        "start_year": start_year,
+        "end_month": timeline_month_number(end_month) if end_month else None,
+        "end_year": end_year,
+    }
+    validation_error = timeline_validate_candidate(candidate)
+    if validation_error:
+        await interaction.response.send_message(validation_error, ephemeral=True)
+        return
+
+    cat = data["cats"][resolved_name]
+    prepare_cat_record(resolved_name, cat)
+    if candidate["end_month"] is None:
+        if allegiance_tracker_status(cat).casefold() == "dead":
+            await interaction.response.send_message(
+                f"❌ **{resolved_name}** is deceased, so their historical term needs an end month and year.",
+                ephemeral=True,
+            )
+            return
+        if not timeline_current_role_matches(cat, candidate["clan"], candidate["position"]):
+            await interaction.response.send_message(
+                f"❌ An ongoing timeline term must match the OC's current tracker record. **{resolved_name}** is currently "
+                f"**{cat.get('clan')} {cat.get('rank')}**.",
+                ephemeral=True,
+            )
+            return
+
+    conflict_type, conflicts = timeline_conflicts(candidate)
+    if conflict_type:
+        await interaction.response.send_message(
+            timeline_conflict_text(candidate, conflict_type, conflicts),
+            ephemeral=True,
+        )
+        return
+
+    async with data_lock:
+        entry = dict(candidate)
+        entry["id"] = timeline_next_entry_id()
+        entry["created_by"] = str(interaction.user.id)
+        entry["created_at"] = datetime.now(TZ).isoformat()
+        data.setdefault("leadership_timeline", []).append(entry)
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"📜 **TIMELINE ENTRY ADDED**\n"
+        f"{TIMELINE_POSITION_ICONS.get(entry['position'], '🐾')} {TIMELINE_CLAN_ICONS.get(entry['clan'], '🐾')} **{timeline_display_cat_name(entry['cat_name'])} — {entry['clan']} {entry['position']}**\n"
+        f"**Term:** {timeline_period_text(entry)}\n"
+        f"-# Entry ID: {entry['id']}"
+    )
+
+
+@timeline_group.command(name="edit", description="Moderator+: edit an existing leadership timeline entry")
+@app_commands.describe(
+    entry_id="Timeline entry to edit",
+    cat_name="Optional corrected registered cat or NPC name",
+    clan="Optional corrected Clan",
+    position="Optional corrected position",
+    start_month="Optional corrected start month",
+    start_year="Optional corrected start year",
+    end_month="Optional corrected end month",
+    end_year="Optional corrected end year",
+    make_ongoing="Set True to clear the end date and mark the term Present",
+)
+@app_commands.choices(
+    clan=CLAN_ONLY_CHOICES,
+    position=TIMELINE_POSITION_CHOICES,
+    start_month=TIMELINE_MONTH_CHOICES,
+    end_month=TIMELINE_MONTH_CHOICES,
+)
+@app_commands.autocomplete(entry_id=timeline_entry_autocomplete, cat_name=timeline_cat_autocomplete)
+async def timeline_edit(
+    interaction: discord.Interaction,
+    entry_id: str,
+    cat_name: str = None,
+    clan: app_commands.Choice[str] = None,
+    position: app_commands.Choice[str] = None,
+    start_month: app_commands.Choice[str] = None,
+    start_year: int = None,
+    end_month: app_commands.Choice[str] = None,
+    end_year: int = None,
+    make_ongoing: bool = False,
+):
+    if not await moderator_command_check(interaction):
+        return
+
+    existing = timeline_entry_by_id(entry_id)
+    if not existing:
+        await interaction.response.send_message("❌ I couldn't find that timeline entry.", ephemeral=True)
+        return
+
+    candidate = copy.deepcopy(existing)
+    if cat_name:
+        resolved_name = resolve_cat_name_casefold(cat_name)
+        if not resolved_name:
+            await interaction.response.send_message(f"❌ **{cat_name}** is not registered in CODY.", ephemeral=True)
+            return
+        candidate["cat_name"] = resolved_name
+    if clan:
+        candidate["clan"] = clan.value
+    if position:
+        candidate["position"] = position.value
+    if start_month:
+        candidate["start_month"] = timeline_month_number(start_month)
+    if start_year is not None:
+        candidate["start_year"] = start_year
+
+    if make_ongoing and (end_month is not None or end_year is not None):
+        await interaction.response.send_message(
+            "❌ Use either `make_ongoing:True` or provide an end date, not both.",
+            ephemeral=True,
+        )
+        return
+    if make_ongoing:
+        candidate["end_month"] = None
+        candidate["end_year"] = None
+    elif end_month is not None or end_year is not None:
+        new_end_month = timeline_month_number(end_month) if end_month else candidate.get("end_month")
+        new_end_year = end_year if end_year is not None else candidate.get("end_year")
+        if new_end_month is None or new_end_year is None:
+            await interaction.response.send_message(
+                "❌ To set an end date on an ongoing entry, provide both `end_month` and `end_year`.",
+                ephemeral=True,
+            )
+            return
+        candidate["end_month"] = new_end_month
+        candidate["end_year"] = new_end_year
+
+    validation_error = timeline_validate_candidate(candidate)
+    if validation_error:
+        await interaction.response.send_message(validation_error, ephemeral=True)
+        return
+
+    resolved_name = resolve_cat_name_casefold(candidate["cat_name"])
+    if not resolved_name:
+        await interaction.response.send_message(
+            f"❌ **{candidate['cat_name']}** is no longer registered in CODY. Choose a registered cat before editing this entry.",
+            ephemeral=True,
+        )
+        return
+    candidate["cat_name"] = resolved_name
+    cat = data["cats"][resolved_name]
+    prepare_cat_record(resolved_name, cat)
+    if candidate["end_month"] is None:
+        if allegiance_tracker_status(cat).casefold() == "dead":
+            await interaction.response.send_message(
+                f"❌ **{resolved_name}** is deceased, so their term cannot be marked Present.", ephemeral=True
+            )
+            return
+        if not timeline_current_role_matches(cat, candidate["clan"], candidate["position"]):
+            await interaction.response.send_message(
+                f"❌ A Present term must match the OC's current tracker record. **{resolved_name}** is currently "
+                f"**{cat.get('clan')} {cat.get('rank')}**.", ephemeral=True
+            )
+            return
+
+    conflict_type, conflicts = timeline_conflicts(candidate, exclude_id=existing.get("id"))
+    if conflict_type:
+        await interaction.response.send_message(
+            timeline_conflict_text(candidate, conflict_type, conflicts), ephemeral=True
+        )
+        return
+
+    async with data_lock:
+        existing.clear()
+        existing.update(candidate)
+        existing["edited_by"] = str(interaction.user.id)
+        existing["edited_at"] = datetime.now(TZ).isoformat()
+        save_data(data)
+
+    await interaction.response.send_message(
+        f"✏️ **TIMELINE ENTRY UPDATED**\n"
+        f"{TIMELINE_POSITION_ICONS.get(existing['position'], '🐾')} {TIMELINE_CLAN_ICONS.get(existing['clan'], '🐾')} **{timeline_display_cat_name(existing['cat_name'])} — {existing['clan']} {existing['position']}**\n"
+        f"**Term:** {timeline_period_text(existing)}\n"
+        f"-# Entry ID: {existing['id']}"
+    )
+
+
+@timeline_group.command(name="remove", description="Moderator+: remove an incorrect leadership timeline entry")
+@app_commands.describe(entry_id="Timeline entry to remove", reason="Optional reason for staff records")
+@app_commands.autocomplete(entry_id=timeline_entry_autocomplete)
+async def timeline_remove(interaction: discord.Interaction, entry_id: str, reason: str = ""):
+    if not await moderator_command_check(interaction):
+        return
+    existing = timeline_entry_by_id(entry_id)
+    if not existing:
+        await interaction.response.send_message("❌ I couldn't find that timeline entry.", ephemeral=True)
+        return
+
+    removed = copy.deepcopy(existing)
+    async with data_lock:
+        data["leadership_timeline"] = [
+            entry for entry in normalize_timeline_storage()
+            if str(entry.get("id") or "").casefold() != str(entry_id).casefold()
+        ]
+        data.setdefault("leadership_timeline_removed", []).append({
+            **removed,
+            "removed_by": str(interaction.user.id),
+            "removed_at": datetime.now(TZ).isoformat(),
+            "removal_reason": str(reason or "").strip() or None,
+        })
+        save_data(data)
+
+    reason_line = f"\n**Reason:** {str(reason).strip()}" if str(reason or "").strip() else ""
+    await interaction.response.send_message(
+        f"🗑️ **TIMELINE ENTRY REMOVED**\n"
+        f"{TIMELINE_POSITION_ICONS.get(removed.get('position'), '🐾')} **{timeline_display_cat_name(removed.get('cat_name'))} — {removed.get('clan')} {removed.get('position')}**\n"
+        f"**Term:** {timeline_period_text(removed)}{reason_line}"
+    )
 
 # ─────────────────────────────
 # HONOUR ROLE SYSTEM
@@ -8256,6 +8939,14 @@ async def botinfo(interaction: discord.Interaction):
         "`/prophecy post` — Staff only. Post a custom prophecy or omen\n`/prophecy pause` — Staff only. Pause new monthly prophecy rolls and keep the active prophecy\n`/prophecy unpause` — Staff only. Resume new monthly prophecy rolls\n"
         "`/revertmoon` — Staff only. Reverts to the saved state before the last moon advance\n\n"
 
+        "📜 **Leadership Timeline Commands**\n"
+        "`/timeline view [Clan]` — View the documented leadership history for one Clan or all four\n"
+        "`/timeline month [Month] [Year] [Clan]` — See who held each high rank during a specific month; undocumented positions show as Unknown\n"
+        "`/timeline cat [Cat]` — View one cat's documented leadership history\n"
+        "`/timeline add` — Moderator+ only. Add a historical or ongoing Leader, Deputy, Medicine Cat, or Medicine Cat Apprentice term\n"
+        "`/timeline edit` — Moderator+ only. Correct an existing timeline entry\n"
+        "`/timeline remove` — Moderator+ only. Remove an incorrect timeline entry\n\n"
+
         "📜 **Quest / Gathering Commands**\n"
         "`/quest force` — Quest manager only. Clear and force-post replacement quests while keeping the monthly first-of-the-month schedule\n"
         "`/quest progress` — View current monthly quest status, contributors, and exactly how much prey is still needed\n`/quest catch [Cat] [Prey]` — Record a hunting-quest catch; the OC's first contribution earns a Connection Token\n`/quest contribute [Cat]` — Record your OC as a contributor to a non-hunting monthly quest\n`/quest perks` — View all Connection Perks and token costs\n`/quest redeemperk [Cat] [Perk]` — Spend Connection Tokens on a permanent perk badge\n`/quest addtokens [Cat] [Amount] [Reason]` — Moderator+ only. Manually award Connection Tokens (for example, Cat of the Moon)\n`/quest removetokens [Cat] [Amount] [Reason]` — Moderator+ only. Manually remove Connection Tokens\n`/quest removeperk [Cat] [Perk] [Reason]` — Moderator+ only. Remove a redeemed perk; does not automatically refund tokens\n`/quest track [Cat] [Prey]` — Great Tracker perk: once per moon, choose a specific prey encounter\n`/quest complete [Clan]` — Staff only. Complete a quest and award success tokens to registered contributors\n`/quest role` — View the current optional role-specific quests\n`/quest rolecomplete [Cat] [Quest Number]` — Staff only. Complete role quest 1 or 2 with an eligible OC and award a random personal reward\n`/quest rolereroll [Quest Number]` — Staff only. Replace role quest 1 or 2\n`/quest usebonus [Cat] [Bonus]` — Staff only. Mark a saved one-use quest bonus as spent after the roll/activity\n`/resetquest [Clan/Outsider/All]` — Staff only. Replace one or all active quests/events while keeping the current due date\n"
@@ -10219,6 +10910,10 @@ async def cat_rename(interaction: discord.Interaction, old_name: str, new_name: 
 
         data["cats"][new_name] = data["cats"].pop(old_name)
         add_history(data["cats"][new_name], f"Renamed from {old_name} to {new_name}")
+
+        for timeline_entry in normalize_timeline_storage():
+            if str(timeline_entry.get("cat_name") or "").casefold() == str(old_name).casefold():
+                timeline_entry["cat_name"] = new_name
 
         plot_members = data.setdefault("plot_members", {})
         if old_name in plot_members:
@@ -15829,6 +16524,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
         role_skill_text = role_quest_skill_summary(cat)
         role_streak = int(cat.get("role_quest_streak", 0) or 0)
         connection_perk_text = format_connection_perk_badges(cat)
+        leadership_timeline_text = timeline_cat_summary(name)
 
         age_text = f"{cat.get('age', 0)} moons"
         age_freeze_text = freeze_remaining_text(cat, "freeze_age", "freeze_age_until")
@@ -15886,6 +16582,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
             f"**Role Quest Bonus**: {role_bonus_text}\n"
             f"**Role Quest Streak**: {role_streak} completed\n"
             + (f"**Perks**: {connection_perk_text}\n" if connection_perk_text else "")
+            + (f"**Leadership History**: {leadership_timeline_text}\n" if leadership_timeline_text else "")
             + f"**Quest Keepsakes**: {role_collection_text}\n"
             f"**Quest Skill Practice**: {role_skill_text}\n"
             f"**Mentor**: {mentor}\n"
@@ -16572,6 +17269,11 @@ async def bothelp(interaction: discord.Interaction):
         "Severe weather rolls on Mondays at 4 PM Toronto time. Primary disaster effects last 7 days unless staff sets a different duration.\n\n"
         "Rare ambient hazards can also occur at Frozen Falls and Toadstool Glade after recent RP activity; these only post a roll prompt and never apply injuries automatically.\n\n"
 
+        "📜 **Leadership Timeline**\n"
+        "`/timeline view [Clan]` — Browse the documented high-rank history for one Clan or all four.\n"
+        "`/timeline month [Month] [Year] [Clan]` — Look up who was Leader, Deputy, Medicine Cat, and Medicine Cat Apprentice in a specific month. Undocumented positions show as **Unknown**.\n"
+        "`/timeline cat [Cat]` — View one cat's documented leadership history.\n\n"
+
         "📜 **Quest / Story Commands**\n"
         "Current quests/events post on the 1st of every month at 9 AM and stay active until the next month. Hunting objectives use broad prey categories such as birds, fish, or small prey. Use `/quest progress` to see quest progress and contributors. Hunting quests use `/quest catch [Cat] [Prey]`; non-hunting quests use `/quest contribute [Cat]`. An OC earns 1 Connection Token for their first contribution to a monthly quest and another if that quest succeeds. Use `/quest perks` to view the permanent badges those tokens can buy. Reminders post with 14 days, 7 days, and 3 days remaining. The pool rolls 35% hunting, 20% social, 20% herb patrol, 10% sickness/crisis, and 15% wild animal events.\n"
         "Starting September 1, two optional role-specific quests run alongside the monthly quests, using two different role groups whenever possible. Each role cycles through all of its prompts before repeating. There is no penalty if nobody completes them. Use `/quest role` to view both. One-use Lucky Paw, Well Rested, and StarClan blessing charges are saved on `/catinfo`; staff can mark them spent with `/quest usebonus`.\n"
@@ -16623,6 +17325,7 @@ bot.tree.add_command(activity_group)
 bot.tree.add_command(membership_group)
 bot.tree.add_command(feed_group)
 bot.tree.add_command(quest_group)
+bot.tree.add_command(timeline_group)
 bot.tree.add_command(prophecy_group)
 keep_alive()
 print("Starting Discord bot. Server Members Intent is required; Message Content Intent is disabled.")
