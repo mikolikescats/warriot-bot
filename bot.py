@@ -5125,6 +5125,145 @@ async def freezecat(
         f"**Age:** {'Frozen ' + age_freeze_text if age_freeze_text else 'Not frozen'}\n"
         f"**Hunger:** {'Frozen ' + hunger_freeze_text if hunger_freeze_text else 'Not frozen'}"
     )
+
+
+@bot.tree.command(
+    name="freezeuser",
+    description="Freeze or unfreeze all living OCs owned by one member."
+)
+@app_commands.describe(
+    user="Player display name or Discord username",
+    freeze_type="Choose whether to freeze all or only hunger",
+    frozen="True = freeze, False = unfreeze",
+    days="Optional number of days. Leave blank for indefinite freeze."
+)
+@app_commands.choices(
+    freeze_type=FREEZE_TYPE_CHOICES
+)
+@app_commands.autocomplete(user=allegiance_user_autocomplete)
+async def freezeuser(
+    interaction: discord.Interaction,
+    user: str,
+    freeze_type: app_commands.Choice[str],
+    frozen: bool,
+    days: int = None
+):
+    """Freeze every living, player-owned OC linked to a Discord member."""
+    if not await staff_command_check(interaction):
+        return
+
+    if days is not None and days <= 0:
+        await interaction.response.send_message(
+            "❌ Days must be 1 or higher. Leave days blank for an indefinite freeze.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    member, member_error = await resolve_allegiance_member(interaction.guild, user)
+    if member_error:
+        await interaction.edit_original_response(content=f"❌ {member_error}")
+        return
+
+    owner_id = str(member.id)
+    affected_names = []
+    deceased_names = []
+    now = datetime.now(TZ)
+    freeze_until = None
+
+    if frozen and days is not None:
+        freeze_until = (now + timedelta(days=days)).isoformat()
+
+    async with data_lock:
+        for cat_name, cat in data.get("cats", {}).items():
+            prepare_cat_record(cat_name, cat)
+
+            # NPCs do not belong to a Discord member and should continue to be
+            # managed individually with /freezecat.
+            if bool(cat.get("is_npc", False)):
+                continue
+
+            if oc_owner_id(cat) != owner_id:
+                continue
+
+            if allegiance_tracker_status(cat).casefold() == "dead":
+                deceased_names.append(cat_name)
+                continue
+
+            if freeze_type.value == "all":
+                if frozen:
+                    if days is None:
+                        cat["freeze_age"] = True
+                        cat["freeze_hunger"] = True
+                        cat["freeze_age_until"] = None
+                        cat["freeze_hunger_until"] = None
+                    else:
+                        cat["freeze_age"] = False
+                        cat["freeze_hunger"] = False
+                        cat["freeze_age_until"] = freeze_until
+                        cat["freeze_hunger_until"] = freeze_until
+                else:
+                    cat["freeze_age"] = False
+                    cat["freeze_hunger"] = False
+                    cat["freeze_age_until"] = None
+                    cat["freeze_hunger_until"] = None
+
+            elif freeze_type.value == "hunger":
+                if frozen:
+                    if days is None:
+                        cat["freeze_hunger"] = True
+                        cat["freeze_hunger_until"] = None
+                    else:
+                        cat["freeze_hunger"] = False
+                        cat["freeze_hunger_until"] = freeze_until
+                else:
+                    cat["freeze_hunger"] = False
+                    cat["freeze_hunger_until"] = None
+
+            affected_names.append(cat_name)
+
+        if affected_names:
+            save_data(data)
+
+    if not affected_names:
+        extra = ""
+        if deceased_names:
+            extra = " Their registered OCs are deceased, so there is nothing to freeze."
+        await interaction.edit_original_response(
+            content=f"❌ I could not find any living player-owned OCs registered to **{member.display_name}**.{extra}"
+        )
+        return
+
+    affected_names.sort(key=str.casefold)
+    deceased_names.sort(key=str.casefold)
+
+    if freeze_type.value == "all":
+        target_text = "age and hunger"
+    else:
+        target_text = "hunger"
+
+    if frozen:
+        if days is None:
+            action_text = "frozen indefinitely"
+        else:
+            day_word = "day" if days == 1 else "days"
+            action_text = f"frozen for {days} {day_word}"
+    else:
+        action_text = "unfrozen"
+
+    lines = [
+        f"❄️ **{member.display_name}'s OC freeze settings updated.**",
+        f"**{target_text.title()}:** {action_text}",
+        f"**OCs updated ({len(affected_names)}):** {', '.join(affected_names)}"
+    ]
+
+    if deceased_names:
+        lines.append(
+            f"**Deceased OCs skipped ({len(deceased_names)}):** {', '.join(deceased_names)}"
+        )
+
+    await interaction.edit_original_response(content="\n".join(lines)[:1900])
 # ─────────────────────────────
 # WEATHER SYSTEM
 # ─────────────────────────────
@@ -9076,7 +9215,8 @@ async def botinfo(interaction: discord.Interaction):
         "`/changeclan` — Staff only. Move a cat to a different Clan or to/from Outsider\n"
         "`/cat delayceremony` — Delay automatic rank-up ceremonies\n"
         "`/cat tinderhide` — Hide/unhide a cat from Cat Tinder\n"
-        "`/freezecat` — Staff only. Freeze or unfreeze a cat's age and/or hunger, either indefinitely or for a set number of days\n"
+        "`/freezecat` — Staff only. Freeze or unfreeze one cat's age and/or hunger, either indefinitely or for a set number of days\n"
+        "`/freezeuser [User]` — Staff only. Freeze or unfreeze every living OC registered to one Discord member at once\n"
         "`/frozenlist` — Staff only. View all cats with active age or hunger freezes\n\n"
         "`/cat clearhistorymoon` — Delete cat history entries from a specific moon\n\n"
 
