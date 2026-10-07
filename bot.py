@@ -7994,7 +7994,79 @@ HUNT_CHANNELS = {1443836708494905425: {'location': 'Glacier’s Edge', 'emoji': 
  1444903464957382717: {'location': 'Neon Path', 'emoji': '🌃'},
  1444903561099088004: {'location': 'Twoleg Town', 'emoji': '🏡'}}
 
-NO_PREY_
+NO_PREY_HUNT_PROMPTS = {'Frozen Falls': ['The roar of BlizzardClan’s sacred falls drowns out every other sound, and no prey scent lingers anywhere nearby. A '
+                  'single pale feather spirals slowly from somewhere above and lands at your paws. **There is nothing to hunt here, but... '
+                  'is that a sign from StarClan? Probably not. You might want to keep it anyway.**',
+                  'You search along the icy stones behind the falls, but find no tracks fresh enough to follow. Instead, a thin shard of '
+                  'ice breaks loose overhead and lands perfectly upright in the snow before tipping over. **There is nothing to hunt here. '
+                  'Still... that was oddly dramatic.**',
+                  'No prey dares linger around the sacred falls, leaving only the thunder of water and the occasional groan of shifting '
+                  'ice. Beneath a frozen ledge, you notice a tiny blue-grey stone polished completely smooth by the water. **There is '
+                  'nothing to hunt here, but you may take the stone with you if you wish.**',
+                  'You catch what sounds like a whisper beneath the pounding waterfall and turn sharply toward the hidden cavern. Nothing '
+                  'is there when you look, only dripping water and your own reflection trembling across the ice. **There is nothing to '
+                  'hunt here. Maybe the mountain is simply playing tricks on you.**',
+                  'Fresh pawprints appear in the snow near the falls, but they abruptly stop several tail-lengths from the water with no '
+                  'obvious trail leading away. They are too blurred by frost to identify. **There is nothing to hunt here, though you may '
+                  'want to remember what you found.**',
+                  'A thin beam of sunlight slips through the ice and throws a strange rainbow across the cavern wall. For only a moment, '
+                  'the colours seem almost shaped like a cat before the light shifts and the illusion disappears. **There is nothing to '
+                  'hunt here. StarClan probably has better things to do... probably.**'],
+ 'Sunspirit Sands': ['Warm sand shifts beneath your paws while the water laps peacefully against the shore. There are no prey trails to '
+                     'follow, but a perfectly intact shell gleams beside the tide line as though somebody placed it there. **Sunspirit '
+                     'Sands is for resting, not hunting, but the shell is yours if you want it.**',
+                     'You wander along the empty beach without finding so much as a mouse track. A smooth piece of driftwood has washed '
+                     'ashore instead, twisted into a shape that looks suspiciously like a curled cat if you squint hard enough. **There is '
+                     'nothing to hunt here, but perhaps it would make an interesting keepsake.**',
+                     'The sand holds no fresh prey scent, only the overlapping pawprints of TorrentClan cats who have visited before you. '
+                     'Among them is one tiny set of tracks leading toward the water and disappearing at the shoreline. **There is nothing '
+                     'to hunt here. Maybe somebody went for a swim... hopefully.**',
+                     'A wave rolls farther up the beach than the others and leaves something glittering behind. It is only a tiny piece of '
+                     'polished sea glass, dulled smooth enough that it cannot cut your paws. **There is nothing to hunt here, but you may '
+                     'take your strangely shiny treasure.**',
+                     'You find no prey whatsoever, but a little mound of sand near the water looks suspiciously deliberate. One swipe of '
+                     'your paw reveals three shells tucked underneath as though another cat had hidden them there. **Sunspirit Sands is '
+                     'for resting, not hunting. Whether you disturb this mysterious shell stash is entirely up to you.**',
+                     'A warm breeze carries the distant call of a bird over the water, followed by a single feather drifting onto the '
+                     'beach beside you. It is damp at the tip but otherwise untouched. **There is nothing to hunt here, though perhaps the '
+                     'feather deserves a place in somebody’s nest.**'],
+ 'Dinosaur Spine': ['Ancient bone, mineral-rich stone, and FossilClan’s water source surround you, but there are no prey trails worth '
+                    'following here. Something glimmers between two old fossils: a tiny crystal loosened from the ridge. **This sacred '
+                    'place is not a hunting ground, but you may take the crystal if it feels right.**',
+                    'You find no prey among the ancient bones, but your paw brushes against a small fossil fragment half-buried in the '
+                    'dust. Its shape resembles a tiny claw, though whether it actually belonged to anything interesting is impossible to '
+                    'tell. **There is nothing to hunt here. FossilClan would probably still think this is pretty cool.**',
+                    'A gust whistles through the Dinosaur Spine and produces a low, hollow note from somewhere inside the rocks. For a '
+                    'heartbeat it sounds almost like a distant roar before fading back into ordinary wind. **There is nothing to hunt '
+                    'here. Definitely just the wind. Probably.**',
+                    'No prey scent breaks through the mineral-rich air. Instead, sunlight catches a vein of crystal in the ridge and sends '
+                    'a bright flash directly across your eyes. When you look again, one loose shard has fallen beside your paws. **There '
+                    'is nothing to hunt here, but you have found a small crystal.**',
+                    'While crossing between the old bones, you notice several pebbles arranged in a rough circle around one tiny fossil. '
+                    'It could easily be coincidence... or perhaps another FossilClan cat placed them there moons ago. **There is nothing '
+                    'to hunt here, but maybe leave the little arrangement undisturbed.**',
+                    'The ridge remains completely quiet until a pebble suddenly tumbles from somewhere above and lands beside an enormous '
+                    'ancient bone. Nothing follows it. **There is nothing to hunt here, though the Dinosaur Spirits apparently have '
+                    'excellent timing when it comes to making things ominous.**'],
+ 'Toadstool Glade': ['The overwhelming scent of damp earth and fungi smothers every prey trail before you can follow it. Instead, you '
+                     'notice a tiny mushroom growing in an almost perfect ring of moss. **Hunting is impossible here, but you might want '
+                     'to remember where you saw this strange little fairy circle.**',
+                     'No prey ventures close to the towering mushrooms, but a single drop of water falls from one enormous cap and lands '
+                     'directly between your ears. **There is nothing to hunt here. The Glade has instead chosen violence in the smallest '
+                     'possible form.**',
+                     'You search beneath the towering fungi and find nothing edible, but something pale gleams in the moss. It is a small '
+                     'feather dusted with spores, untouched except for the damp forest floor beneath it. **There is nothing to hunt here, '
+                     'but you may take the feather if you are confident it is safe.**',
+                     'A cluster of tiny mushrooms releases a faint puff of harmless-looking spores when a falling twig strikes the ground '
+                     'beside them. They sparkle briefly in a shaft of light before disappearing into the air. **There is nothing to hunt '
+                     'here. Maybe... do not stick your face directly into that.**',
+                     'The Glade is completely devoid of prey, but one enormous toadstool has collected a shallow pool of rainwater in the '
+                     'centre of its cap. Your reflection stares back at you from above in a strangely distorted little mirror. **Hunting '
+                     'is impossible here, but apparently the forest has provided free self-reflection.**',
+                     'You hear something rustle behind one of the towering mushrooms and immediately prepare yourself, only for a pinecone '
+                     'to roll slowly into view and stop at your paws. Nothing follows it. **There is nothing to hunt here. Whatever caused '
+                     'that is either completely harmless or extremely committed to being mysterious.**']}
+
 # ─────────────────────────────
 # FEAST / PREY PILE EVENT SYSTEM
 # ─────────────────────────────
