@@ -5,6 +5,8 @@ import re
 import asyncio
 import copy
 import calendar
+import sys
+from time import monotonic
 from datetime import datetime, date, time, timedelta
 from zoneinfo import ZoneInfo
 from threading import Thread
@@ -15,6 +17,64 @@ from discord import app_commands
 from dotenv import load_dotenv
 from flask import Flask
 from supabase import create_client
+
+
+# Keep network failures readable without echoing Discord/Cloudflare HTML into
+# Railway logs. Repeated identical errors are logged at most once per minute.
+_error_log_times = {}
+_discord_unavailable_until = 0.0
+
+
+def unwrap_command_error(error):
+    seen = set()
+    while id(error) not in seen:
+        seen.add(id(error))
+        original = getattr(error, "original", None)
+        if not isinstance(original, BaseException):
+            break
+        error = original
+    return error
+
+
+def discord_service_failure(error):
+    error = unwrap_command_error(error)
+    if not isinstance(error, discord.HTTPException):
+        return False
+    status = getattr(error, "status", 0) or 0
+    body = str(getattr(error, "text", "") or "").casefold()
+    return status == 429 or status >= 500 or "cloudflare" in body or "error 1015" in body
+
+
+def concise_error(error):
+    error = unwrap_command_error(error)
+    name = type(error).__name__
+    if isinstance(error, discord.HTTPException):
+        return f"{name} (HTTP {getattr(error, 'status', '?')}, Discord code {getattr(error, 'code', '?')})"
+    detail = " ".join(str(error).split())
+    if "<html" in detail.casefold() or "<!doctype" in detail.casefold():
+        detail = "HTML error response omitted"
+    return f"{name}: {detail[:240]}" if detail else name
+
+
+def log_error(context, error):
+    global _discord_unavailable_until
+    now = monotonic()
+    if discord_service_failure(error):
+        _discord_unavailable_until = max(_discord_unavailable_until, now + 60)
+    context = " ".join(str(context).split())[:180]
+    summary = concise_error(error)
+    key = (context, summary)
+    previous = _error_log_times.get(key)
+    if previous is not None and now - previous < 60:
+        return
+    if len(_error_log_times) >= 256:
+        _error_log_times.pop(next(iter(_error_log_times)))
+    _error_log_times[key] = now
+    print(f"{context}: {summary}")
+
+
+def discord_requests_paused():
+    return monotonic() < _discord_unavailable_until
 
 # ─────────────────────────────
 # LOAD TOKEN
@@ -78,6 +138,7 @@ if not SUPABASE_KEY:
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 DATA_ROW_ID = "main"
+GUILD_ID = 1441200937514434563
 REPORT_CHANNEL_ID = 1441502516591202394
 AGE_REPORT_CHANNEL_ID = 1500707305631780984
 COMMAND_CHANNEL_ID = 1500705057207746610
@@ -193,7 +254,7 @@ ACTIVITY_WARNING_USER_ID = 1440182563674132490
 AUTO_ACTIVITY_NOTICE_CHANNEL_ID = 1441502378871492629
 AUTO_ACTIVITY_STAFF_CHANNEL_ID = 1441505660905984120
 WATCHER_ROLE_ID = 1491988054301479004
-AUTO_ACTIVITY_MODERATOR_ROLE_ID = MODERATOR_ROLE_ID if "MODERATOR_ROLE_ID" in globals() else 1441506626371715103
+AUTO_ACTIVITY_MODERATOR_ROLE_ID = 1441506626371715103
 AUTO_ACTIVITY_INFO_LINK = "https://discord.com/channels/1441200937514434563/1462669643570483220"
 AUTO_ACTIVITY_THRESHOLDS = (30, 60, 90)
 AUTO_ACTIVITY_CHECK_WEEKDAY = 2  # Monday=0, Wednesday=2
@@ -528,6 +589,7 @@ def fresh_default_data():
         "activity_tracking": {},
         "activity_tracking_backfill_complete": False,
         "activity_tracking_backfill_completed_at": None,
+        "activity_tracking_backfill_progress": {},
         "last_weekly_activity_audit_date": None,
         "honour_tracker_message_id": None,
         "plot_members": {},
@@ -575,15 +637,21 @@ def load_data():
             .execute()
         )
 
+        if response.data is None:
+            raise ValueError("Supabase returned no data payload.")
         if response.data:
             loaded = response.data[0]["data"]
+            if not isinstance(loaded, dict) or not isinstance(loaded.get("cats", {}), dict):
+                raise ValueError("The saved bot state is invalid; existing records were left untouched.")
         else:
             loaded = fresh_default_data()
             save_data(loaded)
 
     except Exception as error:
-        print(f"Could not load Supabase data: {error}")
-        loaded = fresh_default_data()
+        log_error("Could not load Supabase data", error)
+        # Starting with blank state after a failed read would let the next save
+        # overwrite every existing OC. Let Railway restart and retry the read.
+        raise RuntimeError("Bot startup stopped because its saved data could not be loaded safely.") from None
 
     defaults = fresh_default_data()
     for key, value in defaults.items():
@@ -601,12 +669,12 @@ def save_data(data_to_save):
         supabase.table("bot_data").upsert({
             "id": DATA_ROW_ID,
             "data": data_to_save
-        }).execute()
+        }, returning="minimal").execute()
 
         print("Data saved to Supabase successfully.")
 
     except Exception as error:
-        print(f"Could not save Supabase data: {error}")
+        log_error("Could not save Supabase data", error)
         raise
 
 
@@ -1071,7 +1139,7 @@ async def update_hiatus_roles(guild, user_id, on_hiatus):
     except discord.Forbidden:
         return False, "I do not have permission to change those roles. Make sure I have Manage Roles and my bot role is above the Member and Hiatus roles."
     except discord.HTTPException as error:
-        return False, f"Discord rejected the role update: {error}"
+        return False, f"Discord rejected the role update: {concise_error(error)}"
 
     if on_hiatus:
         return True, "Hiatus role added and Member role removed."
@@ -1134,7 +1202,7 @@ async def increase_oc_count_role(member, reason):
     except discord.Forbidden:
         return False, current_count, new_count, "I do not have permission to update OC count roles. Make sure I have Manage Roles and my bot role is above the OC count roles."
     except discord.HTTPException as error:
-        return False, current_count, new_count, f"Discord rejected the OC count role update: {error}"
+        return False, current_count, new_count, f"Discord rejected the OC count role update: {concise_error(error)}"
 
     return True, current_count, new_count, f"OC slot role upgraded from {current_count} OCs to {new_count} OCs."
 
@@ -1146,7 +1214,7 @@ async def iter_fetch_guild_members(guild):
     except discord.Forbidden:
         print("Could not fetch guild members. Server Members Intent may be disabled or the bot lacks access.")
     except discord.HTTPException as error:
-        print(f"Could not fetch guild members: {error}")
+        log_error(f'Could not fetch guild members', error)
 
 
 def member_has_any_role(member, role_ids):
@@ -1693,6 +1761,12 @@ async def safe_respond(interaction, message, ephemeral=False):
         await interaction.followup.send(message, ephemeral=ephemeral)
     else:
         await interaction.response.send_message(message, ephemeral=ephemeral)
+
+
+async def respond_in_chunks(interaction, message, ephemeral=False):
+    for chunk in split_allegiance_text(message, max_length=1850):
+        if chunk.strip():
+            await safe_respond(interaction, chunk, ephemeral=ephemeral)
 
 
 async def send_long_message(channel, text):
@@ -2304,8 +2378,8 @@ async def refresh_all_allegiances(force=False):
                 new_map[key] = new_ids
                 updated += 1
             except Exception as error:
-                errors.append(f"{channel_id}: {error}")
-                print(f"Allegiance refresh failed for channel {channel_id}: {error}")
+                errors.append(f"{channel_id}: {concise_error(error)}")
+                log_error(f'Allegiance refresh failed for channel {channel_id}', error)
 
         async with data_lock:
             data["allegiance_message_ids"] = new_map
@@ -2319,8 +2393,8 @@ async def refresh_allegiances_safely(reason=None, force=False):
         return await refresh_all_allegiances(force=force)
     except Exception as error:
         prefix = f" after {reason}" if reason else ""
-        print(f"Could not refresh allegiance boards{prefix}: {error}")
-        return {"updated": 0, "errors": [str(error)], "skipped": False}
+        log_error(f'Could not refresh allegiance boards{prefix}', error)
+        return {"updated": 0, "errors": [concise_error(error)], "skipped": False}
 
 
 def allegiance_member_names(member):
@@ -5005,7 +5079,9 @@ def freeze_is_active(cat, freeze_key, until_key):
 
     try:
         until_time = datetime.fromisoformat(freeze_until)
-    except Exception:
+        if until_time.tzinfo is None:
+            until_time = until_time.replace(tzinfo=TZ)
+    except (TypeError, ValueError):
         return False
 
     if datetime.now(TZ) <= until_time:
@@ -5034,7 +5110,9 @@ def freeze_remaining_text(cat, freeze_key, until_key):
 
     try:
         until_time = datetime.fromisoformat(freeze_until)
-    except Exception:
+        if until_time.tzinfo is None:
+            until_time = until_time.replace(tzinfo=TZ)
+    except (TypeError, ValueError):
         return None
 
     remaining = until_time - datetime.now(TZ)
@@ -5050,8 +5128,21 @@ def freeze_remaining_text(cat, freeze_key, until_key):
 
 FREEZE_TYPE_CHOICES = [
     app_commands.Choice(name="All", value="all"),
+    app_commands.Choice(name="Age Only", value="age"),
     app_commands.Choice(name="Hunger Only", value="hunger")
 ]
+
+
+def update_cat_freeze_settings(cat, freeze_type, frozen, days=None, now=None):
+    """Apply the same age/hunger choices to individual and owner-wide freezes."""
+    fields = {"all": ("age", "hunger"), "age": ("age",), "hunger": ("hunger",)}
+    if freeze_type not in fields:
+        raise ValueError("Unknown freeze type.")
+    now = now or datetime.now(TZ)
+    until = (now + timedelta(days=days)).isoformat() if frozen and days is not None else None
+    for field in fields[freeze_type]:
+        cat[f"freeze_{field}"] = bool(frozen and days is None)
+        cat[f"freeze_{field}_until"] = until
 
 
 @bot.tree.command(
@@ -5060,7 +5151,7 @@ FREEZE_TYPE_CHOICES = [
 )
 @app_commands.describe(
     cat_name="Name of the cat",
-    freeze_type="Choose whether to freeze all or only hunger",
+    freeze_type="Freeze age, hunger, or both",
     frozen="True = freeze, False = unfreeze",
     days="Optional number of days. Leave blank for indefinite freeze."
 )
@@ -5085,7 +5176,8 @@ async def freezecat(
         return
 
     async with data_lock:
-        cat = data.get("cats", {}).get(cat_name)
+        resolved_name = resolve_cat_name_casefold(cat_name)
+        cat = data.get("cats", {}).get(resolved_name)
 
         if not cat:
             await interaction.response.send_message(
@@ -5094,43 +5186,10 @@ async def freezecat(
             )
             return
 
+        cat_name = resolved_name
         prepare_cat_record(cat_name, cat)
 
-        now = datetime.now(TZ)
-        freeze_until = None
-
-        if frozen and days is not None:
-            freeze_until = (now + timedelta(days=days)).isoformat()
-
-        if freeze_type.value == "all":
-            if frozen:
-                if days is None:
-                    cat["freeze_age"] = True
-                    cat["freeze_hunger"] = True
-                    cat["freeze_age_until"] = None
-                    cat["freeze_hunger_until"] = None
-                else:
-                    cat["freeze_age"] = False
-                    cat["freeze_hunger"] = False
-                    cat["freeze_age_until"] = freeze_until
-                    cat["freeze_hunger_until"] = freeze_until
-            else:
-                cat["freeze_age"] = False
-                cat["freeze_hunger"] = False
-                cat["freeze_age_until"] = None
-                cat["freeze_hunger_until"] = None
-
-        elif freeze_type.value == "hunger":
-            if frozen:
-                if days is None:
-                    cat["freeze_hunger"] = True
-                    cat["freeze_hunger_until"] = None
-                else:
-                    cat["freeze_hunger"] = False
-                    cat["freeze_hunger_until"] = freeze_until
-            else:
-                cat["freeze_hunger"] = False
-                cat["freeze_hunger_until"] = None
+        update_cat_freeze_settings(cat, freeze_type.value, frozen, days)
 
         age_freeze_text = freeze_remaining_text(cat, "freeze_age", "freeze_age_until")
         hunger_freeze_text = freeze_remaining_text(cat, "freeze_hunger", "freeze_hunger_until")
@@ -5150,7 +5209,7 @@ async def freezecat(
 )
 @app_commands.describe(
     user="Player display name or Discord username",
-    freeze_type="Choose whether to freeze all or only hunger",
+    freeze_type="Freeze age, hunger, or both",
     frozen="True = freeze, False = unfreeze",
     days="Optional number of days. Leave blank for indefinite freeze."
 )
@@ -5187,10 +5246,6 @@ async def freezeuser(
     affected_names = []
     deceased_names = []
     now = datetime.now(TZ)
-    freeze_until = None
-
-    if frozen and days is not None:
-        freeze_until = (now + timedelta(days=days)).isoformat()
 
     async with data_lock:
         for cat_name, cat in data.get("cats", {}).items():
@@ -5204,39 +5259,11 @@ async def freezeuser(
             if oc_owner_id(cat) != owner_id:
                 continue
 
-            if allegiance_tracker_status(cat).casefold() == "dead":
+            if cat_is_dead(cat):
                 deceased_names.append(cat_name)
                 continue
 
-            if freeze_type.value == "all":
-                if frozen:
-                    if days is None:
-                        cat["freeze_age"] = True
-                        cat["freeze_hunger"] = True
-                        cat["freeze_age_until"] = None
-                        cat["freeze_hunger_until"] = None
-                    else:
-                        cat["freeze_age"] = False
-                        cat["freeze_hunger"] = False
-                        cat["freeze_age_until"] = freeze_until
-                        cat["freeze_hunger_until"] = freeze_until
-                else:
-                    cat["freeze_age"] = False
-                    cat["freeze_hunger"] = False
-                    cat["freeze_age_until"] = None
-                    cat["freeze_hunger_until"] = None
-
-            elif freeze_type.value == "hunger":
-                if frozen:
-                    if days is None:
-                        cat["freeze_hunger"] = True
-                        cat["freeze_hunger_until"] = None
-                    else:
-                        cat["freeze_hunger"] = False
-                        cat["freeze_hunger_until"] = freeze_until
-                else:
-                    cat["freeze_hunger"] = False
-                    cat["freeze_hunger_until"] = None
+            update_cat_freeze_settings(cat, freeze_type.value, frozen, days, now=now)
 
             affected_names.append(cat_name)
 
@@ -5258,7 +5285,7 @@ async def freezeuser(
     if freeze_type.value == "all":
         target_text = "age and hunger"
     else:
-        target_text = "hunger"
+        target_text = freeze_type.value
 
     if frozen:
         if days is None:
@@ -5280,7 +5307,10 @@ async def freezeuser(
             f"**Deceased OCs skipped ({len(deceased_names)}):** {', '.join(deceased_names)}"
         )
 
-    await interaction.edit_original_response(content="\n".join(lines)[:1900])
+    chunks = split_allegiance_text("\n".join(lines), max_length=1850)
+    await interaction.edit_original_response(content=chunks[0])
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk, ephemeral=True)
 # ─────────────────────────────
 # WEATHER SYSTEM
 # ─────────────────────────────
@@ -7366,7 +7396,7 @@ async def add_vote_reactions(message, medicine=False, include_vote=True):
         if medicine:
             await message.add_reaction("⭐")
     except discord.HTTPException as error:
-        print(f"Could not add Gathering reactions: {error}")
+        log_error(f'Could not add Gathering reactions', error)
 
 
 async def reaction_user_ids(message, emoji, guild, required_role_ids=None):
@@ -7464,7 +7494,7 @@ async def ensure_discord_gathering_event(cycle_key, medicine=False):
         print("Could not create Gathering Scheduled Event: bot needs Manage Events permission.")
         return None
     except (discord.HTTPException, TypeError, ValueError) as error:
-        print(f"Could not create Gathering Scheduled Event: {error}")
+        log_error(f'Could not create Gathering Scheduled Event', error)
         return None
 
     async with data_lock:
@@ -7857,7 +7887,7 @@ async def on_member_join(member: discord.Member):
         try:
             welcome_channel = await bot.fetch_channel(VERIFICATION_INFO_CHANNEL_ID)
         except (discord.NotFound, discord.Forbidden, discord.HTTPException) as error:
-            print(f"Could not access the verification welcome channel for new member {member.id}: {error}")
+            log_error(f'Could not access the verification welcome channel for new member {member.id}', error)
             return
 
     message = (
@@ -7880,7 +7910,7 @@ async def on_member_join(member: discord.Member):
     except discord.Forbidden:
         print("Could not send new-member verification instructions: bot lacks permission in the verification welcome channel.")
     except discord.HTTPException as error:
-        print(f"Could not send verification instructions for {member.id}: {error}")
+        log_error(f'Could not send verification instructions for {member.id}', error)
 
 
 @bot.event
@@ -7908,7 +7938,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     except discord.Forbidden:
         print("Rules verification failed: bot lacks permission or role hierarchy to add the Member role.")
     except discord.HTTPException as error:
-        print(f"Rules verification failed for {member.id}: {error}")
+        log_error(f'Rules verification failed for {member.id}', error)
 
 
 @tasks.loop(hours=12)
@@ -7952,7 +7982,7 @@ async def check_rules_onboarding():
                         record["three_day_reminder_sent_at"] = now.isoformat()
                         changed = True
                     except discord.HTTPException as error:
-                        print(f"Could not send rules reminder for {member.id}: {error}")
+                        log_error(f'Could not send rules reminder for {member.id}', error)
 
             if days_in_server >= NEW_MEMBER_ROLE_REMOVE_AFTER_DAYS:
                 try:
@@ -7962,7 +7992,7 @@ async def check_rules_onboarding():
                 except discord.Forbidden:
                     print("Rules onboarding failed: bot lacks permission or role hierarchy to remove the New Member role.")
                 except discord.HTTPException as error:
-                    print(f"Could not remove New Member role from {member.id}: {error}")
+                    log_error(f'Could not remove New Member role from {member.id}', error)
 
         if changed:
             save_data(data)
@@ -9045,7 +9075,7 @@ async def feast_command(
                 allowed_mentions=discord.AllowedMentions.none()
             )
         except (discord.Forbidden, discord.HTTPException) as error:
-            failures.append(f"{clan_name}: could not send feast message ({error})")
+            failures.append(f"{clan_name}: could not send feast message ({concise_error(error)})")
             continue
 
         reaction_failures = 0
@@ -9120,7 +9150,7 @@ async def ambient_hunt_hazards():
             try:
                 channel = await bot.fetch_channel(channel_id)
             except (discord.Forbidden, discord.NotFound, discord.HTTPException) as error:
-                print(f"Ambient hunt hazard could not access channel {channel_id}: {error}")
+                log_error(f'Ambient hunt hazard could not access channel {channel_id}', error)
                 continue
 
         try:
@@ -9129,10 +9159,10 @@ async def ambient_hunt_hazards():
             print(f"Ambient hunt hazard needs Read Message History in channel {channel_id}.")
             continue
         except discord.HTTPException as error:
-            print(f"Ambient hunt hazard history check failed in channel {channel_id}: {error}")
+            log_error(f'Ambient hunt hazard history check failed in channel {channel_id}', error)
             continue
         except Exception as error:
-            print(f"Ambient hunt hazard unexpected history error in channel {channel_id}: {error}")
+            log_error(f'Ambient hunt hazard unexpected history error in channel {channel_id}', error)
             continue
 
         # Mark this hour as checked only in memory. No database write is needed
@@ -9158,7 +9188,7 @@ async def ambient_hunt_hazards():
             print(f"Ambient hunt hazard cannot send messages in channel {channel_id}.")
             continue
         except discord.HTTPException as error:
-            print(f"Ambient hunt hazard send failed in channel {channel_id}: {error}")
+            log_error(f'Ambient hunt hazard send failed in channel {channel_id}', error)
             continue
 
         async with data_lock:
@@ -9176,15 +9206,22 @@ async def before_ambient_hunt_hazards():
 # READY + ERROR HANDLING
 # ─────────────────────────────
 
+_slash_commands_synced = False
+_startup_boards_refreshed = False
+
+
 @bot.event
 async def on_ready():
+    global _slash_commands_synced, _startup_boards_refreshed
     print(f"Logged in as {bot.user}")
 
-    try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} slash command(s)")
-    except Exception as error:
-        print(f"Slash command sync failed: {error}")
+    if not _slash_commands_synced and not discord_requests_paused():
+        try:
+            synced = await bot.tree.sync()
+            _slash_commands_synced = True
+            print(f"Synced {len(synced)} slash command(s)")
+        except Exception as error:
+            log_error("Slash command sync failed", error)
 
     if not monthly_moon.is_running():
         monthly_moon.start()
@@ -9201,7 +9238,7 @@ async def on_ready():
     try:
         await migrate_active_quests_to_monthly_schedule()
     except Exception as error:
-        print(f"Monthly quest schedule migration failed: {error}")
+        log_error(f'Monthly quest schedule migration failed', error)
 
     # Apply the Aug. 28 quest updates to already-active quests instead of waiting
     # until the next first-of-the-month reset.
@@ -9223,7 +9260,7 @@ async def on_ready():
             blocks = [format_role_quest_block(quest, index=index, total=len(rollout_role_quests)) for index, quest in enumerate(rollout_role_quests, start=1)]
             await send_long_message(quest_channel, "🌟 **New Optional Role-Specific Quest!**\n\n" + "\n\n".join(blocks))
     except Exception as error:
-        print(f"Aug. 28 quest update migration failed: {error}")
+        log_error(f'Aug. 28 quest update migration failed', error)
 
     if not monthly_quest_report.is_running():
         monthly_quest_report.start()
@@ -9252,6 +9289,9 @@ async def on_ready():
     if not ambient_hunt_hazards.is_running():
         ambient_hunt_hazards.start()
 
+    if _startup_boards_refreshed or discord_requests_paused():
+        return
+    boards_ok = True
     try:
         await asyncio.wait_for(
             update_honour_tracker_message(),
@@ -9259,21 +9299,36 @@ async def on_ready():
         )
         print("Honour Role tracker is up to date.")
     except Exception as error:
-        print(f"Honour Role tracker update failed: {error}")
+        boards_ok = False
+        log_error(f'Honour Role tracker update failed', error)
 
     # Once /allegiance add or /allegiance refresh has initialized the boards,
     # reconcile them again on every restart without creating duplicate legacy boards.
     if data.get("allegiance_message_ids"):
         result = await refresh_allegiances_safely("bot startup")
         if result.get("errors"):
+            boards_ok = False
             print(f"Allegiance startup refresh had {len(result['errors'])} error(s).")
         else:
             print("Allegiance boards are up to date.")
+    _startup_boards_refreshed = boards_ok
+
+
+@bot.event
+async def on_error(event_method, *args, **kwargs):
+    error = sys.exc_info()[1]
+    if error is not None:
+        log_error(f"Discord event {event_method} failed", error)
 
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    print(f"Slash command error: {error}")
+    command = getattr(getattr(interaction, "command", None), "qualified_name", "unknown")
+    log_error(f"Slash command /{command} failed", error)
+    # Do not call Discord again when the original failure is Discord's own
+    # rate-limit/server outage, including wrapped AppCommandInvokeError errors.
+    if discord_service_failure(error) or discord_requests_paused():
+        return
 
     try:
         await safe_respond(
@@ -9282,7 +9337,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             ephemeral=True
         )
     except Exception as send_error:
-        print(f"Could not send error response: {send_error}")
+        log_error("Could not send error response", send_error)
 
 # ─────────────────────────────
 # STAFF COMMANDS
@@ -9617,8 +9672,8 @@ async def botinfo(interaction: discord.Interaction):
         "`/changeclan` — Staff only. Move a cat to a different Clan or to/from Outsider\n"
         "`/cat delayceremony` — Delay automatic rank-up ceremonies\n"
         "`/cat tinderhide` — Hide/unhide a cat from Cat Tinder\n"
-        "`/freezecat` — Staff only. Freeze or unfreeze one cat's age and/or hunger, either indefinitely or for a set number of days\n"
-        "`/freezeuser [User]` — Staff only. Freeze or unfreeze every living OC registered to one Discord member at once\n"
+        "`/freezecat` — Staff only. Freeze or unfreeze age, hunger, or both for one cat, indefinitely or for a set number of days\n"
+        "`/freezeuser [User]` — Staff only. Freeze or unfreeze age, hunger, or both for every living OC registered to one member\n"
         "`/frozenlist` — Staff only. View all cats with active age or hunger freezes\n\n"
         "`/cat clearhistorymoon` — Delete cat history entries from a specific moon\n\n"
 
@@ -10430,7 +10485,7 @@ async def npc_markdead_command(
         try:
             await update_honour_tracker_message()
         except Exception as error:
-            print(f"Could not update Honour Role tracker after NPC death: {error}")
+            log_error(f'Could not update Honour Role tracker after NPC death', error)
 
     await refresh_allegiances_safely("NPC death")
 
@@ -10912,7 +10967,7 @@ async def honour_role_command(
         )
     except Exception as error:
         tracker_updated = False
-        print(f"Could not update Honour Role tracker: {type(error).__name__}: {error}")
+        log_error(f'Could not update Honour Role tracker: ', error)
 
     try:
         announcement_sent = await asyncio.wait_for(
@@ -10926,7 +10981,7 @@ async def honour_role_command(
         )
     except Exception as error:
         announcement_sent = False
-        print(f"Could not post Honour Role announcement: {type(error).__name__}: {error}")
+        log_error(f'Could not post Honour Role announcement: ', error)
 
     response_lines = [
         f"🏅 **{cat_name}** is now **{display_role}** of **{clan_name}**."
@@ -10984,7 +11039,7 @@ async def honour_remove_command(interaction: discord.Interaction, cat_name: str)
         )
         tracker_line = "✅ The Honour Role tracker was updated."
     except Exception as error:
-        print(f"Could not update Honour Role tracker: {error}")
+        log_error(f'Could not update Honour Role tracker', error)
         tracker_line = "⚠️ The role was removed, but the tracker could not be updated."
 
     await interaction.followup.send(
@@ -11007,7 +11062,7 @@ async def honour_tracker_command(interaction: discord.Interaction):
         )
     except Exception as error:
         await interaction.followup.send(
-            f"❌ The Honour Role tracker could not be updated: {error}",
+            f"❌ The Honour Role tracker could not be updated: {concise_error(error)}",
             ephemeral=True
         )
         return
@@ -11387,7 +11442,7 @@ async def cat_rank(interaction: discord.Interaction, name: str, rank: app_comman
         try:
             await update_honour_tracker_message()
         except Exception as error:
-            print(f"Could not update Honour Role tracker after rank change: {error}")
+            log_error(f'Could not update Honour Role tracker after rank change', error)
 
     await refresh_allegiances_safely("cat rank change")
 
@@ -11516,7 +11571,7 @@ async def changeclan(
         try:
             await update_honour_tracker_message()
         except Exception as error:
-            print(f"Could not update Honour Role tracker after Clan change: {error}")
+            log_error(f'Could not update Honour Role tracker after Clan change', error)
 
     await refresh_allegiances_safely("Clan change")
 
@@ -11537,6 +11592,7 @@ async def cat_rename(interaction: discord.Interaction, old_name: str, new_name: 
 
         data["cats"][new_name] = data["cats"].pop(old_name)
         add_history(data["cats"][new_name], f"Renamed from {old_name} to {new_name}")
+        rename_quest_cat_references(old_name, new_name)
 
         for timeline_entry in normalize_timeline_storage():
             if str(timeline_entry.get("cat_name") or "").casefold() == str(old_name).casefold():
@@ -11622,7 +11678,7 @@ async def cat_markdead(
         try:
             await update_honour_tracker_message()
         except Exception as error:
-            print(f"Could not update Honour Role tracker after death: {error}")
+            log_error(f'Could not update Honour Role tracker after death', error)
 
     await refresh_allegiances_safely("cat death")
 
@@ -11800,7 +11856,7 @@ async def cat_delete(interaction: discord.Interaction, name: str):
         try:
             await update_honour_tracker_message()
         except Exception as error:
-            print(f"Could not update Honour Role tracker after deleting cat: {error}")
+            log_error(f'Could not update Honour Role tracker after deleting cat', error)
 
     await refresh_allegiances_safely("cat deletion")
 
@@ -13080,7 +13136,7 @@ async def severeweather_trigger_command(
         ) if secondary_targets else []
     except ValueError as error:
         await interaction.response.send_message(
-            f"❌ {error}",
+            f"❌ {concise_error(error)}",
             ephemeral=True
         )
         return
@@ -14556,9 +14612,18 @@ def migrate_role_quest_usage_tracking():
     data.setdefault("used_role_quest_roles", [])
     data.setdefault("used_role_quests_by_role", {})
     by_id = {quest["id"]: quest for quest in ROLE_QUEST_PROMPTS}
+    # Per-role lists are authoritative once they exist, including empty lists
+    # after a completed cycle. Re-importing the lifetime legacy list every time
+    # would refill an exhausted pool and destroy the new no-repeat rotation.
+    new_roles = {
+        quest["role"] for quest in ROLE_QUEST_PROMPTS
+        if quest["role"] not in data["used_role_quests_by_role"]
+    }
+    for role in new_roles:
+        data["used_role_quests_by_role"][role] = []
     for quest_id in data.get("used_role_quests", []) or []:
         quest = by_id.get(quest_id)
-        if not quest:
+        if not quest or quest["role"] not in new_roles:
             continue
         used_for_role = data["used_role_quests_by_role"].setdefault(quest["role"], [])
         if quest_id not in used_for_role:
@@ -15340,6 +15405,8 @@ def hunting_quest_channel_id(quest):
         return None
     for channel_id, info in HUNT_CHANNELS.items():
         if hunt_location_key(info.get("location")) == site_key:
+            if info.get("location") in NO_PREY_HUNT_PROMPTS:
+                return None
             return channel_id
     return None
 
@@ -15567,7 +15634,34 @@ def quest_contributor_names(quest):
     return names
 
 
+def rename_quest_cat_references(old_name, new_name):
+    """Keep contribution identity and reward eligibility when an OC is renamed."""
+    quests = list(data.get("active_quests_v2", {}).values())
+    quests += list(data.get("quest_history_v2", []))
+    quests += list(data.get("active_role_quests", []))
+    quests += list(data.get("role_quest_history", []))
+    if isinstance(data.get("active_role_quest"), dict):
+        quests.append(data["active_role_quest"])
+    lookup = str(old_name).casefold()
+    for quest in quests:
+        if not isinstance(quest, dict):
+            continue
+        for key in ("contributors", "hunt_catches"):
+            for entry in quest.get(key, []) or []:
+                if isinstance(entry, dict) and str(entry.get("cat") or "").casefold() == lookup:
+                    entry["cat"] = new_name
+        if str(quest.get("completed_by") or "").casefold() == lookup:
+            quest["completed_by"] = new_name
+        if isinstance(quest.get("connection_pass_token_cats"), list):
+            quest["connection_pass_token_cats"] = [
+                new_name if str(name).casefold() == lookup else name
+                for name in quest["connection_pass_token_cats"]
+            ]
+
+
 def register_monthly_quest_contributor(group, quest, cat_name, cat, owner_id=None):
+    if bool(cat.get("is_npc", False)):
+        return False, int(cat.get("role_quest_connection_tokens", 0) or 0)
     contributors = quest_contributor_entries(quest)
     if any(str(entry.get("cat") or "").casefold() == cat_name.casefold() for entry in contributors if isinstance(entry, dict)):
         return False, int(cat.get("role_quest_connection_tokens", 0) or 0)
@@ -15588,7 +15682,7 @@ def award_monthly_quest_pass_tokens(group, quest):
     awarded = []
     for cat_name in quest_contributor_names(quest):
         cat = data.get("cats", {}).get(cat_name)
-        if not isinstance(cat, dict):
+        if not isinstance(cat, dict) or bool(cat.get("is_npc", False)):
             continue
         prepare_cat_record(cat_name, cat)
         cat["role_quest_connection_tokens"] = int(cat.get("role_quest_connection_tokens", 0) or 0) + 1
@@ -15612,7 +15706,7 @@ def sync_hunting_contributors_for_tokens(group, quest):
         if not cat_name or cat_name.casefold() in existing:
             continue
         cat = data.get("cats", {}).get(cat_name)
-        if not isinstance(cat, dict):
+        if not isinstance(cat, dict) or bool(cat.get("is_npc", False)):
             continue
         prepare_cat_record(cat_name, cat)
         added, _balance = register_monthly_quest_contributor(group, quest, cat_name, cat, catch.get("owner_id"))
@@ -15691,27 +15785,28 @@ async def quest_progress(interaction: discord.Interaction):
     prey="What they caught, for example mouse, trout, frog, sparrow, or vole"
 )
 async def quest_catch(interaction: discord.Interaction, cat_name: str, prey: str):
+    await interaction.response.defer(ephemeral=True)
     completion_announcement = None
 
     async with data_lock:
         reset_legacy_quest_data_if_needed()
         resolved_name = resolve_cat_name_casefold(cat_name)
         if not resolved_name:
-            await interaction.response.send_message(f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
+            await safe_respond(interaction, f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
             return
 
         cat = data["cats"][resolved_name]
         prepare_cat_record(resolved_name, cat)
         if bool(cat.get("is_npc", False)):
-            await interaction.response.send_message("❌ Monthly quest catch credit is for player OCs, not NPCs.", ephemeral=True)
+            await safe_respond(interaction, "❌ Monthly quest catch credit is for player OCs, not NPCs.", ephemeral=True)
             return
         if cat_is_dead(cat):
-            await interaction.response.send_message(f"❌ **{resolved_name}** is not currently a living OC.", ephemeral=True)
+            await safe_respond(interaction, f"❌ **{resolved_name}** is not currently a living OC.", ephemeral=True)
             return
 
         owner_id = oc_owner_id(cat)
         if not is_staff(interaction) and owner_id != str(interaction.user.id):
-            await interaction.response.send_message(
+            await safe_respond(interaction, 
                 f"❌ You can only record catches for your own OCs. **{resolved_name}** is not registered to you.",
                 ephemeral=True
             )
@@ -15721,7 +15816,7 @@ async def quest_catch(interaction: discord.Interaction, cat_name: str, prey: str
         if group_name not in QUEST_GROUP_ORDER:
             group_name = "Outsider" if group_name == "Outsider" else None
         if not group_name:
-            await interaction.response.send_message(
+            await safe_respond(interaction, 
                 f"❌ I could not match **{resolved_name}** to a Clan/Outsider monthly quest.",
                 ephemeral=True
             )
@@ -15729,26 +15824,32 @@ async def quest_catch(interaction: discord.Interaction, cat_name: str, prey: str
 
         quest = data.get("active_quests_v2", {}).get(group_name)
         if not quest:
-            await interaction.response.send_message(f"❌ **{group_name}** does not currently have an active monthly quest.", ephemeral=True)
+            await safe_respond(interaction, f"❌ **{group_name}** does not currently have an active monthly quest.", ephemeral=True)
             return
         if quest.get("category") != "hunting":
-            await interaction.response.send_message(
+            await safe_respond(interaction, 
                 f"❌ **{group_name}**'s current quest is **{QUEST_CATEGORY_LABELS.get(quest.get('category'), 'not a hunting quest')}**, so prey cannot be added to it.",
                 ephemeral=True
             )
             return
         if quest.get("status") != "Pending":
-            await interaction.response.send_message(
+            await safe_respond(interaction, 
                 f"❌ **{group_name}**'s hunting quest is already **{quest.get('status', 'finished')}**.",
                 ephemeral=True
             )
             return
 
-        required, target, catches = ensure_hunting_quest_progress(quest)
         expected_channel_id = hunting_quest_channel_id(quest)
-        if expected_channel_id and interaction.channel_id != expected_channel_id:
+        if expected_channel_id is None:
+            await safe_respond(interaction, 
+                "❌ This quest does not have a valid prey-hunting channel configured. Please ask staff to repair its location before recording catches.",
+                ephemeral=True
+            )
+            return
+        required, target, catches = ensure_hunting_quest_progress(quest)
+        if interaction.channel_id != expected_channel_id:
             site = quest.get("hunt_site") or "the quest hunting ground"
-            await interaction.response.send_message(
+            await safe_respond(interaction, 
                 f"❌ This catch needs to be recorded in **{site}** so CODY knows it came from the correct quest location. "
                 f"Use `/quest catch` in <#{expected_channel_id}>.",
                 ephemeral=True
@@ -15758,14 +15859,14 @@ async def quest_catch(interaction: discord.Interaction, cat_name: str, prey: str
         prey_name = normalize_quest_prey_name(prey)
         prey_category = classify_quest_prey(prey_name)
         if prey_category is None:
-            await interaction.response.send_message(
+            await safe_respond(interaction, 
                 f"❌ I don't recognize **{prey}** as quest-counting prey yet. This quest needs **{target}**. "
                 "If it should count, staff can add that species to CODY's prey list.",
                 ephemeral=True
             )
             return
         if prey_category != target:
-            await interaction.response.send_message(
+            await safe_respond(interaction, 
                 f"❌ **{prey.title()}** counts as **{prey_category}**, but {group_name}'s current quest needs **{target}**.",
                 ephemeral=True
             )
@@ -15834,7 +15935,7 @@ async def quest_catch(interaction: discord.Interaction, cat_name: str, prey: str
         if channel:
             await send_long_message(channel, completion_announcement)
         token_note = " You also earned **+1 Connection Token** for contributing." if contribution_token_awarded else ""
-        await interaction.response.send_message(
+        await safe_respond(interaction, 
             f"✅ **{resolved_name}** recorded **{prey_name}** and completed **{group_name}'s hunting quest!** 🎉{token_note}",
             ephemeral=True
         )
@@ -15843,11 +15944,12 @@ async def quest_catch(interaction: discord.Interaction, cat_name: str, prey: str
             f" 🤝 First contribution recorded: **+1 Connection Token** (balance: **{token_balance}**)."
             if contribution_token_awarded else ""
         )
-        await interaction.response.send_message(
+        await safe_respond(interaction, 
             f"✅ **{resolved_name}** recorded **{prey_name}** for {group_name}'s hunting quest. "
             f"Progress is now **{current}/{required}** — **{remaining} more {target}** needed.{token_note}",
             ephemeral=True
         )
+
 
 
 
@@ -15867,19 +15969,20 @@ async def quest_contribute(interaction: discord.Interaction, cat_name: str):
         requested_names.append(cleaned)
 
     if not requested_names:
-        await interaction.response.send_message(
+        await safe_respond(interaction, 
             "❌ Please enter at least one OC name. Separate multiple cats with commas.",
             ephemeral=True
         )
         return
 
     if len(requested_names) > 10:
-        await interaction.response.send_message(
+        await safe_respond(interaction, 
             "❌ Please submit no more than **10 cats at a time**.",
             ephemeral=True
         )
         return
 
+    await interaction.response.defer(ephemeral=True)
     recorded = []
     skipped = []
 
@@ -15967,7 +16070,8 @@ async def quest_contribute(interaction: discord.Interaction, cat_name: str):
         lines.append("**Not added:**")
         lines.extend(f"• {item}" for item in skipped)
 
-    await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
+    await respond_in_chunks(interaction, "\n".join(lines), ephemeral=True)
+
 
 
 @quest_group.command(name="perks", description="View every Connection Token perk and its cost")
@@ -16349,6 +16453,7 @@ async def quest_complete(
     if not await staff_command_check(interaction):
         return
 
+    await interaction.response.defer(ephemeral=True)
     selected_group = group.value
 
     async with data_lock:
@@ -16357,14 +16462,14 @@ async def quest_complete(
         quest = data.get("active_quests_v2", {}).get(selected_group)
 
         if not quest:
-            await interaction.response.send_message(
+            await safe_respond(interaction, 
                 f"No active quest found for **{selected_group}**. Use `/quest force` to start a new cycle.",
                 ephemeral=True
             )
             return
 
         if quest.get("status") == "Completed":
-            await interaction.response.send_message(
+            await safe_respond(interaction, 
                 f"**{selected_group}** has already completed **{quest.get('title', 'their quest')}**.",
                 ephemeral=True
             )
@@ -16404,15 +16509,16 @@ async def quest_complete(
 
     if channel:
         await send_long_message(channel, announcement)
-        await interaction.response.send_message(
+        await safe_respond(interaction, 
             f"✅ {selected_group}'s quest/event was marked complete and the reward was posted.",
             ephemeral=True
         )
     else:
-        await interaction.response.send_message(
+        await safe_respond(interaction, 
             "Quest channel not found. The quest was saved as complete, but no announcement was posted.",
             ephemeral=True
         )
+
 
 
 @quest_group.command(name="role", description="View the current optional role-specific quests")
@@ -16763,17 +16869,13 @@ def _activity_member_is_exempt(member):
 def _activity_member_is_monitored(member):
     if member is None or getattr(member, "bot", False):
         return False
-    # Only verified server members are part of the RP activity system.
     return member_has_role_id(member, MEMBER_ROLE_ID)
 
 
 def _activity_stage_for_days(inactive_days):
-    if inactive_days >= 90:
-        return 90
-    if inactive_days >= 60:
-        return 60
-    if inactive_days >= 30:
-        return 30
+    for stage in reversed(AUTO_ACTIVITY_THRESHOLDS):
+        if inactive_days >= stage:
+            return stage
     return 0
 
 
@@ -16787,100 +16889,121 @@ def _activity_stage_label(stage):
 
 def _activity_last_seen_for_member(member, record, now):
     tracked = _activity_parse_datetime(record.get("last_activity")) if isinstance(record, dict) else None
-    joined = getattr(member, "joined_at", None)
-    if joined is not None:
-        if joined.tzinfo is None:
-            joined = joined.replace(tzinfo=TZ)
-        else:
-            joined = joined.astimezone(TZ)
-    # If no message was found during the historical backfill, joined_at is the
-    # safest lower bound. Older members with no message in the last 90 days will
-    # naturally fall into the 90+ bucket.
-    return tracked or joined or now
+    joined = _activity_parse_datetime(getattr(member, "joined_at", None))
+    # A member who left and rejoined must not inherit pre-join inactivity.
+    known = [value for value in (tracked, joined) if value is not None]
+    return max(known) if known else now
 
 
-async def _scan_activity_messageable(messageable, cutoff, latest_by_user):
+def _activity_record_stage(record, key="notice_stage", default=0):
+    try:
+        return int(record.get(key, default) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _scan_activity_messageable(messageable, cutoff, latest_by_user, monitored_ids=None):
+    # HTTP errors deliberately propagate: an incomplete scan must not become
+    # evidence that a member has been inactive. The caller saves its checkpoint.
     try:
         async for message in messageable.history(limit=None, after=cutoff, oldest_first=False):
             author = getattr(message, "author", None)
             if author is None or getattr(author, "bot", False):
                 continue
-            created_at = getattr(message, "created_at", None)
+            user_id = str(author.id)
+            if monitored_ids is not None and user_id not in monitored_ids:
+                continue
+            created_at = _activity_parse_datetime(getattr(message, "created_at", None))
             if created_at is None:
                 continue
-            created_at = created_at.astimezone(TZ)
-            user_id = str(author.id)
             previous = latest_by_user.get(user_id)
             if previous is None or created_at > previous:
                 latest_by_user[user_id] = created_at
-    except (discord.Forbidden, discord.NotFound):
+    except discord.NotFound:
+        # A deleted channel/thread no longer needs to be scanned.
         return
-    except discord.HTTPException as error:
-        print(f"Activity backfill skipped channel/thread {getattr(messageable, 'id', '?')}: HTTP {getattr(error, 'status', '?')}")
 
 
 async def backfill_activity_history(guild):
-    """One-time 90-day history scan, then future activity is tracked live."""
+    """One resumable recent-history scan; subsequent audits use live timestamps."""
     global _activity_backfill_in_progress, _activity_tracking_dirty
-
-    if _activity_backfill_in_progress:
+    if _activity_backfill_in_progress or discord_requests_paused():
         return False
-
     async with data_lock:
         if data.get("activity_tracking_backfill_complete"):
             return True
-
+        progress = copy.deepcopy(data.get("activity_tracking_backfill_progress") or {})
     _activity_backfill_in_progress = True
     try:
-        cutoff = datetime.now(TZ) - timedelta(days=AUTO_ACTIVITY_BACKFILL_DAYS)
+        cutoff = _activity_parse_datetime(progress.get("cutoff")) or (
+            datetime.now(TZ) - timedelta(days=AUTO_ACTIVITY_BACKFILL_DAYS)
+        )
+        scanned_ids = set(progress.get("scanned_ids", []))
+        archived_parents = set(progress.get("archived_parents", []))
+        monitored_ids = {
+            str(member.id) for member in getattr(guild, "members", [])
+            if _activity_member_is_monitored(member)
+        }
         latest_by_user = {}
-        scanned_ids = set()
+        complete = True
+        try:
+            # Voice/stage text chats count too. Only messageable channel types
+            # have history(); forums hold messages in their individual threads.
+            channels = (
+                list(getattr(guild, "text_channels", []))
+                + list(getattr(guild, "voice_channels", []))
+                + list(getattr(guild, "stage_channels", []))
+            )
+            for channel in channels:
+                if channel.id in scanned_ids or not callable(getattr(channel, "history", None)):
+                    continue
+                await _scan_activity_messageable(channel, cutoff, latest_by_user, monitored_ids)
+                scanned_ids.add(channel.id)
+                await asyncio.sleep(0.15)
 
-        # Normal text/news channels.
-        for channel in getattr(guild, "text_channels", []):
-            if channel.id in scanned_ids:
-                continue
-            scanned_ids.add(channel.id)
-            await _scan_activity_messageable(channel, cutoff, latest_by_user)
-            await asyncio.sleep(0.15)
+            active_threads = list(getattr(guild, "threads", []))
+            fetch_active = getattr(guild, "active_threads", None)
+            if callable(fetch_active):
+                active_threads.extend(await fetch_active())
+            for thread in active_threads:
+                if thread.id in scanned_ids:
+                    continue
+                await _scan_activity_messageable(thread, cutoff, latest_by_user, monitored_ids)
+                scanned_ids.add(thread.id)
+                await asyncio.sleep(0.10)
 
-        # Active threads, including active forum posts.
-        for thread in getattr(guild, "threads", []):
-            if thread.id in scanned_ids:
-                continue
-            scanned_ids.add(thread.id)
-            await _scan_activity_messageable(thread, cutoff, latest_by_user)
-            await asyncio.sleep(0.10)
-
-        # Archived public threads/posts can contain valid activity too. Stop once
-        # the archive timestamps are older than the 90-day window.
-        thread_parents = list(getattr(guild, "text_channels", [])) + list(getattr(guild, "forum_channels", []))
-        for parent in thread_parents:
-            archived_threads = getattr(parent, "archived_threads", None)
-            if archived_threads is None:
-                continue
-            try:
-                async for thread in archived_threads(limit=None):
-                    if thread.id in scanned_ids:
+            parents = list(getattr(guild, "text_channels", [])) + list(getattr(guild, "forum_channels", []))
+            for parent in parents:
+                archived_threads = getattr(parent, "archived_threads", None)
+                if not callable(archived_threads):
+                    continue
+                # Text channels support private archives as well as public ones;
+                # forum channels have public post archives only.
+                modes = [False, True] if isinstance(parent, discord.TextChannel) else [False]
+                for private in modes:
+                    parent_key = f"{parent.id}:{'private' if private else 'public'}"
+                    if parent_key in archived_parents:
                         continue
-                    archive_timestamp = getattr(thread, "archive_timestamp", None)
-                    if archive_timestamp is not None:
-                        archive_timestamp = archive_timestamp.astimezone(TZ)
-                        if archive_timestamp < cutoff:
-                            break
-                    scanned_ids.add(thread.id)
-                    await _scan_activity_messageable(thread, cutoff, latest_by_user)
-                    await asyncio.sleep(0.10)
-            except (discord.Forbidden, discord.NotFound):
-                continue
-            except discord.HTTPException as error:
-                print(f"Activity backfill could not inspect archived threads for {getattr(parent, 'id', '?')}: HTTP {getattr(error, 'status', '?')}")
-            except TypeError:
-                # Compatibility fallback for channel types/library versions with
-                # a slightly different archived_threads signature.
-                continue
+                    kwargs = {"limit": None}
+                    if isinstance(parent, discord.TextChannel):
+                        kwargs["private"] = private
+                    try:
+                        async for thread in archived_threads(**kwargs):
+                            archive_timestamp = _activity_parse_datetime(getattr(thread, "archive_timestamp", None))
+                            if archive_timestamp is not None and archive_timestamp < cutoff:
+                                break
+                            if thread.id in scanned_ids:
+                                continue
+                            await _scan_activity_messageable(thread, cutoff, latest_by_user, monitored_ids)
+                            scanned_ids.add(thread.id)
+                            await asyncio.sleep(0.10)
+                    except discord.NotFound:
+                        pass
+                    archived_parents.add(parent_key)
+        except (discord.HTTPException, OSError, asyncio.TimeoutError) as error:
+            complete = False
+            log_error("Activity backfill paused; completed channels will not be rescanned", error)
 
-        completed_at = datetime.now(TZ)
         async with data_lock:
             tracking = data.setdefault("activity_tracking", {})
             for user_id, seen_at in latest_by_user.items():
@@ -16888,52 +17011,67 @@ async def backfill_activity_history(guild):
                 previous = _activity_parse_datetime(record.get("last_activity"))
                 if previous is None or seen_at > previous:
                     record["last_activity"] = seen_at.isoformat()
-            data["activity_tracking_backfill_complete"] = True
-            data["activity_tracking_backfill_completed_at"] = completed_at.isoformat()
+                    # Historical activity can also invalidate a legacy warning.
+                    record["notice_stage"] = 0
+                    record["staff_notice_stage"] = 0
+            data["activity_tracking_backfill_progress"] = {} if complete else {
+                "cutoff": cutoff.isoformat(),
+                "scanned_ids": sorted(scanned_ids),
+                "archived_parents": sorted(archived_parents),
+            }
+            data["activity_tracking_backfill_complete"] = complete
+            if complete:
+                data["activity_tracking_backfill_completed_at"] = datetime.now(TZ).isoformat()
+            _activity_tracking_dirty = True
             save_data(data)
             _activity_tracking_dirty = False
-
-        print(f"Activity backfill complete: {len(latest_by_user)} member(s) with activity found in the last {AUTO_ACTIVITY_BACKFILL_DAYS} days.")
-        return True
+        if complete:
+            print(f"Activity backfill complete: {len(scanned_ids)} channels/threads scanned.")
+        return complete
     finally:
         _activity_backfill_in_progress = False
 
 
 @bot.event
 async def on_message(message: discord.Message):
-    """Track message timestamps only; message contents are never read or stored."""
+    """Track verified members by ID and timestamp, without reading message text."""
     global _activity_tracking_dirty
-
-    if message.guild is None or getattr(message.author, "bot", False):
+    if message.guild is None or message.guild.id != GUILD_ID or getattr(message.author, "bot", False):
         return
-
-    user_id = str(message.author.id)
-    created_at = message.created_at.astimezone(TZ)
-
+    member = message.author
+    if not _activity_member_is_monitored(member):
+        member = message.guild.get_member(message.author.id)
+    if not _activity_member_is_monitored(member):
+        return
+    created_at = _activity_parse_datetime(message.created_at)
+    if created_at is None:
+        return
     async with data_lock:
         tracking = data.setdefault("activity_tracking", {})
-        record = tracking.setdefault(user_id, {})
+        record = tracking.setdefault(str(member.id), {})
         previous = _activity_parse_datetime(record.get("last_activity"))
         if previous is None or created_at > previous:
             record["last_activity"] = created_at.isoformat()
-            # Any new activity starts a fresh inactivity cycle. Old notice history
-            # remains available for staff/debugging, but stage gating resets.
-            if int(record.get("notice_stage", 0) or 0) > 0:
-                record["notice_stage"] = 0
-                record["last_notice_at"] = None
+            record["notice_stage"] = 0
+            record["staff_notice_stage"] = 0
+            record["last_notice_at"] = None
+            record["last_staff_notice_at"] = None
             _activity_tracking_dirty = True
 
 
 @tasks.loop(minutes=30)
 async def flush_activity_tracking():
-    """Persist message timestamps in batches instead of writing Supabase on every message."""
+    """Batch saves; a temporary database outage leaves data dirty for a retry."""
     global _activity_tracking_dirty
     if not _activity_tracking_dirty:
         return
-    async with data_lock:
-        if _activity_tracking_dirty:
-            save_data(data)
-            _activity_tracking_dirty = False
+    try:
+        async with data_lock:
+            if _activity_tracking_dirty:
+                save_data(data)
+                _activity_tracking_dirty = False
+    except Exception as error:
+        log_error("Activity timestamp save failed; will retry next batch", error)
 
 
 @flush_activity_tracking.before_loop
@@ -16941,183 +17079,188 @@ async def before_flush_activity_tracking():
     await bot.wait_until_ready()
 
 
-async def _activity_send_chunks(channel, text, *, allow_users=False, allow_roles=False):
-    max_length = 1900
-    remaining = text
-    while remaining:
-        if len(remaining) <= max_length:
-            chunk = remaining
-            remaining = ""
-        else:
-            split_at = remaining.rfind("\n", 0, max_length)
-            if split_at <= 0:
-                split_at = max_length
-            chunk = remaining[:split_at]
-            remaining = remaining[split_at:].lstrip()
-        if chunk.strip():
-            await channel.send(
-                chunk,
-                allowed_mentions=discord.AllowedMentions(
-                    users=allow_users,
-                    roles=allow_roles,
-                    everyone=False
+@flush_activity_tracking.after_loop
+async def after_flush_activity_tracking():
+    if _activity_tracking_dirty:
+        await flush_activity_tracking()
+
+
+def _activity_notice_batches(notices_by_stage, *, staff=False):
+    """Keep each grouped post below 1900 characters and retain its member list."""
+    if staff:
+        heading = (
+            f"<@&{AUTO_ACTIVITY_MODERATOR_ROLE_ID}>\n"
+            "🚨 **90-DAY INACTIVITY REPORT — FINAL WARNING**\n\n"
+            "These verified members have reached 90+ days without a detected server message and have neither the Hiatus nor Watcher role."
+        )
+        footer = "They have reached the final reminder stage and may need moderator review."
+    else:
+        heading = "📣 **WEEKLY ACTIVITY CHECK**\n\nCODY found the following members at a new inactivity stage:"
+        footer = (
+            "If you need time away, please submit a **hiatus** or switch to **Watcher** here:\n"
+            f"{AUTO_ACTIVITY_INFO_LINK}\n\n"
+            "Each 30 / 60 / 90-day stage is sent once per inactivity period. 💕🐾"
+        )
+    batches = []
+    body = []
+    members = []
+    current_stage = None
+    for stage in AUTO_ACTIVITY_THRESHOLDS:
+        for item in sorted(notices_by_stage.get(stage, []), key=lambda row: (-row["inactive_days"], row["member_id"])):
+            line = f"<@{item['member_id']}> — **{item['inactive_days']} days** since their last detected message"
+            if staff:
+                line += f" — last activity <t:{int(item['last_seen'].timestamp())}:D>"
+            prefix = [_activity_stage_label(stage)] if current_stage != stage and not staff else []
+            candidate = "\n".join([heading, "", *body, *prefix, line, "", footer])
+            if len(candidate) > 1900 and members:
+                batches.append(("\n".join([heading, "", *body, "", footer]), members))
+                body, members, current_stage = [], [], None
+                prefix = [_activity_stage_label(stage)] if not staff else []
+            body.extend([*prefix, line])
+            members.append(item)
+            current_stage = stage
+    if members:
+        batches.append(("\n".join([heading, "", *body, "", footer]), members))
+    return batches
+
+
+def _activity_item_still_pending(guild, item, *, staff=False):
+    member = guild.get_member(item["member_id"])
+    if not _activity_member_is_monitored(member) or _activity_member_is_exempt(member):
+        return False
+    record = data.get("activity_tracking", {}).get(str(member.id), {})
+    now = datetime.now(TZ)
+    if _activity_last_seen_for_member(member, record, now) != item["last_seen"]:
+        return False
+    key = "staff_notice_stage" if staff else "notice_stage"
+    # Preserve legacy successful warnings rather than repeat them after upgrade.
+    default = _activity_record_stage(record) if staff else 0
+    return _activity_record_stage(record, key, default) < item["stage"]
+
+
+async def _activity_post_notices(guild, notices_by_stage, *, staff=False):
+    global _activity_tracking_dirty
+    batches = _activity_notice_batches(notices_by_stage, staff=staff)
+    if not batches:
+        return True
+    if discord_requests_paused():
+        return False
+    channel_id = AUTO_ACTIVITY_STAFF_CHANNEL_ID if staff else AUTO_ACTIVITY_NOTICE_CHANNEL_ID
+    try:
+        channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        if channel is None:
+            return False
+        for _text, items in batches:
+            async with data_lock:
+                pending = [item for item in items if _activity_item_still_pending(guild, item, staff=staff)]
+            if not pending:
+                continue
+            grouped = {stage: [item for item in pending if item["stage"] == stage] for stage in AUTO_ACTIVITY_THRESHOLDS}
+            for text, delivered_items in _activity_notice_batches(grouped, staff=staff):
+                await channel.send(
+                    text,
+                    allowed_mentions=discord.AllowedMentions(users=True, roles=staff, everyone=False)
                 )
-            )
+                async with data_lock:
+                    changed = False
+                    for item in delivered_items:
+                        # A message received while send() awaited must keep its
+                        # fresh cycle instead of inheriting the old warning.
+                        if not _activity_item_still_pending(guild, item, staff=staff):
+                            continue
+                        record = data["activity_tracking"][str(item["member_id"])]
+                        sent_at = datetime.now(TZ).isoformat()
+                        if staff:
+                            record["staff_notice_stage"] = item["stage"]
+                            record["last_staff_notice_at"] = sent_at
+                        else:
+                            record.setdefault("staff_notice_stage", _activity_record_stage(record))
+                            record["notice_stage"] = item["stage"]
+                            record["last_notice_at"] = sent_at
+                            record["last_notice_stage"] = item["stage"]
+                            record.setdefault("notice_history", []).append({
+                                "stage": item["stage"], "sent_at": sent_at,
+                                "inactive_days": item["inactive_days"],
+                                "last_activity": item["last_seen"].isoformat(),
+                            })
+                        changed = True
+                    if changed:
+                        _activity_tracking_dirty = True
+                        save_data(data)
+                        _activity_tracking_dirty = False
+    except (discord.HTTPException, OSError, asyncio.TimeoutError) as error:
+        log_error("Activity staff report failed" if staff else "Activity member notice failed", error)
+        return False
+    return True
 
 
 async def run_weekly_activity_audit():
-    global _activity_tracking_dirty
-
     guild = await get_rules_guild()
-    if guild is None:
-        print("Weekly activity audit skipped: guild could not be resolved.")
+    if guild is None or guild.id != GUILD_ID or discord_requests_paused():
         return False
-
-    # Ensure the member cache is populated where possible.
     try:
         if not getattr(guild, "chunked", True):
             await guild.chunk(cache=True)
-    except (discord.HTTPException, discord.Forbidden):
-        pass
-
-    async with data_lock:
-        needs_backfill = not bool(data.get("activity_tracking_backfill_complete"))
-
-    if needs_backfill:
-        await backfill_activity_history(guild)
+    except (discord.HTTPException, OSError, asyncio.TimeoutError) as error:
+        log_error("Activity audit waiting for the full member list", error)
+        return False
+    # Never issue inactivity warnings using an incomplete historical scan.
+    if not data.get("activity_tracking_backfill_complete"):
+        if not await backfill_activity_history(guild):
+            return False
 
     now = datetime.now(TZ)
-    notices_by_stage = {30: [], 60: [], 90: []}
-
+    notices_by_stage = {stage: [] for stage in AUTO_ACTIVITY_THRESHOLDS}
+    staff_notices = {90: []}
     async with data_lock:
         tracking = data.setdefault("activity_tracking", {})
-
         for member in list(getattr(guild, "members", [])):
-            if not _activity_member_is_monitored(member):
+            if not _activity_member_is_monitored(member) or _activity_member_is_exempt(member):
                 continue
-            if _activity_member_is_exempt(member):
-                continue
-
-            user_id = str(member.id)
-            record = tracking.setdefault(user_id, {})
+            record = tracking.setdefault(str(member.id), {})
             last_seen = _activity_last_seen_for_member(member, record, now)
             inactive_days = max(0, (now - last_seen).days)
             stage = _activity_stage_for_days(inactive_days)
-            previous_stage = int(record.get("notice_stage", 0) or 0)
-
-            if stage == 0 or stage <= previous_stage:
+            if not stage:
                 continue
+            previous_stage = _activity_record_stage(record)
+            item = {"member_id": member.id, "inactive_days": inactive_days, "last_seen": last_seen, "stage": stage}
+            if stage > previous_stage:
+                notices_by_stage[stage].append(item)
+            if stage == 90 and _activity_record_stage(record, "staff_notice_stage", previous_stage) < 90:
+                staff_notices[90].append(item)
 
-            record["notice_stage"] = stage
-            record["last_notice_at"] = now.isoformat()
-            record["last_notice_stage"] = stage
-            record.setdefault("notice_history", []).append({
-                "stage": stage,
-                "sent_at": now.isoformat(),
-                "inactive_days": inactive_days,
-                "last_activity": last_seen.isoformat(),
-            })
-            notices_by_stage[stage].append({
-                "member_id": member.id,
-                "inactive_days": inactive_days,
-                "last_seen": last_seen,
-            })
-            _activity_tracking_dirty = True
-
-        if any(notices_by_stage.values()):
-            save_data(data)
-            _activity_tracking_dirty = False
-
-    if not any(notices_by_stage.values()):
-        return True
-
-    notice_channel = bot.get_channel(AUTO_ACTIVITY_NOTICE_CHANNEL_ID)
-    if notice_channel is None:
-        try:
-            notice_channel = await bot.fetch_channel(AUTO_ACTIVITY_NOTICE_CHANNEL_ID)
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            notice_channel = None
-
-    if notice_channel is not None:
-        lines = [
-            "📣 **WEEKLY ACTIVITY CHECK**",
-            "",
-            "CODY's Wednesday activity check found the following members who have reached a new inactivity stage:",
-            "",
-        ]
-        for stage in AUTO_ACTIVITY_THRESHOLDS:
-            entries = notices_by_stage[stage]
-            if not entries:
-                continue
-            lines.append(_activity_stage_label(stage))
-            for item in sorted(entries, key=lambda row: (-row["inactive_days"], row["member_id"])):
-                lines.append(f"<@{item['member_id']}> — **{item['inactive_days']} days** since their last detected message")
-            lines.append("")
-
-        lines.extend([
-            "If you need time away, that's completely okay! Please submit a **hiatus** or switch to the **Watcher** role here:",
-            AUTO_ACTIVITY_INFO_LINK,
-            "",
-            "CODY only sends each 30 / 60 / 90-day stage once per inactivity period, so these mentions will not repeat every Wednesday. 💕🐾",
-        ])
-        try:
-            await _activity_send_chunks(notice_channel, "\n".join(lines), allow_users=True, allow_roles=False)
-        except (discord.Forbidden, discord.HTTPException) as error:
-            print(f"Weekly activity notice could not be posted: {error}")
-
-    final_entries = notices_by_stage[90]
-    if final_entries:
-        staff_channel = bot.get_channel(AUTO_ACTIVITY_STAFF_CHANNEL_ID)
-        if staff_channel is None:
-            try:
-                staff_channel = await bot.fetch_channel(AUTO_ACTIVITY_STAFF_CHANNEL_ID)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                staff_channel = None
-
-        if staff_channel is not None:
-            lines = [
-                f"<@&{1441506626371715103}>",
-                "🚨 **90-DAY INACTIVITY REPORT — FINAL WARNING**",
-                "",
-                "The following verified member(s) have reached **90+ days without a detected server message** and do not currently have the Hiatus or Watcher role:",
-                "",
-            ]
-            for item in sorted(final_entries, key=lambda row: (-row["inactive_days"], row["member_id"])):
-                unix = int(item["last_seen"].timestamp())
-                lines.append(
-                    f"• <@{item['member_id']}> — **{item['inactive_days']} days inactive** — last detected activity <t:{unix}:D>"
-                )
-            lines.append("")
-            lines.append("They have reached the final stage of CODY's automated activity reminders and may need moderator review.")
-            try:
-                await _activity_send_chunks(staff_channel, "\n".join(lines), allow_users=True, allow_roles=True)
-            except (discord.Forbidden, discord.HTTPException) as error:
-                print(f"90-day inactivity staff report could not be posted: {error}")
-
-    return True
+    # Public and staff delivery have independent success markers. Each chunk is
+    # committed only after its own send succeeds, so retries do not repeat earlier
+    # successfully posted chunks or lose a failed 90-day staff report.
+    public_complete = await _activity_post_notices(guild, notices_by_stage)
+    staff_complete = await _activity_post_notices(guild, staff_notices, staff=True)
+    return public_complete and staff_complete
 
 
 @tasks.loop(minutes=30)
 async def weekly_activity_audit():
-    """Run once each Wednesday at or after 8:00 AM Toronto/Eastern time."""
+    """Wednesday at/after 8 AM Toronto; retry incomplete delivery that day."""
     now = datetime.now(TZ)
-    if now.weekday() != AUTO_ACTIVITY_CHECK_WEEKDAY:
+    if now.weekday() != AUTO_ACTIVITY_CHECK_WEEKDAY or now.hour < AUTO_ACTIVITY_CHECK_HOUR:
         return
-    if (now.hour, now.minute) < (AUTO_ACTIVITY_CHECK_HOUR, 0):
-        return
-
     today_key = now.date().isoformat()
-    async with data_lock:
-        if data.get("last_weekly_activity_audit_date") == today_key:
+    try:
+        async with data_lock:
+            if data.get("last_weekly_activity_audit_date") == today_key:
+                return
+        if not await run_weekly_activity_audit():
             return
-
-    completed = await run_weekly_activity_audit()
-    if not completed:
-        return
-
-    async with data_lock:
-        data["last_weekly_activity_audit_date"] = today_key
-        save_data(data)
+        async with data_lock:
+            previous_date = data.get("last_weekly_activity_audit_date")
+            data["last_weekly_activity_audit_date"] = today_key
+            try:
+                save_data(data)
+            except Exception:
+                data["last_weekly_activity_audit_date"] = previous_date
+                raise
+    except Exception as error:
+        log_error("Weekly activity audit failed; will retry", error)
 
 
 @weekly_activity_audit.before_loop
@@ -18456,6 +18599,32 @@ async def bothelp(interaction: discord.Interaction):
 # RUN BOT
 # ─────────────────────────────
 
+def consume_background_task_result(task):
+    if not task.cancelled():
+        task.exception()
+
+
+def register_loop_error_handler(name, task_loop):
+    async def handle_error(error):
+        log_error(f"Background task {name} stopped", error)
+        task = task_loop.get_task()
+        if task is not None:
+            # Loop re-raises after its error handler. Retrieve the finished task's
+            # exception so asyncio does not later print the same full HTML body.
+            task.add_done_callback(consume_background_task_result)
+    task_loop.error(handle_error)
+
+
+for _loop_name in (
+    "gathering_scheduler", "check_rules_onboarding", "ambient_hunt_hazards",
+    "weekly_weather_report", "severe_weather_report", "quest_reminders",
+    "monthly_quest_report", "check_hiatuses", "check_membership_milestones",
+    "flush_activity_tracking", "weekly_activity_audit", "check_activity_reminders",
+    "monthly_moon",
+):
+    register_loop_error_handler(_loop_name, globals()[_loop_name])
+
+
 bot.tree.add_command(cat_group)
 bot.tree.add_command(injury_group)
 bot.tree.add_command(mentor_group)
@@ -18475,6 +18644,11 @@ bot.tree.add_command(feed_group)
 bot.tree.add_command(quest_group)
 bot.tree.add_command(timeline_group)
 bot.tree.add_command(prophecy_group)
-keep_alive()
-print("Starting Discord bot. Server Members Intent is required; Message Content Intent is disabled.")
-bot.run(TOKEN)
+if __name__ == "__main__":
+    keep_alive()
+    print("Starting Discord bot. Server Members Intent is required; Message Content Intent is disabled.")
+    try:
+        bot.run(TOKEN)
+    except discord.HTTPException as error:
+        log_error("Discord connection failed", error)
+        raise SystemExit(1) from None
