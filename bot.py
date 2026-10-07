@@ -187,6 +187,19 @@ DEATH_ANNOUNCEMENT_CHANNEL_ID = 1441498271842304183
 ACTIVITY_WARNING_CHANNEL_ID = 1500705057207746610
 ACTIVITY_WARNING_USER_ID = 1440182563674132490
 
+# Automatic weekly inactivity audit. This is separate from the legacy/manual
+# /activity reminder tools above. CODY checks verified members every Wednesday
+# at 8:00 AM Toronto/Eastern time and sends one notice per inactivity stage.
+AUTO_ACTIVITY_NOTICE_CHANNEL_ID = 1441502378871492629
+AUTO_ACTIVITY_STAFF_CHANNEL_ID = 1441505660905984120
+WATCHER_ROLE_ID = 1491988054301479004
+AUTO_ACTIVITY_MODERATOR_ROLE_ID = MODERATOR_ROLE_ID if "MODERATOR_ROLE_ID" in globals() else 1441506626371715103
+AUTO_ACTIVITY_INFO_LINK = "https://discord.com/channels/1441200937514434563/1462669643570483220"
+AUTO_ACTIVITY_THRESHOLDS = (30, 60, 90)
+AUTO_ACTIVITY_CHECK_WEEKDAY = 2  # Monday=0, Wednesday=2
+AUTO_ACTIVITY_CHECK_HOUR = 8
+AUTO_ACTIVITY_BACKFILL_DAYS = 90
+
 HONOUR_ANNOUNCEMENT_CHANNEL_ID = 1441502516591202394
 HONOUR_TRACKER_CHANNEL_ID = 1441503004749594787
 HONOUR_ANNOUNCEMENT_ROLE_ID = 1449118016360026253
@@ -512,6 +525,10 @@ def fresh_default_data():
         "membership_milestones": {},
         "activity_reminders": {},
         "last_activity_reminder_id": 0,
+        "activity_tracking": {},
+        "activity_tracking_backfill_complete": False,
+        "activity_tracking_backfill_completed_at": None,
+        "last_weekly_activity_audit_date": None,
         "honour_tracker_message_id": None,
         "plot_members": {},
         "outsider_groups": list(FACTIONS),
@@ -7977,7 +7994,245 @@ HUNT_CHANNELS = {1443836708494905425: {'location': 'Glacier’s Edge', 'emoji': 
  1444903464957382717: {'location': 'Neon Path', 'emoji': '🌃'},
  1444903561099088004: {'location': 'Twoleg Town', 'emoji': '🏡'}}
 
-NO_PREY_HUNT_PROMPTS = {'Frozen Falls': ['The roar of BlizzardClan’s sacred falls drowns out every other sound, and no prey scent lingers anywhere nearby. A '
+NO_PREY_
+# ─────────────────────────────
+# FEAST / PREY PILE EVENT SYSTEM
+# ─────────────────────────────
+
+# Holiday/event prey piles. /feast is Moderator+ only and can fill one Clan or
+# every Clan at once with 30–40 pieces of territory-appropriate prey.
+FEAST_PREY_PILE_CHANNEL_IDS = {
+    "BlizzardClan": 1443833017079693352,
+    "TorrentClan": 1443839267934834718,
+    "FossilClan": 1443839857075032124,
+    "SpruceClan": 1443840434676695060,
+}
+
+FEAST_CLAN_LOCATIONS = {
+    "BlizzardClan": ["Glacier’s Edge", "Cloud Plateau", "Frost Tunnels"],
+    "TorrentClan": ["Trout Run", "Reed Marsh", "Glistening Pools"],
+    "FossilClan": ["Raptorfang Spires", "Rexhead Pillars", "Dustwind Flats"],
+    "SpruceClan": ["Whispering Branches", "Deeproot Tangle", "Sundance Pond"],
+}
+
+# A feast message uses one distinct reaction per prey line so members can react
+# to the same emoji shown beside the prey they took. These are intentionally
+# unique within each Clan's possible prey pool.
+FEAST_PREY_EMOJIS = {
+    "Pika": "🐹",
+    "Mouse": "🐁",
+    "Vole": "🐭",
+    "Shrew": "🔍",
+    "Common Shrew": "🔎",
+    "Cutthroat Trout": "🎣",
+    "Mountain Whitefish": "🐟",
+    "Snowshoe Hare": "🐇",
+    "Ptarmigan": "🪶",
+    "Bull Trout": "🐠",
+    "Marmot": "🏔️",
+    "Golden Eagle": "🦅",
+    "Mountain Goat": "🐐",
+    "Red Squirrel": "🍁",
+    "Magpie": "⚫",
+    "Caribou Scraps": "🦌",
+    "Canada Goose": "🪿",
+    "Salamander": "🦎",
+    "Spotted Salamander": "🦎",
+    "Bat": "🦇",
+    "Rat": "🐀",
+    "Trout": "🎣",
+    "Perch": "🐟",
+    "Arctic Char": "🧊",
+    "Minnow": "🫧",
+    "Frog": "🐸",
+    "Squirrel": "🐿️",
+    "Crayfish": "🦞",
+    "Kingfisher": "💙",
+    "Duckling": "🐥",
+    "Water Vole": "🌾",
+    "Walleye": "👁️",
+    "Loon": "⬛",
+    "Duck": "🦆",
+    "Catfish": "🐠",
+    "Mink": "🦦",
+    "Muskrat": "🐾",
+    "Beaver": "🦫",
+    "Coot": "🐦",
+    "Heron": "🪶",
+    "Rock Wren": "🪨",
+    "Chipmunk": "🌰",
+    "Crow": "🖤",
+    "Garter Snake": "🐍",
+    "Rock Pigeon": "🕊️",
+    "Sparrow": "🐦",
+    "Robin": "🔴",
+    "Blue Jay": "🔵",
+    "Red-tailed Hawk": "🪽",
+    "Peregrine Falcon": "💨",
+    "Blue Grouse": "🐔",
+    "Nighthawk": "🌙",
+    "Weasel": "🐾",
+    "Woodpecker": "🌳",
+    "Starling": "⭐",
+    "Nestling Birds": "🪺",
+    "Owl": "🦉",
+    "Vulture": "💀",
+    "Red-winged Blackbird": "❤️",
+    "Turtle": "🐢",
+}
+
+# If two selected prey somehow collide on an emoji, use a readable backup rather
+# than failing to add the Discord reaction. This should be rare because the normal
+# pools above are already designed to be unique per Clan.
+FEAST_FALLBACK_EMOJIS = [
+    "🍖", "🦴", "🍗", "🌿", "🍂", "🌲", "🌊", "❄️",
+    "☀️", "🌙", "✨", "💫", "🔸", "🔹", "🔶", "🔷",
+]
+
+FEAST_CLAN_CHOICES = [
+    app_commands.Choice(name=clan, value=clan)
+    for clan in CLAN_NAMES_ONLY
+]
+
+
+def normalize_feast_species(species):
+    """Collapse hunt-table wording that represents the same prey type."""
+    aliases = {
+        "Minnows": "Minnow",
+    }
+    clean = str(species or "").strip()
+    return aliases.get(clean, clean)
+
+
+def feast_species_weights(clan_name):
+    """Build a weighted prey pool directly from the Clan's existing /hunt tables."""
+    weights = {}
+
+    for location in FEAST_CLAN_LOCATIONS.get(clan_name, []):
+        for raw_weight, kind, payload in HUNT_TABLES.get(location, []):
+            if kind not in {"prey", "shared"}:
+                continue
+
+            species_options = []
+            for raw_species in payload:
+                species = normalize_feast_species(raw_species)
+                if species and species not in species_options:
+                    species_options.append(species)
+
+            if not species_options:
+                continue
+
+            # Shared hunt entries are only prey half of the time in /hunt, so they
+            # contribute half their listed probability to the feast pool.
+            effective_weight = float(raw_weight) * (0.5 if kind == "shared" else 1.0)
+            per_species = effective_weight / len(species_options)
+
+            for species in species_options:
+                weights[species] = weights.get(species, 0.0) + per_species
+
+    return weights
+
+
+def weighted_unique_sample(weight_map, amount):
+    """Weighted sample without replacement for choosing a varied feast menu."""
+    remaining = dict(weight_map)
+    chosen = []
+
+    while remaining and len(chosen) < amount:
+        names = list(remaining.keys())
+        weights = [max(0.0001, float(remaining[name])) for name in names]
+        picked = random.choices(names, weights=weights, k=1)[0]
+        chosen.append(picked)
+        remaining.pop(picked, None)
+
+    return chosen
+
+
+def build_feast_stock(clan_name):
+    """Return (total pieces, [(species, count), ...]) for one Clan feast."""
+    species_weights = feast_species_weights(clan_name)
+    if not species_weights:
+        return 0, []
+
+    total_pieces = random.randint(30, 40)
+    max_types = min(14, len(species_weights), total_pieces)
+    min_types = min(10, max_types)
+    type_count = random.randint(min_types, max_types) if max_types > min_types else max_types
+
+    selected = weighted_unique_sample(species_weights, type_count)
+    counts = {species: 1 for species in selected}
+
+    remaining_pieces = total_pieces - len(selected)
+    if remaining_pieces > 0:
+        selected_weights = [max(0.0001, species_weights[species]) for species in selected]
+        extras = random.choices(selected, weights=selected_weights, k=remaining_pieces)
+        for species in extras:
+            counts[species] += 1
+
+    # Larger stacks first keeps the prey-pile message easy to scan.
+    rows = sorted(counts.items(), key=lambda item: (-item[1], item[0].casefold()))
+    return total_pieces, rows
+
+
+def feast_reaction_emojis(rows):
+    """Assign one distinct emoji to every prey line in a feast message."""
+    used = set()
+    assigned = []
+
+    for species, _count in rows:
+        preferred = FEAST_PREY_EMOJIS.get(species)
+        emoji = preferred if preferred and preferred not in used else None
+
+        if emoji is None:
+            for fallback in FEAST_FALLBACK_EMOJIS:
+                if fallback not in used:
+                    emoji = fallback
+                    break
+
+        # The generator deliberately caps at 14 prey types, so this should never
+        # be reached unless the fallback library is changed later.
+        if emoji is None:
+            emoji = "🍖"
+
+        used.add(emoji)
+        assigned.append((species, emoji))
+
+    return dict(assigned)
+
+
+def build_feast_message(clan_name, total_pieces, rows):
+    emoji_map = feast_reaction_emojis(rows)
+    lines = [
+        f"🍖 **{clan_name} Feast — Prey Pile Restocked!**",
+        "",
+        f"A special feast has filled the prey pile with **{total_pieces} pieces of prey** gathered from across {clan_name}'s territory!",
+        "",
+    ]
+
+    for species, count in rows:
+        emoji = emoji_map[species]
+        lines.append(f"{emoji} +{count} **{species}** — Feast")
+
+    lines.extend([
+        "",
+        "React with the matching emoji when you take that type of prey! 🍽️",
+    ])
+
+    return "\n".join(lines), [emoji_map[species] for species, _count in rows]
+
+
+async def get_feast_pile_channel(channel_id):
+    channel = bot.get_channel(channel_id)
+    if channel is not None:
+        return channel
+
+    try:
+        return await bot.fetch_channel(channel_id)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return None
+
+
+HUNT_PROMPTS = {'Frozen Falls': ['The roar of BlizzardClan’s sacred falls drowns out every other sound, and no prey scent lingers anywhere nearby. A '
                   'single pale feather spirals slowly from somewhere above and lands at your paws. **There is nothing to hunt here, but... '
                   'is that a sign from StarClan? Probably not. You might want to keep it anyway.**',
                   'You search along the icy stones behind the falls, but find no tracks fresh enough to follow. Instead, a thin shard of '
@@ -8675,6 +8930,73 @@ async def hunt_command(interaction: discord.Interaction):
     )
 
 
+
+@bot.tree.command(
+    name="feast",
+    description="Moderator+ only. Fill one Clan prey pile or all Clan prey piles for a feast event."
+)
+@app_commands.describe(
+    clan="Optional: choose one Clan. Leave blank to fill all four Clan prey piles."
+)
+@app_commands.choices(clan=FEAST_CLAN_CHOICES)
+async def feast_command(
+    interaction: discord.Interaction,
+    clan: app_commands.Choice[str] = None
+):
+    if not await moderator_command_check(interaction):
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    target_clans = [clan.value] if clan is not None else list(CLAN_NAMES_ONLY)
+    successes = []
+    failures = []
+
+    for clan_name in target_clans:
+        channel_id = FEAST_PREY_PILE_CHANNEL_IDS.get(clan_name)
+        channel = await get_feast_pile_channel(channel_id) if channel_id else None
+
+        if channel is None:
+            failures.append(f"{clan_name}: prey pile channel could not be accessed")
+            continue
+
+        total_pieces, rows = build_feast_stock(clan_name)
+        if not rows or total_pieces < 30:
+            failures.append(f"{clan_name}: no usable feast prey pool was found")
+            continue
+
+        message_text, reaction_emojis = build_feast_message(clan_name, total_pieces, rows)
+
+        try:
+            feast_message = await channel.send(
+                message_text,
+                allowed_mentions=discord.AllowedMentions.none()
+            )
+        except (discord.Forbidden, discord.HTTPException) as error:
+            failures.append(f"{clan_name}: could not send feast message ({error})")
+            continue
+
+        reaction_failures = 0
+        for emoji in reaction_emojis:
+            try:
+                await feast_message.add_reaction(emoji)
+            except (discord.Forbidden, discord.HTTPException):
+                reaction_failures += 1
+
+        if reaction_failures:
+            successes.append(
+                f"✅ {clan_name}: {total_pieces} pieces stocked ({reaction_failures} reaction(s) could not be added)"
+            )
+        else:
+            successes.append(f"✅ {clan_name}: {total_pieces} pieces stocked")
+
+    summary_lines = ["🍖 **Feast complete!**", *successes]
+    if failures:
+        summary_lines.extend(["", "⚠️ **Problems**", *[f"• {item}" for item in failures]])
+
+    await interaction.followup.send("\n".join(summary_lines), ephemeral=True)
+
+
 def _parse_hunt_timestamp(value):
     if not value:
         return None
@@ -8845,6 +9167,12 @@ async def on_ready():
 
     if not check_activity_reminders.is_running():
         check_activity_reminders.start()
+
+    if not weekly_activity_audit.is_running():
+        weekly_activity_audit.start()
+
+    if not flush_activity_tracking.is_running():
+        flush_activity_tracking.start()
 
     if not check_rules_onboarding.is_running():
         check_rules_onboarding.start()
@@ -9172,7 +9500,7 @@ async def botinfo(interaction: discord.Interaction):
 
         "📜 **Quest / Gathering Commands**\n"
         "`/quest force` — Quest manager only. Clear and force-post replacement quests while keeping the monthly first-of-the-month schedule\n"
-        "`/quest progress` — View current monthly quest status, contributors, and exactly how much prey is still needed\n`/quest catch [Cat] [Prey]` — Record a hunting-quest catch; the OC's first contribution earns a Connection Token\n`/quest contribute [Cat]` — Record your OC as a contributor to a non-hunting monthly quest\n`/quest perks` — View all Connection Perks and token costs\n`/quest redeemperk [Cat] [Perk]` — Spend Connection Tokens on a permanent perk badge\n`/quest addtokens [Cat] [Amount] [Reason]` — Moderator+ only. Manually award Connection Tokens (for example, Cat of the Moon)\n`/quest removetokens [Cat] [Amount] [Reason]` — Moderator+ only. Manually remove Connection Tokens\n`/quest removeperk [Cat] [Perk] [Reason]` — Moderator+ only. Remove a redeemed perk; does not automatically refund tokens\n`/quest track [Cat] [Prey]` — Great Tracker perk: once per moon, choose a specific prey encounter\n`/quest complete [Clan]` — Staff only. Complete a quest and award success tokens to registered contributors\n`/quest role` — View the current optional role-specific quests\n`/quest rolecomplete [Cat] [Quest Number]` — Staff only. Complete role quest 1 or 2 with an eligible OC and award a random personal reward\n`/quest rolereroll [Quest Number]` — Staff only. Replace role quest 1 or 2\n`/quest usebonus [Cat] [Bonus]` — Staff only. Mark a saved one-use quest bonus as spent after the roll/activity\n`/resetquest [Clan/Outsider/All]` — Staff only. Replace one or all active quests/events while keeping the current due date\n"
+        "`/quest progress` — View current monthly quest status, contributors, and exactly how much prey is still needed\n`/quest catch [Cat] [Prey]` — Record a hunting-quest catch; the OC's first contribution earns a Connection Token\n`/quest contribute [Cat(s)]` — Record one or more of your OCs as contributors to non-hunting monthly quests; separate multiple names with commas\n`/quest perks` — View all Connection Perks and token costs\n`/quest redeemperk [Cat] [Perk]` — Spend Connection Tokens on a permanent perk badge\n`/quest addtokens [Cat] [Amount] [Reason]` — Moderator+ only. Manually award Connection Tokens (for example, Cat of the Moon)\n`/quest removetokens [Cat] [Amount] [Reason]` — Moderator+ only. Manually remove Connection Tokens\n`/quest removeperk [Cat] [Perk] [Reason]` — Moderator+ only. Remove a redeemed perk; does not automatically refund tokens\n`/quest track [Cat] [Prey]` — Great Tracker perk: once per moon, choose a specific prey encounter\n`/quest complete [Clan]` — Staff only. Complete a quest and award success tokens to registered contributors\n`/quest role` — View the current optional role-specific quests\n`/quest rolecomplete [Cat] [Quest Number]` — Staff only. Complete role quest 1 or 2 with an eligible OC and award a random personal reward\n`/quest rolereroll [Quest Number]` — Staff only. Replace role quest 1 or 2\n`/quest usebonus [Cat] [Bonus]` — Staff only. Mark a saved one-use quest bonus as spent after the roll/activity\n`/resetquest [Clan/Outsider/All]` — Staff only. Replace one or all active quests/events while keeping the current due date\n"
         "`/gatheringreport [ClanName]` — Generate a Clan-specific report including recent promotions, deaths, injuries, quest results, and major story changes\n"
         "`Automatic Gatherings` — The full Gathering runs on the last Thursday; the Medicine Cat Gathering runs on the second Thursday. Votes open 7 days early and close after 3 days. Neither Gathering may be skipped two months in a row.\n"
         "`/rollhelp` — Helps calculate whether an OC caught their prey using their roll, modifiers, and required hunting number\n\n"
@@ -9200,6 +9528,8 @@ async def botinfo(interaction: discord.Interaction):
         "`/feed reset [Name]` — Staff only. Reset one OC's hunger back to Satisfied with a fresh timer\n"
         "`/feed resetclan [Clan]` — Staff only. Reset every living cat in a Clan or Outsider group back to Satisfied with a fresh timer\n"
         "`/feed hunger [Clan]` — Check which cats in a Clan are Starving, Hungry, or Satisfied\n"
+        "`/feast [Clan]` — Moderator+ only. Fill all Clan prey piles, or one chosen Clan, with 30–40 territory-appropriate feast prey and matching reaction emojis\n"
+        "`Automatic Activity Check` — Every Wednesday at 8 AM Toronto/Eastern time, CODY checks verified members for 30 / 60 / 90-day inactivity stages; Hiatus and Watcher roles are exempt, and 90-day finals are reported to Moderators\n"
         "Well Fed lasts 2 weeks before dropping to Full. Full lasts 2 weeks before dropping to Satisfied. Satisfied lasts 30 days before Hungry, and Hungry lasts 30 days before Starving.\n"
         "Hunger affects hunting rolls: Starving -2, Hungry -1, Satisfied no change, Full +1, Well Fed +2.\n\n"
 
@@ -15449,65 +15779,123 @@ async def quest_catch(interaction: discord.Interaction, cat_name: str, prey: str
 
 
 
-@quest_group.command(name="contribute", description="Record your OC as a contributor to their current non-hunting monthly quest")
-@app_commands.describe(cat_name="Your OC who contributed to the current monthly quest")
+@quest_group.command(name="contribute", description="Record one or more OCs as contributors to their current non-hunting monthly quest")
+@app_commands.describe(cat_name="One or more of your OCs; separate multiple cat names with commas")
 async def quest_contribute(interaction: discord.Interaction, cat_name: str):
+    requested_names = []
+    seen_requested = set()
+    for raw_name in re.split(r"[,;\n]+", str(cat_name or "")):
+        cleaned = raw_name.strip()
+        if not cleaned:
+            continue
+        key = cleaned.casefold()
+        if key in seen_requested:
+            continue
+        seen_requested.add(key)
+        requested_names.append(cleaned)
+
+    if not requested_names:
+        await interaction.response.send_message(
+            "❌ Please enter at least one OC name. Separate multiple cats with commas.",
+            ephemeral=True
+        )
+        return
+
+    if len(requested_names) > 10:
+        await interaction.response.send_message(
+            "❌ Please submit no more than **10 cats at a time**.",
+            ephemeral=True
+        )
+        return
+
+    recorded = []
+    skipped = []
+
     async with data_lock:
         reset_legacy_quest_data_if_needed()
-        resolved_name = resolve_cat_name_casefold(cat_name)
-        if not resolved_name:
-            await interaction.response.send_message(f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
-            return
-        cat = data["cats"][resolved_name]
-        prepare_cat_record(resolved_name, cat)
-        if bool(cat.get("is_npc", False)):
-            await interaction.response.send_message("❌ Connection Tokens are for player OCs, not NPCs.", ephemeral=True)
-            return
-        if cat_is_dead(cat):
-            await interaction.response.send_message(f"❌ **{resolved_name}** is not currently a living OC.", ephemeral=True)
-            return
-        owner_id = oc_owner_id(cat)
-        if not is_staff(interaction) and owner_id != str(interaction.user.id):
-            await interaction.response.send_message(
-                f"❌ You can only record quest contributions for your own OCs. **{resolved_name}** is not registered to you.",
-                ephemeral=True
-            )
-            return
-        group_name = cat.get("clan")
-        if group_name not in QUEST_GROUP_ORDER:
-            group_name = "Outsider" if group_name == "Outsider" else None
-        if not group_name:
-            await interaction.response.send_message(f"❌ I could not match **{resolved_name}** to a monthly quest group.", ephemeral=True)
-            return
-        quest = data.get("active_quests_v2", {}).get(group_name)
-        if not quest:
-            await interaction.response.send_message(f"❌ **{group_name}** does not currently have an active monthly quest.", ephemeral=True)
-            return
-        if quest.get("status") != "Pending":
-            await interaction.response.send_message(f"❌ **{group_name}**'s current quest is already **{quest.get('status', 'finished')}**.", ephemeral=True)
-            return
-        if quest.get("category") == "hunting":
-            await interaction.response.send_message(
-                "🐭 Hunting contributions are registered automatically from a valid `/quest catch`, so use that command instead.",
-                ephemeral=True
-            )
-            return
-        added, balance = register_monthly_quest_contributor(group_name, quest, resolved_name, cat, owner_id)
-        if not added:
-            await interaction.response.send_message(
-                f"🤝 **{resolved_name}** is already registered as a contributor to this moon's **{group_name}** quest. "
-                "Each OC earns the contribution token only once per monthly quest.",
-                ephemeral=True
-            )
-            return
-        data["active_quests_v2"][group_name] = quest
-        save_data(data)
 
-    await interaction.response.send_message(
-        f"🤝 **Quest Contribution Recorded!**\n**{resolved_name}** helped with **{group_name}'s** current monthly quest and earned **+1 Connection Token**.\n"
-        f"**Token balance:** {balance}\n\nIf the quest successfully passes, {resolved_name} will automatically earn **+1 more**.",
-        ephemeral=True
-    )
+        for requested_name in requested_names:
+            resolved_name = resolve_cat_name_casefold(requested_name)
+            if not resolved_name:
+                skipped.append(f"**{requested_name}** — cat not found")
+                continue
+
+            cat = data["cats"][resolved_name]
+            prepare_cat_record(resolved_name, cat)
+
+            if bool(cat.get("is_npc", False)):
+                skipped.append(f"**{resolved_name}** — NPCs do not earn Connection Tokens")
+                continue
+
+            if cat_is_dead(cat):
+                skipped.append(f"**{resolved_name}** — not currently a living OC")
+                continue
+
+            owner_id = oc_owner_id(cat)
+            if not is_staff(interaction) and owner_id != str(interaction.user.id):
+                skipped.append(f"**{resolved_name}** — not registered to you")
+                continue
+
+            group_name = cat.get("clan")
+            if group_name not in QUEST_GROUP_ORDER:
+                group_name = "Outsider" if group_name == "Outsider" else None
+
+            if not group_name:
+                skipped.append(f"**{resolved_name}** — could not match to a monthly quest group")
+                continue
+
+            quest = data.get("active_quests_v2", {}).get(group_name)
+            if not quest:
+                skipped.append(f"**{resolved_name}** — {group_name} has no active monthly quest")
+                continue
+
+            if quest.get("status") != "Pending":
+                skipped.append(f"**{resolved_name}** — {group_name}'s quest is already {quest.get('status', 'finished')}")
+                continue
+
+            if quest.get("category") == "hunting":
+                skipped.append(f"**{resolved_name}** — {group_name}'s hunting quest must use `/quest catch`")
+                continue
+
+            added, balance = register_monthly_quest_contributor(
+                group_name,
+                quest,
+                resolved_name,
+                cat,
+                owner_id
+            )
+
+            if not added:
+                skipped.append(f"**{resolved_name}** — already contributed to this moon's {group_name} quest")
+                continue
+
+            data["active_quests_v2"][group_name] = quest
+            recorded.append((resolved_name, group_name, balance))
+
+        if recorded:
+            save_data(data)
+
+    lines = []
+    if recorded:
+        lines.append("🤝 **Quest Contributions Recorded!**")
+        lines.append("")
+        for resolved_name, group_name, balance in recorded:
+            lines.append(
+                f"✅ **{resolved_name}** → **{group_name}** • **+1 Connection Token** "
+                f"(balance: **{balance}**)"
+            )
+        lines.append("")
+        lines.append(
+            "If the applicable quest successfully passes, **each registered cat above** will automatically earn **+1 more Connection Token**."
+        )
+
+    if skipped:
+        if lines:
+            lines.append("")
+        lines.append("**Not added:**")
+        lines.extend(f"• {item}" for item in skipped)
+
+    await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
 
 
 @quest_group.command(name="perks", description="View every Connection Token perk and its cost")
@@ -16273,6 +16661,396 @@ async def check_membership_milestones():
     if notices:
         print(f"Membership milestone check posted {len(notices)} notice(s).")
 
+
+
+# ─────────────────────────────
+# AUTOMATIC WEEKLY ACTIVITY AUDIT
+# ─────────────────────────────
+
+_activity_tracking_dirty = False
+_activity_backfill_in_progress = False
+
+
+def _activity_parse_datetime(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=TZ)
+    return parsed.astimezone(TZ)
+
+
+def _activity_member_is_exempt(member):
+    role_ids = {role.id for role in getattr(member, "roles", [])}
+    return HIATUS_ROLE_ID in role_ids or WATCHER_ROLE_ID in role_ids
+
+
+def _activity_member_is_monitored(member):
+    if member is None or getattr(member, "bot", False):
+        return False
+    # Only verified server members are part of the RP activity system.
+    return member_has_role_id(member, MEMBER_ROLE_ID)
+
+
+def _activity_stage_for_days(inactive_days):
+    if inactive_days >= 90:
+        return 90
+    if inactive_days >= 60:
+        return 60
+    if inactive_days >= 30:
+        return 30
+    return 0
+
+
+def _activity_stage_label(stage):
+    if stage >= 90:
+        return "🚨 90+ DAYS — FINAL WARNING"
+    if stage >= 60:
+        return "⏰ 60+ DAYS — SECOND REMINDER"
+    return "⚠️ 30+ DAYS — FIRST REMINDER"
+
+
+def _activity_last_seen_for_member(member, record, now):
+    tracked = _activity_parse_datetime(record.get("last_activity")) if isinstance(record, dict) else None
+    joined = getattr(member, "joined_at", None)
+    if joined is not None:
+        if joined.tzinfo is None:
+            joined = joined.replace(tzinfo=TZ)
+        else:
+            joined = joined.astimezone(TZ)
+    # If no message was found during the historical backfill, joined_at is the
+    # safest lower bound. Older members with no message in the last 90 days will
+    # naturally fall into the 90+ bucket.
+    return tracked or joined or now
+
+
+async def _scan_activity_messageable(messageable, cutoff, latest_by_user):
+    try:
+        async for message in messageable.history(limit=None, after=cutoff, oldest_first=False):
+            author = getattr(message, "author", None)
+            if author is None or getattr(author, "bot", False):
+                continue
+            created_at = getattr(message, "created_at", None)
+            if created_at is None:
+                continue
+            created_at = created_at.astimezone(TZ)
+            user_id = str(author.id)
+            previous = latest_by_user.get(user_id)
+            if previous is None or created_at > previous:
+                latest_by_user[user_id] = created_at
+    except (discord.Forbidden, discord.NotFound):
+        return
+    except discord.HTTPException as error:
+        print(f"Activity backfill skipped channel/thread {getattr(messageable, 'id', '?')}: HTTP {getattr(error, 'status', '?')}")
+
+
+async def backfill_activity_history(guild):
+    """One-time 90-day history scan, then future activity is tracked live."""
+    global _activity_backfill_in_progress, _activity_tracking_dirty
+
+    if _activity_backfill_in_progress:
+        return False
+
+    async with data_lock:
+        if data.get("activity_tracking_backfill_complete"):
+            return True
+
+    _activity_backfill_in_progress = True
+    try:
+        cutoff = datetime.now(TZ) - timedelta(days=AUTO_ACTIVITY_BACKFILL_DAYS)
+        latest_by_user = {}
+        scanned_ids = set()
+
+        # Normal text/news channels.
+        for channel in getattr(guild, "text_channels", []):
+            if channel.id in scanned_ids:
+                continue
+            scanned_ids.add(channel.id)
+            await _scan_activity_messageable(channel, cutoff, latest_by_user)
+            await asyncio.sleep(0.15)
+
+        # Active threads, including active forum posts.
+        for thread in getattr(guild, "threads", []):
+            if thread.id in scanned_ids:
+                continue
+            scanned_ids.add(thread.id)
+            await _scan_activity_messageable(thread, cutoff, latest_by_user)
+            await asyncio.sleep(0.10)
+
+        # Archived public threads/posts can contain valid activity too. Stop once
+        # the archive timestamps are older than the 90-day window.
+        thread_parents = list(getattr(guild, "text_channels", [])) + list(getattr(guild, "forum_channels", []))
+        for parent in thread_parents:
+            archived_threads = getattr(parent, "archived_threads", None)
+            if archived_threads is None:
+                continue
+            try:
+                async for thread in archived_threads(limit=None):
+                    if thread.id in scanned_ids:
+                        continue
+                    archive_timestamp = getattr(thread, "archive_timestamp", None)
+                    if archive_timestamp is not None:
+                        archive_timestamp = archive_timestamp.astimezone(TZ)
+                        if archive_timestamp < cutoff:
+                            break
+                    scanned_ids.add(thread.id)
+                    await _scan_activity_messageable(thread, cutoff, latest_by_user)
+                    await asyncio.sleep(0.10)
+            except (discord.Forbidden, discord.NotFound):
+                continue
+            except discord.HTTPException as error:
+                print(f"Activity backfill could not inspect archived threads for {getattr(parent, 'id', '?')}: HTTP {getattr(error, 'status', '?')}")
+            except TypeError:
+                # Compatibility fallback for channel types/library versions with
+                # a slightly different archived_threads signature.
+                continue
+
+        completed_at = datetime.now(TZ)
+        async with data_lock:
+            tracking = data.setdefault("activity_tracking", {})
+            for user_id, seen_at in latest_by_user.items():
+                record = tracking.setdefault(user_id, {})
+                previous = _activity_parse_datetime(record.get("last_activity"))
+                if previous is None or seen_at > previous:
+                    record["last_activity"] = seen_at.isoformat()
+            data["activity_tracking_backfill_complete"] = True
+            data["activity_tracking_backfill_completed_at"] = completed_at.isoformat()
+            save_data(data)
+            _activity_tracking_dirty = False
+
+        print(f"Activity backfill complete: {len(latest_by_user)} member(s) with activity found in the last {AUTO_ACTIVITY_BACKFILL_DAYS} days.")
+        return True
+    finally:
+        _activity_backfill_in_progress = False
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    """Track message timestamps only; message contents are never read or stored."""
+    global _activity_tracking_dirty
+
+    if message.guild is None or getattr(message.author, "bot", False):
+        return
+
+    user_id = str(message.author.id)
+    created_at = message.created_at.astimezone(TZ)
+
+    async with data_lock:
+        tracking = data.setdefault("activity_tracking", {})
+        record = tracking.setdefault(user_id, {})
+        previous = _activity_parse_datetime(record.get("last_activity"))
+        if previous is None or created_at > previous:
+            record["last_activity"] = created_at.isoformat()
+            # Any new activity starts a fresh inactivity cycle. Old notice history
+            # remains available for staff/debugging, but stage gating resets.
+            if int(record.get("notice_stage", 0) or 0) > 0:
+                record["notice_stage"] = 0
+                record["last_notice_at"] = None
+            _activity_tracking_dirty = True
+
+
+@tasks.loop(minutes=30)
+async def flush_activity_tracking():
+    """Persist message timestamps in batches instead of writing Supabase on every message."""
+    global _activity_tracking_dirty
+    if not _activity_tracking_dirty:
+        return
+    async with data_lock:
+        if _activity_tracking_dirty:
+            save_data(data)
+            _activity_tracking_dirty = False
+
+
+@flush_activity_tracking.before_loop
+async def before_flush_activity_tracking():
+    await bot.wait_until_ready()
+
+
+async def _activity_send_chunks(channel, text, *, allow_users=False, allow_roles=False):
+    max_length = 1900
+    remaining = text
+    while remaining:
+        if len(remaining) <= max_length:
+            chunk = remaining
+            remaining = ""
+        else:
+            split_at = remaining.rfind("\n", 0, max_length)
+            if split_at <= 0:
+                split_at = max_length
+            chunk = remaining[:split_at]
+            remaining = remaining[split_at:].lstrip()
+        if chunk.strip():
+            await channel.send(
+                chunk,
+                allowed_mentions=discord.AllowedMentions(
+                    users=allow_users,
+                    roles=allow_roles,
+                    everyone=False
+                )
+            )
+
+
+async def run_weekly_activity_audit():
+    global _activity_tracking_dirty
+
+    guild = await get_rules_guild()
+    if guild is None:
+        print("Weekly activity audit skipped: guild could not be resolved.")
+        return False
+
+    # Ensure the member cache is populated where possible.
+    try:
+        if not getattr(guild, "chunked", True):
+            await guild.chunk(cache=True)
+    except (discord.HTTPException, discord.Forbidden):
+        pass
+
+    async with data_lock:
+        needs_backfill = not bool(data.get("activity_tracking_backfill_complete"))
+
+    if needs_backfill:
+        await backfill_activity_history(guild)
+
+    now = datetime.now(TZ)
+    notices_by_stage = {30: [], 60: [], 90: []}
+
+    async with data_lock:
+        tracking = data.setdefault("activity_tracking", {})
+
+        for member in list(getattr(guild, "members", [])):
+            if not _activity_member_is_monitored(member):
+                continue
+            if _activity_member_is_exempt(member):
+                continue
+
+            user_id = str(member.id)
+            record = tracking.setdefault(user_id, {})
+            last_seen = _activity_last_seen_for_member(member, record, now)
+            inactive_days = max(0, (now - last_seen).days)
+            stage = _activity_stage_for_days(inactive_days)
+            previous_stage = int(record.get("notice_stage", 0) or 0)
+
+            if stage == 0 or stage <= previous_stage:
+                continue
+
+            record["notice_stage"] = stage
+            record["last_notice_at"] = now.isoformat()
+            record["last_notice_stage"] = stage
+            record.setdefault("notice_history", []).append({
+                "stage": stage,
+                "sent_at": now.isoformat(),
+                "inactive_days": inactive_days,
+                "last_activity": last_seen.isoformat(),
+            })
+            notices_by_stage[stage].append({
+                "member_id": member.id,
+                "inactive_days": inactive_days,
+                "last_seen": last_seen,
+            })
+            _activity_tracking_dirty = True
+
+        if any(notices_by_stage.values()):
+            save_data(data)
+            _activity_tracking_dirty = False
+
+    if not any(notices_by_stage.values()):
+        return True
+
+    notice_channel = bot.get_channel(AUTO_ACTIVITY_NOTICE_CHANNEL_ID)
+    if notice_channel is None:
+        try:
+            notice_channel = await bot.fetch_channel(AUTO_ACTIVITY_NOTICE_CHANNEL_ID)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            notice_channel = None
+
+    if notice_channel is not None:
+        lines = [
+            "📣 **WEEKLY ACTIVITY CHECK**",
+            "",
+            "CODY's Wednesday activity check found the following members who have reached a new inactivity stage:",
+            "",
+        ]
+        for stage in AUTO_ACTIVITY_THRESHOLDS:
+            entries = notices_by_stage[stage]
+            if not entries:
+                continue
+            lines.append(_activity_stage_label(stage))
+            for item in sorted(entries, key=lambda row: (-row["inactive_days"], row["member_id"])):
+                lines.append(f"<@{item['member_id']}> — **{item['inactive_days']} days** since their last detected message")
+            lines.append("")
+
+        lines.extend([
+            "If you need time away, that's completely okay! Please submit a **hiatus** or switch to the **Watcher** role here:",
+            AUTO_ACTIVITY_INFO_LINK,
+            "",
+            "CODY only sends each 30 / 60 / 90-day stage once per inactivity period, so these mentions will not repeat every Wednesday. 💕🐾",
+        ])
+        try:
+            await _activity_send_chunks(notice_channel, "\n".join(lines), allow_users=True, allow_roles=False)
+        except (discord.Forbidden, discord.HTTPException) as error:
+            print(f"Weekly activity notice could not be posted: {error}")
+
+    final_entries = notices_by_stage[90]
+    if final_entries:
+        staff_channel = bot.get_channel(AUTO_ACTIVITY_STAFF_CHANNEL_ID)
+        if staff_channel is None:
+            try:
+                staff_channel = await bot.fetch_channel(AUTO_ACTIVITY_STAFF_CHANNEL_ID)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                staff_channel = None
+
+        if staff_channel is not None:
+            lines = [
+                f"<@&{1441506626371715103}>",
+                "🚨 **90-DAY INACTIVITY REPORT — FINAL WARNING**",
+                "",
+                "The following verified member(s) have reached **90+ days without a detected server message** and do not currently have the Hiatus or Watcher role:",
+                "",
+            ]
+            for item in sorted(final_entries, key=lambda row: (-row["inactive_days"], row["member_id"])):
+                unix = int(item["last_seen"].timestamp())
+                lines.append(
+                    f"• <@{item['member_id']}> — **{item['inactive_days']} days inactive** — last detected activity <t:{unix}:D>"
+                )
+            lines.append("")
+            lines.append("They have reached the final stage of CODY's automated activity reminders and may need moderator review.")
+            try:
+                await _activity_send_chunks(staff_channel, "\n".join(lines), allow_users=True, allow_roles=True)
+            except (discord.Forbidden, discord.HTTPException) as error:
+                print(f"90-day inactivity staff report could not be posted: {error}")
+
+    return True
+
+
+@tasks.loop(minutes=30)
+async def weekly_activity_audit():
+    """Run once each Wednesday at or after 8:00 AM Toronto/Eastern time."""
+    now = datetime.now(TZ)
+    if now.weekday() != AUTO_ACTIVITY_CHECK_WEEKDAY:
+        return
+    if (now.hour, now.minute) < (AUTO_ACTIVITY_CHECK_HOUR, 0):
+        return
+
+    today_key = now.date().isoformat()
+    async with data_lock:
+        if data.get("last_weekly_activity_audit_date") == today_key:
+            return
+
+    completed = await run_weekly_activity_audit()
+    if not completed:
+        return
+
+    async with data_lock:
+        data["last_weekly_activity_audit_date"] = today_key
+        save_data(data)
+
+
+@weekly_activity_audit.before_loop
+async def before_weekly_activity_audit():
+    await bot.wait_until_ready()
 
 
 # ─────────────────────────────
@@ -17573,7 +18351,7 @@ async def bothelp(interaction: discord.Interaction):
         "`/timeline cat [Cat]` — View one cat's documented leadership history.\n\n"
 
         "📜 **Quest / Story Commands**\n"
-        "Current quests/events post on the 1st of every month at 9 AM and stay active until the next month. Hunting objectives use broad prey categories such as birds, fish, or small prey. Use `/quest progress` to see quest progress and contributors. Hunting quests use `/quest catch [Cat] [Prey]`; non-hunting quests use `/quest contribute [Cat]`. An OC earns 1 Connection Token for their first contribution to a monthly quest and another if that quest succeeds. Use `/quest perks` to view the permanent badges those tokens can buy. Reminders post with 14 days, 7 days, and 3 days remaining. The pool rolls 35% hunting, 20% social, 20% herb patrol, 10% sickness/crisis, and 15% wild animal events.\n"
+        "Current quests/events post on the 1st of every month at 9 AM and stay active until the next month. Hunting objectives use broad prey categories such as birds, fish, or small prey. Use `/quest progress` to see quest progress and contributors. Hunting quests use `/quest catch [Cat] [Prey]`; non-hunting quests use `/quest contribute [Cat(s)]`; multiple names can be separated with commas. An OC earns 1 Connection Token for their first contribution to a monthly quest and another if that quest succeeds. Use `/quest perks` to view the permanent badges those tokens can buy. Reminders post with 14 days, 7 days, and 3 days remaining. The pool rolls 35% hunting, 20% social, 20% herb patrol, 10% sickness/crisis, and 15% wild animal events.\n"
         "Starting September 1, two optional role-specific quests run alongside the monthly quests, using two different role groups whenever possible. Each role cycles through all of its prompts before repeating. There is no penalty if nobody completes them. Use `/quest role` to view both. One-use Lucky Paw, Well Rested, and StarClan blessing charges are saved on `/catinfo`; staff can mark them spent with `/quest usebonus`.\n"
         "`/gatheringreport [ClanName]` — View recent story updates, quest results, injuries, rank changes, and major events for a specific Clan.\n"
         "`/rollhelp` — Helps calculate whether an OC caught their prey by adding the roll, prey modifier, specialty prey bonus, weather modifier, quest modifier, hunger modifier, and any other modifier against the OC’s required hunting number.\n\n"
