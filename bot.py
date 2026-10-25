@@ -245,17 +245,15 @@ RULES_REMINDER_AFTER_DAYS = 3
 NEW_MEMBER_ROLE_REMOVE_AFTER_DAYS = 7
 
 DEATH_ANNOUNCEMENT_CHANNEL_ID = 1441498271842304183
-ACTIVITY_WARNING_CHANNEL_ID = 1500705057207746610
+ACTIVITY_WARNING_CHANNEL_ID = 1441505660905984120  # Moderator channel; also used for the weekly audit
 ACTIVITY_WARNING_USER_ID = 1440182563674132490
 
 # Automatic weekly inactivity audit. This is separate from the legacy/manual
-# /activity reminder tools above. CODY checks verified members every Wednesday
-# at 8:00 AM Toronto/Eastern time and sends one notice per inactivity stage.
-AUTO_ACTIVITY_NOTICE_CHANNEL_ID = 1441502378871492629
+# /activity reminder tools above. Every Wednesday at 8:00 AM Toronto time,
+# CODY sends a full inactivity list only to the moderator channel.
 AUTO_ACTIVITY_STAFF_CHANNEL_ID = 1441505660905984120
 WATCHER_ROLE_ID = 1491988054301479004
 AUTO_ACTIVITY_MODERATOR_ROLE_ID = 1441506626371715103
-AUTO_ACTIVITY_INFO_LINK = "https://discord.com/channels/1441200937514434563/1462669643570483220"
 AUTO_ACTIVITY_THRESHOLDS = (30, 60, 90)
 AUTO_ACTIVITY_CHECK_WEEKDAY = 2  # Monday=0, Wednesday=2
 AUTO_ACTIVITY_CHECK_HOUR = 8
@@ -591,6 +589,7 @@ def fresh_default_data():
         "activity_tracking_backfill_completed_at": None,
         "activity_tracking_backfill_progress": {},
         "last_weekly_activity_audit_date": None,
+        "weekly_activity_mod_report": None,
         "honour_tracker_message_id": None,
         "plot_members": {},
         "outsider_groups": list(FACTIONS),
@@ -9656,7 +9655,7 @@ async def botinfo(interaction: discord.Interaction):
         "`/feed resetclan [Clan]` — Staff only. Reset every living cat in a Clan or Outsider group back to Satisfied with a fresh timer\n"
         "`/feed hunger [Clan]` — Check which cats in a Clan are Starving, Hungry, or Satisfied\n"
         "`/feast [Clan]` — Moderator+ only. Fill all Clan prey piles, or one chosen Clan, with 30–40 territory-appropriate feast prey and matching reaction emojis\n"
-        "`Automatic Activity Check` — Every Wednesday at 8 AM Toronto/Eastern time, CODY checks verified members for 30 / 60 / 90-day inactivity stages; Hiatus and Watcher roles are exempt, and 90-day finals are reported to Moderators\n"
+        "`Automatic Activity Check` — Every Wednesday at 8 AM Toronto/Eastern time, CODY posts the full 30 / 60 / 90-day inactivity list only in the moderator channel and pings Moderators once; Hiatus and Watcher roles are exempt\n"
         "Well Fed lasts 2 weeks before dropping to Full. Full lasts 2 weeks before dropping to Satisfied. Satisfied lasts 30 days before Hungry, and Hungry lasts 30 days before Starving.\n"
         "Hunger affects hunting rolls: Starving -2, Hungry -1, Satisfied no change, Full +1, Well Fed +2.\n\n"
 
@@ -16847,6 +16846,7 @@ async def check_membership_milestones():
 
 _activity_tracking_dirty = False
 _activity_backfill_in_progress = False
+_activity_audit_lock = asyncio.Lock()
 
 
 def _activity_parse_datetime(value):
@@ -17085,180 +17085,156 @@ async def after_flush_activity_tracking():
         await flush_activity_tracking()
 
 
-def _activity_notice_batches(notices_by_stage, *, staff=False):
-    """Keep each grouped post below 1900 characters and retain its member list."""
-    if staff:
-        heading = (
-            f"<@&{AUTO_ACTIVITY_MODERATOR_ROLE_ID}>\n"
-            "🚨 **90-DAY INACTIVITY REPORT — FINAL WARNING**\n\n"
-            "These verified members have reached 90+ days without a detected server message and have neither the Hiatus nor Watcher role."
-        )
-        footer = "They have reached the final reminder stage and may need moderator review."
-    else:
-        heading = "📣 **WEEKLY ACTIVITY CHECK**\n\nCODY found the following members at a new inactivity stage:"
-        footer = (
-            "If you need time away, please submit a **hiatus** or switch to **Watcher** here:\n"
-            f"{AUTO_ACTIVITY_INFO_LINK}\n\n"
-            "Each 30 / 60 / 90-day stage is sent once per inactivity period. 💕🐾"
-        )
-    batches = []
-    body = []
-    members = []
-    current_stage = None
+def _activity_report_week_key(now=None):
+    now = now or datetime.now(TZ)
+    year, week, _weekday = now.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def _activity_mod_report_chunks(groups, now):
+    """A compact moderator report; only its first message contains the role ping."""
+    heading = f"**Weekly inactivity check — {now.strftime('%B')} {now.day}, {now.year}**"
+    chunks = []
+    lines = [f"<@&{AUTO_ACTIVITY_MODERATOR_ROLE_ID}>", heading]
+    labels = {30: "30 day inactivity", 60: "60 day inactivity", 90: "90 day final warning"}
     for stage in AUTO_ACTIVITY_THRESHOLDS:
-        for item in sorted(notices_by_stage.get(stage, []), key=lambda row: (-row["inactive_days"], row["member_id"])):
-            line = f"<@{item['member_id']}> — **{item['inactive_days']} days** since their last detected message"
-            if staff:
-                line += f" — last activity <t:{int(item['last_seen'].timestamp())}:D>"
-            prefix = [_activity_stage_label(stage)] if current_stage != stage and not staff else []
-            candidate = "\n".join([heading, "", *body, *prefix, line, "", footer])
-            if len(candidate) > 1900 and members:
-                batches.append(("\n".join([heading, "", *body, "", footer]), members))
-                body, members, current_stage = [], [], None
-                prefix = [_activity_stage_label(stage)] if not staff else []
-            body.extend([*prefix, line])
-            members.append(item)
-            current_stage = stage
-    if members:
-        batches.append(("\n".join([heading, "", *body, "", footer]), members))
-    return batches
+        entries = sorted(groups.get(stage, []), key=lambda item: (-item["inactive_days"], item["member_id"]))
+        rows = [f"* <@{item['member_id']}>" for item in entries] or ["* None"]
+        section = f"**{labels[stage]}**"
+        for index, row in enumerate(rows):
+            additions = ["", section, row] if index == 0 else [row]
+            if len("\n".join([*lines, *additions])) > 1900:
+                chunks.append("\n".join(lines))
+                lines = ["**Weekly inactivity check (continued)**", "", section, row]
+            else:
+                lines.extend(additions)
+    chunks.append("\n".join(lines))
+    return chunks
 
 
-def _activity_item_still_pending(guild, item, *, staff=False):
-    member = guild.get_member(item["member_id"])
-    if not _activity_member_is_monitored(member) or _activity_member_is_exempt(member):
-        return False
-    record = data.get("activity_tracking", {}).get(str(member.id), {})
-    now = datetime.now(TZ)
-    if _activity_last_seen_for_member(member, record, now) != item["last_seen"]:
-        return False
-    key = "staff_notice_stage" if staff else "notice_stage"
-    # Preserve legacy successful warnings rather than repeat them after upgrade.
-    default = _activity_record_stage(record) if staff else 0
-    return _activity_record_stage(record, key, default) < item["stage"]
-
-
-async def _activity_post_notices(guild, notices_by_stage, *, staff=False):
+async def _activity_checkpoint_mod_report(report, sent_message=None):
+    """Save progress after each delivered chunk; keep a retry pending on failure."""
     global _activity_tracking_dirty
-    batches = _activity_notice_batches(notices_by_stage, staff=staff)
-    if not batches:
-        return True
+    async with data_lock:
+        if sent_message is not None:
+            report["next_chunk"] += 1
+            report["message_ids"].append(sent_message.id)
+        completed = report["next_chunk"] >= len(report["chunks"])
+        previous_completed = report.get("completed_at")
+        previous_date = data.get("last_weekly_activity_audit_date")
+        if completed:
+            report["completed_at"] = datetime.now(TZ).isoformat()
+            data["last_weekly_activity_audit_date"] = datetime.now(TZ).date().isoformat()
+        _activity_tracking_dirty = True
+        try:
+            save_data(data)
+        except Exception:
+            # Retain delivered-message progress in memory, but do not mark the
+            # week finished until its completion state has actually been saved.
+            report["completed_at"] = previous_completed
+            data["last_weekly_activity_audit_date"] = previous_date
+            raise
+        _activity_tracking_dirty = False
+
+
+async def _activity_deliver_mod_report(report):
+    """Send solely to the moderator channel, resuming any unsent continuation."""
     if discord_requests_paused():
         return False
-    channel_id = AUTO_ACTIVITY_STAFF_CHANNEL_ID if staff else AUTO_ACTIVITY_NOTICE_CHANNEL_ID
     try:
-        channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        # A previous snapshot/progress save may have failed. Persist it before
+        # sending anything else so a restart can resume from the same point.
+        if _activity_tracking_dirty:
+            await _activity_checkpoint_mod_report(report)
+        if report.get("completed_at"):
+            return True
+        channel = bot.get_channel(AUTO_ACTIVITY_STAFF_CHANNEL_ID)
+        if channel is None:
+            channel = await bot.fetch_channel(AUTO_ACTIVITY_STAFF_CHANNEL_ID)
         if channel is None:
             return False
-        for _text, items in batches:
-            async with data_lock:
-                pending = [item for item in items if _activity_item_still_pending(guild, item, staff=staff)]
-            if not pending:
-                continue
-            grouped = {stage: [item for item in pending if item["stage"] == stage] for stage in AUTO_ACTIVITY_THRESHOLDS}
-            for text, delivered_items in _activity_notice_batches(grouped, staff=staff):
-                await channel.send(
-                    text,
-                    allowed_mentions=discord.AllowedMentions(users=True, roles=staff, everyone=False)
+        while report["next_chunk"] < len(report["chunks"]):
+            index = report["next_chunk"]
+            message = await channel.send(
+                report["chunks"][index],
+                allowed_mentions=discord.AllowedMentions(
+                    users=False, roles=(index == 0), everyone=False
                 )
-                async with data_lock:
-                    changed = False
-                    for item in delivered_items:
-                        # A message received while send() awaited must keep its
-                        # fresh cycle instead of inheriting the old warning.
-                        if not _activity_item_still_pending(guild, item, staff=staff):
-                            continue
-                        record = data["activity_tracking"][str(item["member_id"])]
-                        sent_at = datetime.now(TZ).isoformat()
-                        if staff:
-                            record["staff_notice_stage"] = item["stage"]
-                            record["last_staff_notice_at"] = sent_at
-                        else:
-                            record.setdefault("staff_notice_stage", _activity_record_stage(record))
-                            record["notice_stage"] = item["stage"]
-                            record["last_notice_at"] = sent_at
-                            record["last_notice_stage"] = item["stage"]
-                            record.setdefault("notice_history", []).append({
-                                "stage": item["stage"], "sent_at": sent_at,
-                                "inactive_days": item["inactive_days"],
-                                "last_activity": item["last_seen"].isoformat(),
-                            })
-                        changed = True
-                    if changed:
-                        _activity_tracking_dirty = True
-                        save_data(data)
-                        _activity_tracking_dirty = False
+            )
+            await _activity_checkpoint_mod_report(report, message)
+        if not report.get("completed_at"):
+            await _activity_checkpoint_mod_report(report)
     except (discord.HTTPException, OSError, asyncio.TimeoutError) as error:
-        log_error("Activity staff report failed" if staff else "Activity member notice failed", error)
+        log_error("Weekly moderator inactivity report failed; will retry", error)
         return False
     return True
 
 
 async def run_weekly_activity_audit():
-    guild = await get_rules_guild()
-    if guild is None or guild.id != GUILD_ID or discord_requests_paused():
-        return False
-    try:
-        if not getattr(guild, "chunked", True):
-            await guild.chunk(cache=True)
-    except (discord.HTTPException, OSError, asyncio.TimeoutError) as error:
-        log_error("Activity audit waiting for the full member list", error)
-        return False
-    # Never issue inactivity warnings using an incomplete historical scan.
-    if not data.get("activity_tracking_backfill_complete"):
-        if not await backfill_activity_history(guild):
+    """One full staff-only snapshot per week, irrespective of legacy notice stages."""
+    global _activity_tracking_dirty
+    async with _activity_audit_lock:
+        now = datetime.now(TZ)
+        week = _activity_report_week_key(now)
+        async with data_lock:
+            report = data.get("weekly_activity_mod_report")
+            current_report = isinstance(report, dict) and report.get("week") == week
+            if current_report and report.get("completed_at"):
+                return True
+        if current_report:
+            return await _activity_deliver_mod_report(report)
+
+        guild = await get_rules_guild()
+        if guild is None or guild.id != GUILD_ID or discord_requests_paused():
             return False
+        try:
+            if not getattr(guild, "chunked", True):
+                await guild.chunk(cache=True)
+        except (discord.HTTPException, OSError, asyncio.TimeoutError) as error:
+            log_error("Activity audit waiting for the full member list", error)
+            return False
+        if not data.get("activity_tracking_backfill_complete"):
+            if not await backfill_activity_history(guild):
+                return False
 
-    now = datetime.now(TZ)
-    notices_by_stage = {stage: [] for stage in AUTO_ACTIVITY_THRESHOLDS}
-    staff_notices = {90: []}
-    async with data_lock:
-        tracking = data.setdefault("activity_tracking", {})
-        for member in list(getattr(guild, "members", [])):
-            if not _activity_member_is_monitored(member) or _activity_member_is_exempt(member):
-                continue
-            record = tracking.setdefault(str(member.id), {})
-            last_seen = _activity_last_seen_for_member(member, record, now)
-            inactive_days = max(0, (now - last_seen).days)
-            stage = _activity_stage_for_days(inactive_days)
-            if not stage:
-                continue
-            previous_stage = _activity_record_stage(record)
-            item = {"member_id": member.id, "inactive_days": inactive_days, "last_seen": last_seen, "stage": stage}
-            if stage > previous_stage:
-                notices_by_stage[stage].append(item)
-            if stage == 90 and _activity_record_stage(record, "staff_notice_stage", previous_stage) < 90:
-                staff_notices[90].append(item)
-
-    # Public and staff delivery have independent success markers. Each chunk is
-    # committed only after its own send succeeds, so retries do not repeat earlier
-    # successfully posted chunks or lose a failed 90-day staff report.
-    public_complete = await _activity_post_notices(guild, notices_by_stage)
-    staff_complete = await _activity_post_notices(guild, staff_notices, staff=True)
-    return public_complete and staff_complete
+        now = datetime.now(TZ)
+        groups = {stage: [] for stage in AUTO_ACTIVITY_THRESHOLDS}
+        async with data_lock:
+            tracking = data.setdefault("activity_tracking", {})
+            for member in list(getattr(guild, "members", [])):
+                if not _activity_member_is_monitored(member) or _activity_member_is_exempt(member):
+                    continue
+                record = tracking.get(str(member.id), {})
+                last_seen = _activity_last_seen_for_member(member, record, now)
+                inactive_days = max(0, (now - last_seen).days)
+                stage = _activity_stage_for_days(inactive_days)
+                if stage:
+                    groups[stage].append({"member_id": member.id, "inactive_days": inactive_days})
+            report = {
+                "week": _activity_report_week_key(now),
+                "created_at": now.isoformat(),
+                "chunks": _activity_mod_report_chunks(groups, now),
+                "next_chunk": 0,
+                "message_ids": [],
+                "completed_at": None,
+            }
+            data["weekly_activity_mod_report"] = report
+            # Save the snapshot before posting so a restart can resume the same
+            # report rather than regenerate and re-ping its first section.
+            _activity_tracking_dirty = True
+            save_data(data)
+            _activity_tracking_dirty = False
+        return await _activity_deliver_mod_report(report)
 
 
 @tasks.loop(minutes=30)
 async def weekly_activity_audit():
-    """Wednesday at/after 8 AM Toronto; retry incomplete delivery that day."""
+    """Wednesday at/after 8 AM Toronto; retry failed staff delivery that day."""
     now = datetime.now(TZ)
     if now.weekday() != AUTO_ACTIVITY_CHECK_WEEKDAY or now.hour < AUTO_ACTIVITY_CHECK_HOUR:
         return
-    today_key = now.date().isoformat()
     try:
-        async with data_lock:
-            if data.get("last_weekly_activity_audit_date") == today_key:
-                return
-        if not await run_weekly_activity_audit():
-            return
-        async with data_lock:
-            previous_date = data.get("last_weekly_activity_audit_date")
-            data["last_weekly_activity_audit_date"] = today_key
-            try:
-                save_data(data)
-            except Exception:
-                data["last_weekly_activity_audit_date"] = previous_date
-                raise
+        await run_weekly_activity_audit()
     except Exception as error:
         log_error("Weekly activity audit failed; will retry", error)
 
