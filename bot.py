@@ -2,6 +2,7 @@ import os
 import json
 import random
 import re
+import unicodedata
 import asyncio
 import copy
 import calendar
@@ -258,6 +259,21 @@ AUTO_ACTIVITY_THRESHOLDS = (30, 60, 90)
 AUTO_ACTIVITY_CHECK_WEEKDAY = 2  # Monday=0, Wednesday=2
 AUTO_ACTIVITY_CHECK_HOUR = 8
 AUTO_ACTIVITY_BACKFILL_DAYS = 90
+
+# Character-specific RP activity. Tupperbox posts are Discord webhook messages;
+# they have an OC/webhook display name rather than the human member's ID.
+HIGH_RANK_ACTIVITY_THREAD_ID = 1568262159908077618
+HIGH_RANK_ACTIVITY_LOOKBACK_DAYS = 14
+HIGH_RANK_ACTIVITY_WEEKDAY = 1  # Tuesday, Monday=0
+HIGH_RANK_ACTIVITY_HOUR = 8      # Toronto local time
+HIGH_RANK_ACTIVITY_RANKS = {
+    "Leader", "Deputy", "Medicine Cat", "Medicine Cat Apprentice",
+    "Pathfinder", "Digger", "River Guardian", "Sporekeeper",
+    "Healer", "Preymaster",
+}
+APPRENTICE_TRAINING_MINIMUM = 3
+APPRENTICE_ASSESSMENT_AGE = 11
+APPRENTICE_TRAINING_CATCHUP_AGE = 10
 
 HONOUR_ANNOUNCEMENT_CHANNEL_ID = 1441502516591202394
 HONOUR_TRACKER_CHANNEL_ID = 1441503004749594787
@@ -590,6 +606,9 @@ def fresh_default_data():
         "activity_tracking_backfill_progress": {},
         "last_weekly_activity_audit_date": None,
         "weekly_activity_mod_report": None,
+        "tupper_oc_activity": {},
+        "last_high_rank_activity_audit_date": None,
+        "high_rank_activity_pending_report": None,
         "honour_tracker_message_id": None,
         "plot_members": {},
         "outsider_groups": list(FACTIONS),
@@ -1425,6 +1444,9 @@ def prepare_cat_record(name, cat):
     cat.setdefault("freeze_hunger_until", None)
     cat.setdefault("previous_mentors", [])
     cat.setdefault("past_apprentices", [])
+    # Training stays on the OC after promotion, but displays only for Apprentices.
+    cat.setdefault("training_sessions", [])
+    cat.setdefault("tupper_aliases", [])  # Moderator-managed alternate Tupperbox display names
     cat.setdefault("honour_role", None)
     cat.setdefault("is_npc", False)
     cat.setdefault("allegiance_owner_id", None)
@@ -1460,6 +1482,66 @@ def prepare_cat_record(name, cat):
     cat.setdefault("role_quest_streak_milestones", [])
     cat.setdefault("role_quest_accomplishments", [])
     normalize_permanent_conditions(cat)
+
+
+def training_session_count(cat):
+    sessions = cat.get("training_sessions", [])
+    return len(sessions) if isinstance(sessions, list) else 0
+
+
+def apprentice_assessment_ready(cat):
+    return (
+        str(cat.get("rank") or "") == "Apprentice"
+        and not cat_is_dead(cat)
+        and int(cat.get("age", 0) or 0) >= APPRENTICE_ASSESSMENT_AGE
+        and training_session_count(cat) >= APPRENTICE_TRAINING_MINIMUM
+    )
+
+
+def apprentice_promotion_problem(cat):
+    """None when a player-owned Apprentice has met both promotion requirements."""
+    if cat.get("rank") != "Apprentice" or bool(cat.get("is_npc", False)):
+        return None
+    count = training_session_count(cat)
+    if count < APPRENTICE_TRAINING_MINIMUM:
+        return (
+            f"❌ This Apprentice has **{count}/{APPRENTICE_TRAINING_MINIMUM}** training sessions. "
+            f"They need at least **{APPRENTICE_TRAINING_MINIMUM}** before becoming a Warrior. "
+            "Use `/train` to record their training."
+        )
+    if int(cat.get("age", 0) or 0) < APPRENTICE_ASSESSMENT_AGE:
+        return (
+            f"❌ This Apprentice is only **{cat.get('age', 0)} moons** old. "
+            f"Warrior assessments begin at **{APPRENTICE_ASSESSMENT_AGE} moons**."
+        )
+    return None
+
+
+def append_apprentice_training_report(report, name, cat):
+    """Report readiness only when eligible; flag late-training risks at 10+ moons."""
+    if cat.get("rank") != "Apprentice" or cat_is_dead(cat):
+        return
+    age = int(cat.get("age", 0) or 0)
+    count = training_session_count(cat)
+    clan = str(cat.get("clan") or "Unknown Clan")
+    if age >= APPRENTICE_ASSESSMENT_AGE and count >= APPRENTICE_TRAINING_MINIMUM:
+        report.setdefault("warrior_assessments", []).append(
+            f"⚔ {name} of {clan} is ready for their Warrior Assessment ({count}/{APPRENTICE_TRAINING_MINIMUM} sessions). "
+            "They can play out the assessment in RP or arrange an off-screen assessment with staff, "
+            "whichever fits their schedule."
+        )
+    elif age >= APPRENTICE_TRAINING_CATCHUP_AGE and count <= 1:
+        report.setdefault("training_reminders", []).append(
+            f"🐾 {name} of {clan} is {age} moons old with only "
+            f"{count}/{APPRENTICE_TRAINING_MINIMUM} training sessions recorded. "
+            "Please help them get started with training soon; their Warrior ceremony may need to wait."
+        )
+    elif age >= APPRENTICE_ASSESSMENT_AGE and count < APPRENTICE_TRAINING_MINIMUM:
+        report.setdefault("training_reminders", []).append(
+            f"🐾 {name} of {clan} is {age} moons old and has "
+            f"{count}/{APPRENTICE_TRAINING_MINIMUM} training sessions. "
+            "A little more training is needed before their Warrior Assessment."
+        )
 
 
 def format_history_entry(entry):
@@ -4497,6 +4579,7 @@ async def run_moon_update():
             "ceremony_delays": [],
             "upcoming_apprentices": [],
             "warrior_assessments": [],
+            "training_reminders": [],
             "upcoming_elders": [],
             "births": [],
             "deaths": [],
@@ -4643,6 +4726,11 @@ async def run_moon_update():
             age = cat.get("age", 0)
             clan = cat.get("clan", "Unknown Clan")
 
+            # Apprentices' training reminders should not disappear just because
+            # their ceremony was delayed for unrelated RP reasons.
+            if rank == "Apprentice":
+                append_apprentice_training_report(report, name, cat)
+
             try:
                 delay = int(cat.get("ceremony_delay", 0) or 0)
             except Exception:
@@ -4680,11 +4768,6 @@ async def run_moon_update():
             if rank == "Kit" and age >= 6:
                 report["upcoming_apprentices"].append(
                     f"🐾 {name} will be old enough to become an Apprentice."
-                )
-
-            elif rank == "Apprentice" and age >= 11:
-                report["warrior_assessments"].append(
-                    f"⚔ {name} of {clan} can take their Warrior Assessment."
                 )
 
             elif rank in AGING_TO_ELDER_RANKS and age >= 95:
@@ -4846,6 +4929,7 @@ async def build_clan_report_text(report=None):
             "ceremony_delays": [],
             "upcoming_apprentices": [],
             "warrior_assessments": [],
+            "training_reminders": [],
             "upcoming_elders": [],
             "births": [],
             "deaths": [],
@@ -4913,6 +4997,7 @@ async def build_clan_report_text(report=None):
     if (
         not report.get("upcoming_apprentices")
         and not report.get("warrior_assessments")
+        and not report.get("training_reminders")
         and not report.get("upcoming_elders")
         and not report.get("ceremony_delays")
     ):
@@ -4947,6 +5032,10 @@ async def build_clan_report_text(report=None):
                 lines.append("**Outsider**")
                 lines.extend(outsider_assessments)
                 lines.append("")
+
+        if report.get("training_reminders"):
+            lines.extend(["", "### 🐾 Apprentices Who Need More Training"])
+            lines.extend(report["training_reminders"])
 
         if report.get("upcoming_elders"):
             lines.extend(["", "### 🍂 Cats Old Enough to Retire"])
@@ -5007,6 +5096,7 @@ async def moontest(interaction: discord.Interaction, target_moon: int):
             "ceremony_delays": [],
             "upcoming_apprentices": [],
             "warrior_assessments": [],
+            "training_reminders": [],
             "upcoming_elders": [],
             "births": [],
             "deaths": [],
@@ -5036,10 +5126,8 @@ async def moontest(interaction: discord.Interaction, target_moon: int):
                     f"🐾 {name} will be old enough to become an Apprentice."
                 )
 
-            elif rank == "Apprentice" and age >= 11:
-                report["warrior_assessments"].append(
-                    f"⚔ {name} of {clan} can take their Warrior Assessment."
-                )
+            elif rank == "Apprentice":
+                append_apprentice_training_report(report, name, cat)
 
             elif rank in AGING_TO_ELDER_RANKS and age >= 95:
                 report["upcoming_elders"].append(
@@ -9279,6 +9367,9 @@ async def on_ready():
     if not weekly_activity_audit.is_running():
         weekly_activity_audit.start()
 
+    if not high_rank_activity_audit.is_running():
+        high_rank_activity_audit.start()
+
     if not flush_activity_tracking.is_running():
         flush_activity_tracking.start()
 
@@ -9632,7 +9723,8 @@ async def botinfo(interaction: discord.Interaction):
         "`/rollhelp` — Helps calculate whether an OC caught their prey using their roll, modifiers, and required hunting number\n\n"
 
         "🐾 **General Member Commands**\n"
-        "`/catinfo [Name]` — View full details about a cat\n"
+        "`/catinfo [Name]` — View full details about a cat; Apprentices show their recorded training sessions\n"
+        "`/train [Cat] [Scene Link]` — Record a completed training scene for your Apprentice OC (3 sessions required for Warrior assessment; no maximum)\n"
         "`/oclist [User]` — Public OC list grouped by player, including each living OC's hunger\n"
         "`/ocowner [Cat]` — Find which Discord user owns a specific OC\n"
         "`/cats [Clan]` — View all cats by clan or all clans\n"
@@ -9656,6 +9748,10 @@ async def botinfo(interaction: discord.Interaction):
         "`/feed hunger [Clan]` — Check which cats in a Clan are Starving, Hungry, or Satisfied\n"
         "`/feast [Clan]` — Moderator+ only. Fill all Clan prey piles, or one chosen Clan, with 30–40 territory-appropriate feast prey and matching reaction emojis\n"
         "`Automatic Activity Check` — Every Wednesday at 8 AM Toronto/Eastern time, CODY posts the full 30 / 60 / 90-day inactivity list only in the moderator channel and pings Moderators once; Hiatus and Watcher roles are exempt\n"
+        "`/highrankactivity check` — Moderator+ only. Re-scan the last 14 days of High/Mid Rank Tupperbox RP; also runs every Tuesday at 8 AM Toronto time\n"
+        "`/highrankactivity alias [OC Name] [Tupper Name]` — Moderator+ only. Save a copied Tupper display name (including emojis or fancy text) to an OC\n"
+        "`/highrankactivity aliases [OC Name]` — Moderator+ only. List saved Tupper aliases\n"
+        "`/highrankactivity removealias [OC Name] [Tupper Name]` — Moderator+ only. Remove a saved Tupper alias\n"
         "Well Fed lasts 2 weeks before dropping to Full. Full lasts 2 weeks before dropping to Satisfied. Satisfied lasts 30 days before Hungry, and Hungry lasts 30 days before Starving.\n"
         "Hunger affects hunting rolls: Starving -2, Hungry -1, Satisfied no change, Full +1, Well Fed +2.\n\n"
 
@@ -11278,6 +11374,97 @@ def remove_relationship_history_between(cat, other_name):
     ]
 
 # ─────────────────────────────
+# APPRENTICE TRAINING — MEMBER HONOUR SYSTEM
+# ─────────────────────────────
+
+async def train_apprentice_autocomplete(interaction: discord.Interaction, current: str):
+    needle = str(current or "").casefold().strip()
+    candidates = sorted(
+        (name for name, cat in data.get("cats", {}).items()
+         if cat.get("rank") == "Apprentice" and not cat_is_dead(cat)
+         and not bool(cat.get("is_npc", False)) and needle in name.casefold()),
+        key=str.casefold,
+    )
+    return [app_commands.Choice(name=name[:100], value=name[:100]) for name in candidates[:25]]
+
+
+@bot.tree.command(name="train", description="Record one completed training scene for your Apprentice OC")
+@app_commands.describe(
+    cat_name="Your registered Apprentice OC",
+    scene_link="Optional Discord link to the completed training scene or thread",
+)
+@app_commands.autocomplete(cat_name=train_apprentice_autocomplete)
+async def train_command(interaction: discord.Interaction, cat_name: str, scene_link: str = None):
+    resolved = resolve_cat_name_casefold(cat_name)
+    if not resolved:
+        await interaction.response.send_message("❌ I couldn't find that registered OC.", ephemeral=True)
+        return
+
+    if scene_link:
+        scene_link = str(scene_link).strip()
+        if not re.match(r"^https://(?:www\.)?(?:discord\.com|discordapp\.com)/channels/\d+/\d+(?:/\d+)?(?:[/?#].*)?$", scene_link, flags=re.I):
+            await interaction.response.send_message(
+                "❌ Please link the completed Discord training scene/thread (or a message in it), or leave `scene_link` blank.",
+                ephemeral=True,
+            )
+            return
+
+    async with data_lock:
+        cat = data["cats"].get(resolved)
+        if cat is None or cat_is_dead(cat) or cat.get("rank") != "Apprentice" or bool(cat.get("is_npc", False)):
+            await interaction.response.send_message(
+                "❌ `/train` is for living, player-owned **Apprentice** OCs (not Medicine Cat Apprentices).",
+                ephemeral=True,
+            )
+            return
+        prepare_cat_record(resolved, cat)
+        sessions = cat.setdefault("training_sessions", [])
+        if not isinstance(sessions, list):
+            sessions = []
+            cat["training_sessions"] = sessions
+        if scene_link and any(
+            str(item.get("scene_link") or "") == scene_link for item in sessions if isinstance(item, dict)
+        ):
+            await interaction.response.send_message(
+                f"🐾 That scene is already recorded for **{resolved}**. "
+                f"Training sessions: **{len(sessions)}/{APPRENTICE_TRAINING_MINIMUM}**.",
+                ephemeral=True,
+            )
+            return
+        sessions.append({
+            "date": datetime.now(TZ).isoformat(),
+            "recorded_by": str(interaction.user.id),
+            "scene_link": scene_link,
+        })
+        count = len(sessions)
+        age = int(cat.get("age", 0) or 0)
+        if count == APPRENTICE_TRAINING_MINIMUM:
+            add_history(cat, f"Completed the minimum {APPRENTICE_TRAINING_MINIMUM} training sessions")
+        save_data(data)
+
+    response = (
+        f"🐾 **Training Recorded — {resolved}**\n"
+        f"**Training sessions:** {count}/{APPRENTICE_TRAINING_MINIMUM}\n"
+    )
+    if count >= APPRENTICE_TRAINING_MINIMUM and age >= APPRENTICE_ASSESSMENT_AGE:
+        response += (
+            "⚔ **Ready for a Warrior Assessment!** They have completed the required training "
+            "and are old enough to be assessed. The assessment can be played out in RP, "
+            "or arranged off-screen with staff if that's easier for everyone's schedules. "
+            "A Warrior ceremony still needs staff approval."
+        )
+    elif count >= APPRENTICE_TRAINING_MINIMUM:
+        response += (
+            f"✅ Training requirement met! They can have their Warrior Assessment "
+            f"once they reach **{APPRENTICE_ASSESSMENT_AGE} moons**."
+        )
+    else:
+        response += f"Keep it up — {APPRENTICE_TRAINING_MINIMUM - count} more session(s) until the training requirement is met."
+    response += "\n-# Please only record your own OCs' completed training scenes."
+    await interaction.response.send_message(response)
+
+
+# ─────────────────────────────
 # /CAT COMMANDS
 # ─────────────────────────────
 
@@ -11356,9 +11543,12 @@ async def cat_age(interaction: discord.Interaction, name: str, age: int):
 
         data["cats"][name]["age"] = age
         add_history(data["cats"][name], f"Age changed to {age} moons")
+        ready = apprentice_assessment_ready(data["cats"][name])
         save_data(data)
 
-    await interaction.response.send_message(f"🌙 **{name}** is now **{age} moons** old.")
+    note = ("\n⚔ Their training is complete and they're ready for a Warrior Assessment, "
+            "which can be roleplayed or arranged off-screen with staff.") if ready else ""
+    await interaction.response.send_message(f"🌙 **{name}** is now **{age} moons** old.{note}")
 
 
 @cat_group.command(name="rank", description="Change a cat's rank")
@@ -11384,6 +11574,12 @@ async def cat_rank(interaction: discord.Interaction, name: str, rank: app_comman
         if validation_error:
             await interaction.response.send_message(validation_error, ephemeral=True)
             return
+
+        if old_rank == "Apprentice" and rank.value == "Warrior":
+            promotion_problem = apprentice_promotion_problem(cat)
+            if promotion_problem:
+                await interaction.response.send_message(promotion_problem, ephemeral=True)
+                return
 
         cat["rank"] = rank.value
 
@@ -11512,6 +11708,12 @@ async def changeclan(
             await interaction.response.send_message(validation_error, ephemeral=True)
             return
 
+        if old_rank == "Apprentice" and selected_rank == "Warrior":
+            promotion_problem = apprentice_promotion_problem(cat)
+            if promotion_problem:
+                await interaction.response.send_message(promotion_problem, ephemeral=True)
+                return
+
         old_mentor = cat.get("mentor")
 
         # If the cat changes Clan or stops being an apprentice, clear mentor links cleanly.
@@ -11592,6 +11794,16 @@ async def cat_rename(interaction: discord.Interaction, old_name: str, new_name: 
         data["cats"][new_name] = data["cats"].pop(old_name)
         add_history(data["cats"][new_name], f"Renamed from {old_name} to {new_name}")
         rename_quest_cat_references(old_name, new_name)
+
+        tupper_history = data.setdefault("tupper_oc_activity", {})
+        old_key, new_key = old_name.casefold(), new_name.casefold()
+        if old_key in tupper_history:
+            previous = tupper_history.pop(old_key)
+            existing = tupper_history.get(new_key)
+            old_time = _activity_parse_datetime(previous.get("last_active"))
+            new_time = _activity_parse_datetime(existing.get("last_active")) if isinstance(existing, dict) else None
+            if new_time is None or (old_time is not None and old_time > new_time):
+                tupper_history[new_key] = previous
 
         for timeline_entry in normalize_timeline_storage():
             if str(timeline_entry.get("cat_name") or "").casefold() == str(old_name).casefold():
@@ -16841,6 +17053,482 @@ async def check_membership_milestones():
 
 
 # ─────────────────────────────
+# HIGH / MID-RANK OC ACTIVITY (TUPPERBOX PROXY MESSAGES)
+# ─────────────────────────────
+
+_high_rank_audit_lock = asyncio.Lock()
+
+
+def _tupper_oc_key(name):
+    # Discord's "APP" badge is UI metadata, not part of the webhook username;
+    # accept a literal suffix too, if someone copied it into their Tupper name.
+    cleaned = str(name or "").strip().replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
+    cleaned = re.sub(r"\s+APP$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip().casefold()
+
+
+def _tupper_message_oc_name(message):
+    # Tupperbox uses webhooks. Normal player messages do not prove OC activity.
+    # Keep the raw display key separate from resolution so we can distinguish
+    # unrecognized, ambiguous, and explicitly aliased names safely.
+    if not getattr(message, "webhook_id", None):
+        return None
+    author = getattr(message, "author", None)
+    if author is None:
+        return None
+    return _tupper_oc_key(getattr(author, "display_name", None) or getattr(author, "name", None))
+
+
+def _tupper_normalized_key(value):
+    """Fold decorative lettering, symbols and emoji to compare *whole* OC names.
+
+    Unicode NFKC handles mathematical/fancy fonts and fullwidth characters.
+    NFKD removes accent marks; keeping only letters/digits discards emojis,
+    separators and decorative punctuation. We never use substring matching.
+    Unusual lookalike substitutions not covered by Unicode still need an alias.
+    """
+    raw = unicodedata.normalize("NFKC", _tupper_oc_key(value))
+    raw = unicodedata.normalize("NFKD", raw.casefold())
+    return "".join(character for character in raw
+                   if unicodedata.category(character)[0] in {"L", "N"})
+
+
+def _tupper_registered_aliases(cat):
+    """Read only saved staff aliases, supporting older records without this field."""
+    values = cat.get("tupper_aliases", [])
+    if not isinstance(values, list):
+        return []
+    return [str(alias).strip() for alias in values if isinstance(alias, str) and alias.strip()]
+
+
+def _build_tupper_oc_lookup():
+    """Create exact and decorated-name maps from the *current* OC database.
+
+    Store sets so ambiguous normalized names are never attributed to an OC.
+    The exact form is preferred when two different OCs share a normalized form.
+    Aliases apply to any registered player OC, including future rank changes.
+    """
+    exact, normalized = {}, {}
+    for name, cat in data.get("cats", {}).items():
+        if not isinstance(cat, dict) or bool(cat.get("is_npc", False)):
+            continue
+        canonical_key = name.casefold()
+        for display in [name, *_tupper_registered_aliases(cat)]:
+            key = _tupper_oc_key(display)
+            folded = _tupper_normalized_key(display)
+            if key:
+                exact.setdefault(key, set()).add(canonical_key)
+            if folded:
+                normalized.setdefault(folded, set()).add(canonical_key)
+    return exact, normalized
+
+
+def _resolve_tupper_oc_key(raw_name, lookup=None):
+    """Return the unique canonical OC key, or None if absent/ambiguous."""
+    if not raw_name:
+        return None
+    exact, normalized = lookup if lookup is not None else _build_tupper_oc_lookup()
+    exact_candidates = exact.get(_tupper_oc_key(raw_name), set())
+    if len(exact_candidates) == 1:
+        return next(iter(exact_candidates))
+    if len(exact_candidates) > 1:
+        return None
+    candidates = normalized.get(_tupper_normalized_key(raw_name), set())
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    return None
+
+
+def _tupper_alias_conflict(oc_name, tupper_name):
+    """Refuse a new alias if it could recognize another registered character."""
+    target = oc_name.casefold()
+    exact, normalized = _build_tupper_oc_lookup()
+    raw_key = _tupper_oc_key(tupper_name)
+    folded_key = _tupper_normalized_key(tupper_name)
+    if not folded_key:
+        return "That alias contains no recognizable letters or numbers."
+    exact_candidates = exact.get(raw_key, set())
+    exact_others = [name for name in exact_candidates if name != target]
+    if exact_others:
+        other = resolve_cat_name_casefold(exact_others[0]) or exact_others[0]
+        return f"That exact Tupper name is already used by **{other}**. Choose a different alias."
+
+    normalized_candidates = normalized.get(folded_key, set())
+    normalized_others = [name for name in normalized_candidates if name != target]
+    if normalized_others and target not in normalized_candidates:
+        other = resolve_cat_name_casefold(normalized_others[0]) or normalized_others[0]
+        return f"That Tupper name could also match **{other}**. Use a unique alias so CODY doesn't credit the wrong OC."
+    # If registered OCs were already ambiguous after normalization (e.g.
+    # Dawnstar vs Dawn-star), an explicit, uniquely copied webhook name can
+    # resolve that *exact* spelling without guessing at other decorated forms.
+    return None
+
+
+def _high_rank_player_cats():
+    rows = []
+    for name, cat in data.get("cats", {}).items():
+        if (cat.get("rank") not in HIGH_RANK_ACTIVITY_RANKS
+                or cat_is_dead(cat) or bool(cat.get("is_npc", False))
+                or cat.get("clan") not in CLAN_NAMES_ONLY):
+            continue
+        rows.append((name, cat))
+    return sorted(rows, key=lambda item: (str(item[1].get("clan")), str(item[1].get("rank")), item[0].casefold()))
+
+
+def _record_tupper_oc_activity(message, *, now_cutoff=None):
+    """Update an OC's saved last in-character proxy post, without parsing content."""
+    key = _resolve_tupper_oc_key(_tupper_message_oc_name(message))
+    if not key:
+        return False
+    posted_at = _activity_parse_datetime(getattr(message, "created_at", None))
+    if posted_at is None or (now_cutoff is not None and posted_at < now_cutoff):
+        return False
+    record = data.setdefault("tupper_oc_activity", {}).setdefault(key, {})
+    old = _activity_parse_datetime(record.get("last_active"))
+    if old is not None and posted_at <= old:
+        return False
+    record["last_active"] = posted_at.isoformat()
+    record["message_url"] = str(getattr(message, "jump_url", "") or "")
+    return True
+
+
+async def _scan_high_rank_messageable(channel, cutoff, wanted_keys, results, lookup=None):
+    """Inspect only webhook identity/timestamps; an HTTP error fails the audit."""
+    try:
+        async for message in channel.history(limit=None, after=cutoff, oldest_first=False):
+            key = _resolve_tupper_oc_key(_tupper_message_oc_name(message), lookup)
+            if key not in wanted_keys:
+                continue
+            when = _activity_parse_datetime(getattr(message, "created_at", None))
+            if when is None:
+                continue
+            previous = results.get(key)
+            if previous is None or when > previous[0]:
+                results[key] = (when, str(getattr(message, "jump_url", "") or ""))
+    except discord.NotFound:
+        return
+
+
+async def _scan_high_rank_history(guild, cutoff, wanted_keys):
+    """Reconcile the 14-day window after downtime, including archived RP threads."""
+    latest = {}
+    lookup = _build_tupper_oc_lookup()  # One index per full audit, not per message
+    scanned = set()
+    channels = (
+        list(getattr(guild, "text_channels", []))
+        + list(getattr(guild, "voice_channels", []))
+        + list(getattr(guild, "stage_channels", []))
+    )
+    for channel in channels:
+        if channel.id in scanned or not callable(getattr(channel, "history", None)):
+            continue
+        scanned.add(channel.id)
+        await _scan_high_rank_messageable(channel, cutoff, wanted_keys, latest, lookup)
+        await asyncio.sleep(0.12)
+
+    threads = list(getattr(guild, "threads", []))
+    fetch_active = getattr(guild, "active_threads", None)
+    if callable(fetch_active):
+        threads.extend(await fetch_active())
+    for thread in threads:
+        if thread.id in scanned:
+            continue
+        scanned.add(thread.id)
+        await _scan_high_rank_messageable(thread, cutoff, wanted_keys, latest, lookup)
+        await asyncio.sleep(0.08)
+
+    parents = list(getattr(guild, "text_channels", [])) + list(getattr(guild, "forum_channels", []))
+    for parent in parents:
+        archived = getattr(parent, "archived_threads", None)
+        if not callable(archived):
+            continue
+        modes = [False, True] if isinstance(parent, discord.TextChannel) else [False]
+        for private in modes:
+            kwargs = {"limit": None}
+            if isinstance(parent, discord.TextChannel):
+                kwargs["private"] = private
+            async for thread in archived(**kwargs):
+                archive_at = _activity_parse_datetime(getattr(thread, "archive_timestamp", None))
+                if archive_at is not None and archive_at < cutoff:
+                    break
+                if thread.id in scanned:
+                    continue
+                scanned.add(thread.id)
+                await _scan_high_rank_messageable(thread, cutoff, wanted_keys, latest, lookup)
+                await asyncio.sleep(0.08)
+    return latest
+
+
+def _high_rank_inactive_rows(rows, cutoff):
+    """Build an audit snapshot from successful scans + saved live sightings."""
+    tracked = data.get("tupper_oc_activity", {})
+    out = []
+    for name, cat in rows:
+        record = tracked.get(name.casefold(), {})
+        seen = _activity_parse_datetime(record.get("last_active"))
+        if seen is not None and seen >= cutoff:
+            continue
+        owner_id = oc_owner_id(cat)
+        owner_label = f"<@{owner_id}>" if owner_id and owner_id.isdigit() else oc_owner_name(cat)
+        out.append({
+            "name": name,
+            "owner": owner_label,
+            "rank": str(cat.get("rank") or "Unknown"),
+            "clan": str(cat.get("clan") or "Unknown"),
+            "last_active": seen.isoformat() if seen is not None else None,
+        })
+    return out
+
+
+def _high_rank_report_chunks(rows, now):
+    if not rows:
+        return []
+    heading = (
+        f"<@&{MODERATOR_ROLE_ID}>\n"
+        f"📋 **High/Mid-Rank OC Activity Check — {now:%B %d, %Y}**\n"
+        f"No Tupperbox post found for these OCs in the last **{HIGH_RANK_ACTIVITY_LOOKBACK_DAYS} days**. "
+        "Please check whether their players need a reminder or a hand with their RP commitments."
+    )
+    blocks = []
+    for item in rows:
+        last = _activity_parse_datetime(item.get("last_active"))
+        last_text = f"<t:{int(last.timestamp())}:f> (<t:{int(last.timestamp())}:R>)" if last is not None else (
+            f"Not yet recorded; no matching post found in the last {HIGH_RANK_ACTIVITY_LOOKBACK_DAYS} days"
+        )
+        blocks.append(
+            f"**OC Name:** {item['name']}\n"
+            f"**Username:** {item['owner']}\n"
+            f"**Rank:** {item['rank']}\n"
+            f"**Clan:** {item['clan']}\n"
+            f"**Last Active:** {last_text}"
+        )
+    # Keep complete OC blocks together. Ping Moderators only in the first chunk.
+    chunks = []
+    current = heading
+    for block in blocks:
+        addition = "\n\n" + block
+        if len(current) + len(addition) > 1900:
+            chunks.append(current)
+            current = f"📋 **High/Mid-Rank Activity — Continued**\n\n{block}"
+        else:
+            current += addition
+    chunks.append(current)
+    return chunks
+
+
+async def _high_rank_activity_thread():
+    channel = bot.get_channel(HIGH_RANK_ACTIVITY_THREAD_ID)
+    if channel is None:
+        channel = await bot.fetch_channel(HIGH_RANK_ACTIVITY_THREAD_ID)
+    if not isinstance(channel, discord.Thread):
+        raise RuntimeError("High-rank activity destination must be a Discord thread.")
+    if getattr(channel, "archived", False):
+        await channel.edit(archived=False, reason="Weekly high/mid-rank activity report")
+    return channel
+
+
+async def _deliver_high_rank_pending_report(report):
+    """Resume after a failed Discord send rather than regenerate and reping."""
+    if discord_requests_paused():
+        return False
+    chunks = report.get("chunks") or []
+    if not chunks:
+        async with data_lock:
+            data["last_high_rank_activity_audit_date"] = report["date"]
+            data["high_rank_activity_pending_report"] = None
+            save_data(data)
+        return True
+    thread = await _high_rank_activity_thread()
+    mentions = discord.AllowedMentions(everyone=False, users=False, roles=[discord.Object(id=MODERATOR_ROLE_ID)])
+    while int(report.get("next_chunk", 0)) < len(chunks):
+        index = int(report["next_chunk"])
+        message = await thread.send(chunks[index], allowed_mentions=mentions)
+        async with data_lock:
+            report["next_chunk"] = index + 1
+            report.setdefault("message_ids", []).append(str(message.id))
+            save_data(data)
+    async with data_lock:
+        data["last_high_rank_activity_audit_date"] = report["date"]
+        data["high_rank_activity_pending_report"] = None
+        save_data(data)
+    return True
+
+
+async def run_high_rank_activity_check(*, manual=False):
+    """Tuesday audit + Moderator-triggered /highrankactivity, shared lock."""
+    async with _high_rank_audit_lock:
+        now = datetime.now(TZ)
+        date_key = now.date().isoformat()
+        if not manual and data.get("last_high_rank_activity_audit_date") == date_key:
+            return "Today's high-rank activity audit was already completed."
+        pending = data.get("high_rank_activity_pending_report")
+        if isinstance(pending, dict):
+            sent = await _deliver_high_rank_pending_report(pending)
+            return "Resumed the pending high-rank report." if sent else "Discord is temporarily unavailable."
+        if discord_requests_paused():
+            return "Discord is temporarily unavailable; the audit was not completed."
+        guild = await get_rules_guild()
+        if guild is None or guild.id != GUILD_ID:
+            raise RuntimeError("The Echostone Mountain server was not found.")
+        rows = _high_rank_player_cats()
+        cutoff = now - timedelta(days=HIGH_RANK_ACTIVITY_LOOKBACK_DAYS)
+        wanted = {name.casefold() for name, _ in rows}
+        found = await _scan_high_rank_history(guild, cutoff, wanted) if wanted else {}
+        # Only write history sightings if the entire 14-day scan completed.
+        async with data_lock:
+            storage = data.setdefault("tupper_oc_activity", {})
+            for key, (seen, jump_url) in found.items():
+                old = storage.get(key, {})
+                old_time = _activity_parse_datetime(old.get("last_active"))
+                if old_time is None or seen > old_time:
+                    storage[key] = {"last_active": seen.isoformat(), "message_url": jump_url}
+            missing = _high_rank_inactive_rows(rows, cutoff)
+            report = {
+                "date": date_key,
+                "chunks": _high_rank_report_chunks(missing, now),
+                "next_chunk": 0,
+                "message_ids": [],
+            }
+            data["high_rank_activity_pending_report"] = report
+            save_data(data)
+        delivered = await _deliver_high_rank_pending_report(report)
+        if not delivered:
+            return "Discord is temporarily unavailable. The report is saved and will be retried."
+        if missing:
+            return f"Checked {len(rows)} high/mid-rank OCs; reported {len(missing)} inactive OC(s) in the moderator thread."
+        return f"Checked {len(rows)} high/mid-rank OCs; everyone has an in-character post within 14 days."
+
+
+highrankactivity_group = app_commands.Group(
+    name="highrankactivity",
+    description="Moderator tools for high/mid-rank Tupperbox activity and aliases",
+)
+
+
+@highrankactivity_group.command(name="check", description="Moderator+: run the high/mid-rank Tupperbox activity audit now")
+async def high_rank_activity_command(interaction: discord.Interaction):
+    if not await moderator_command_check(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        result = await run_high_rank_activity_check(manual=True)
+    except (discord.HTTPException, OSError, asyncio.TimeoutError) as error:
+        log_error("Manual high-rank activity audit failed", error)
+        result = "⚠️ Activity history couldn't be scanned completely; no unverified inactivity notice was posted."
+    except Exception as error:
+        log_error("Manual high-rank activity audit failed", error)
+        result = "⚠️ High-rank activity audit failed; check CODY's Railway logs."
+    await interaction.followup.send(result, ephemeral=True)
+
+
+@highrankactivity_group.command(name="alias", description="Moderator+: link an exact Tupperbox display name to a registered OC")
+@app_commands.describe(
+    oc_name="OC's exact name as registered in CODY's tracker",
+    tupper_name="Paste the Tupperbox name exactly as shown, including symbols or fancy letters",
+)
+@app_commands.autocomplete(oc_name=timeline_cat_autocomplete)
+async def high_rank_activity_alias(interaction: discord.Interaction, oc_name: str, tupper_name: str):
+    if not await moderator_command_check(interaction):
+        return
+    resolved = resolve_cat_name_casefold(oc_name)
+    if resolved is None:
+        await interaction.response.send_message("❌ That OC is not registered in CODY's tracker.", ephemeral=True)
+        return
+    cat = data["cats"][resolved]
+    if bool(cat.get("is_npc", False)):
+        await interaction.response.send_message("❌ Tupper aliases are for player-owned OCs, not NPCs.", ephemeral=True)
+        return
+    alias = str(tupper_name or "").strip()
+    if not alias or len(alias) > 100 or any(ch in alias for ch in ("\n", "\r", "\t")):
+        await interaction.response.send_message("❌ Paste a single Tupper display name (1–100 characters).", ephemeral=True)
+        return
+    conflict = _tupper_alias_conflict(resolved, alias)
+    if conflict:
+        await interaction.response.send_message(f"❌ {conflict}", ephemeral=True)
+        return
+    async with data_lock:
+        aliases = cat.setdefault("tupper_aliases", [])
+        if not isinstance(aliases, list):
+            aliases = []
+            cat["tupper_aliases"] = aliases
+        if any(_tupper_oc_key(value) == _tupper_oc_key(alias) for value in aliases):
+            await interaction.response.send_message("ℹ️ That Tupper alias is already saved for this OC.", ephemeral=True)
+            return
+        if len(aliases) >= 20:
+            await interaction.response.send_message("❌ This OC already has 20 aliases. Remove an old one first.", ephemeral=True)
+            return
+        aliases.append(alias)
+        save_data(data)
+    safe_alias = discord.utils.escape_markdown(discord.utils.escape_mentions(alias))
+    await interaction.response.send_message(
+        f"✅ Saved **{safe_alias}** as a Tupperbox name for **{resolved}**. "
+        "CODY will recognize this in future messages and when scanning the previous 14 days. "
+        "Run `/highrankactivity check` to recheck a mistaken inactivity flag.",
+        ephemeral=True,
+    )
+
+
+@highrankactivity_group.command(name="removealias", description="Moderator+: remove a saved Tupperbox alias from an OC")
+@app_commands.describe(oc_name="Registered OC name", tupper_name="Previously saved Tupper alias to remove")
+@app_commands.autocomplete(oc_name=timeline_cat_autocomplete)
+async def high_rank_activity_remove_alias(interaction: discord.Interaction, oc_name: str, tupper_name: str):
+    if not await moderator_command_check(interaction):
+        return
+    resolved = resolve_cat_name_casefold(oc_name)
+    if resolved is None:
+        await interaction.response.send_message("❌ That OC is not registered in CODY's tracker.", ephemeral=True)
+        return
+    async with data_lock:
+        cat = data["cats"][resolved]
+        aliases = _tupper_registered_aliases(cat)
+        matching = [alias for alias in aliases if _tupper_oc_key(alias) == _tupper_oc_key(tupper_name)]
+        if not matching:
+            await interaction.response.send_message("❌ That Tupper alias isn't saved for this OC.", ephemeral=True)
+            return
+        cat["tupper_aliases"] = [alias for alias in aliases if _tupper_oc_key(alias) != _tupper_oc_key(tupper_name)]
+        save_data(data)
+    await interaction.response.send_message(f"✅ Removed the saved Tupper alias from **{resolved}**.", ephemeral=True)
+
+
+@highrankactivity_group.command(name="aliases", description="Moderator+: list saved Tupperbox aliases for an OC")
+@app_commands.describe(oc_name="Registered OC name")
+@app_commands.autocomplete(oc_name=timeline_cat_autocomplete)
+async def high_rank_activity_list_aliases(interaction: discord.Interaction, oc_name: str):
+    if not await moderator_command_check(interaction):
+        return
+    resolved = resolve_cat_name_casefold(oc_name)
+    if resolved is None:
+        await interaction.response.send_message("❌ That OC is not registered in CODY's tracker.", ephemeral=True)
+        return
+    aliases = _tupper_registered_aliases(data["cats"][resolved])
+    if not aliases:
+        await interaction.response.send_message(
+            f"🐾 **{resolved}** has no manual Tupper aliases. Decorative versions of the registered name are recognized automatically.",
+            ephemeral=True,
+        )
+        return
+    lines = [f"🐾 **Saved Tupperbox aliases for {discord.utils.escape_markdown(resolved)}:**"]
+    lines.extend(f"• {discord.utils.escape_markdown(discord.utils.escape_mentions(alias))}" for alias in aliases)
+    await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
+
+
+@tasks.loop(minutes=30)
+async def high_rank_activity_audit():
+    now = datetime.now(TZ)
+    if now.weekday() != HIGH_RANK_ACTIVITY_WEEKDAY or now.hour < HIGH_RANK_ACTIVITY_HOUR:
+        return
+    try:
+        await run_high_rank_activity_check()
+    except Exception as error:
+        log_error("Tuesday high-rank activity audit failed; will retry", error)
+
+
+@high_rank_activity_audit.before_loop
+async def before_high_rank_activity_audit():
+    await bot.wait_until_ready()
+
+
+# ─────────────────────────────
 # AUTOMATIC WEEKLY ACTIVITY AUDIT
 # ─────────────────────────────
 
@@ -16905,12 +17593,26 @@ def _activity_record_stage(record, key="notice_stage", default=0):
 async def _scan_activity_messageable(messageable, cutoff, latest_by_user, monitored_ids=None):
     # HTTP errors deliberately propagate: an incomplete scan must not become
     # evidence that a member has been inactive. The caller saves its checkpoint.
+    tupper_lookup = _build_tupper_oc_lookup()
     try:
         async for message in messageable.history(limit=None, after=cutoff, oldest_first=False):
             author = getattr(message, "author", None)
-            if author is None or getattr(author, "bot", False):
+            if author is None:
                 continue
-            user_id = str(author.id)
+            if getattr(message, "webhook_id", None):
+                # A Tupperbox post is also activity for the OC's saved player.
+                oc_key = _resolve_tupper_oc_key(_tupper_message_oc_name(message), tupper_lookup)
+                resolved = resolve_cat_name_casefold(oc_key) if oc_key else None
+                owner_cat = data.get("cats", {}).get(resolved) if resolved else None
+                if not owner_cat or bool(owner_cat.get("is_npc", False)):
+                    continue
+                user_id = oc_owner_id(owner_cat)
+                if not user_id:
+                    continue
+            else:
+                if getattr(author, "bot", False):
+                    continue
+                user_id = str(author.id)
             if monitored_ids is not None and user_id not in monitored_ids:
                 continue
             created_at = _activity_parse_datetime(getattr(message, "created_at", None))
@@ -17034,9 +17736,38 @@ async def backfill_activity_history(guild):
 
 @bot.event
 async def on_message(message: discord.Message):
-    """Track verified members by ID and timestamp, without reading message text."""
+    """Track member messages and Tupperbox OC messages; no content access needed."""
     global _activity_tracking_dirty
-    if message.guild is None or message.guild.id != GUILD_ID or getattr(message.author, "bot", False):
+    if message.guild is None or message.guild.id != GUILD_ID:
+        return
+    if getattr(message, "webhook_id", None):
+        # Tupperbox's Discord author is a webhook rather than the real member.
+        # Use the saved OC ownership to credit the member's Wednesday activity
+        # tracker too, so active roleplayers are not warned as inactive.
+        oc_key = _resolve_tupper_oc_key(_tupper_message_oc_name(message))
+        resolved = resolve_cat_name_casefold(oc_key) if oc_key else None
+        owner_cat = data.get("cats", {}).get(resolved) if resolved else None
+        member = None
+        if owner_cat and not bool(owner_cat.get("is_npc", False)):
+            owner_id = oc_owner_id(owner_cat)
+            if owner_id and owner_id.isdigit():
+                member = message.guild.get_member(int(owner_id))
+        created_at = _activity_parse_datetime(message.created_at)
+        async with data_lock:
+            if _record_tupper_oc_activity(message):
+                _activity_tracking_dirty = True
+            if created_at and _activity_member_is_monitored(member):
+                record = data.setdefault("activity_tracking", {}).setdefault(str(member.id), {})
+                previous = _activity_parse_datetime(record.get("last_activity"))
+                if previous is None or created_at > previous:
+                    record["last_activity"] = created_at.isoformat()
+                    record["notice_stage"] = 0
+                    record["staff_notice_stage"] = 0
+                    record["last_notice_at"] = None
+                    record["last_staff_notice_at"] = None
+                    _activity_tracking_dirty = True
+        return
+    if getattr(message.author, "bot", False):
         return
     member = message.author
     if not _activity_member_is_monitored(member):
@@ -17831,6 +18562,8 @@ async def catinfo(interaction: discord.Interaction, name: str):
             f"**Clan**: {cat.get('clan')}\n"
             f"**Rank**: {cat.get('rank')}\n"
             f"**Honour Role**: {honour_role}\n"
+            + (f"**Training sessions**: {training_session_count(cat)}/{APPRENTICE_TRAINING_MINIMUM}\n"
+               if cat.get("rank") == "Apprentice" else "")
         )
 
         if permanent_conditions:
@@ -18197,7 +18930,7 @@ async def upcomingceremonies(
             if rank == "Kit" and age >= 6:
                 apprentice_ready.append((cat_clan, shown_name, age))
 
-            elif rank == "Apprentice" and age >= 11:
+            elif rank == "Apprentice" and apprentice_assessment_ready(cat):
                 warrior_ready.append((cat_clan, shown_name, age))
 
             elif rank in AGING_TO_ELDER_RANKS and age >= 95:
@@ -18236,7 +18969,7 @@ async def upcomingceremonies(
             if selected_clan == "All" and cat_clan != current_clan:
                 current_clan = cat_clan
                 lines.append(f"\n**{cat_clan}**")
-            lines.append(f"⚔ **{shown_name}** — {age} moons")
+            lines.append(f"⚔ **{shown_name}** — {age} moons | at least {APPRENTICE_TRAINING_MINIMUM} training sessions")
     else:
         lines.append("No apprentices are currently eligible for warrior assessments.")
 
@@ -18513,6 +19246,7 @@ async def bothelp(interaction: discord.Interaction):
 
                 "🐾 **General Member Commands**\n"
         "`/catinfo [Name]` — View full details about a cat, including hunger and active role-quest bonuses\n"
+        "`/train [Cat] [Scene Link]` — Register one completed training scene for your Apprentice OC; 3 required for Warrior assessments\n"
         "`/oclist [User]` — Publicly view a player's OCs and each living OC's hunger\n"
         "`/ocowner [Cat]` — Find which player owns a specific OC\n"
         "`/cats [Clan]` — View all cats by clan or all clans\n"
@@ -18595,7 +19329,7 @@ for _loop_name in (
     "gathering_scheduler", "check_rules_onboarding", "ambient_hunt_hazards",
     "weekly_weather_report", "severe_weather_report", "quest_reminders",
     "monthly_quest_report", "check_hiatuses", "check_membership_milestones",
-    "flush_activity_tracking", "weekly_activity_audit", "check_activity_reminders",
+    "flush_activity_tracking", "weekly_activity_audit", "high_rank_activity_audit", "check_activity_reminders",
     "monthly_moon",
 ):
     register_loop_error_handler(_loop_name, globals()[_loop_name])
@@ -18619,6 +19353,7 @@ bot.tree.add_command(membership_group)
 bot.tree.add_command(feed_group)
 bot.tree.add_command(quest_group)
 bot.tree.add_command(timeline_group)
+bot.tree.add_command(highrankactivity_group)
 bot.tree.add_command(prophecy_group)
 if __name__ == "__main__":
     keep_alive()
