@@ -7,6 +7,7 @@ import asyncio
 import copy
 import calendar
 import sys
+import hashlib
 from time import monotonic
 from datetime import datetime, date, time, timedelta
 from zoneinfo import ZoneInfo
@@ -24,6 +25,77 @@ from supabase import create_client
 # Railway logs. Repeated identical errors are logged at most once per minute.
 _error_log_times = {}
 _discord_unavailable_until = 0.0
+_discord_429_streak = 0
+_discord_last_429_at = 0.0
+_active_slash_commands = 0
+_last_slash_command_at = 0.0
+
+# A surfaced HTTP 429 is more serious than the route limits discord.py handles
+# automatically. Temporarily suspend background Discord work, and escalate the
+# cooldown on consecutive incidents rather than starting another history crawl.
+DISCORD_BACKOFF_START_SECONDS = 300
+DISCORD_BACKOFF_MAX_SECONDS = 3600
+DISCORD_BACKGROUND_QUIET_SECONDS = 2.5
+
+
+class BackgroundDiscordPaused(RuntimeError):
+    """Abort an automated scan without interpreting incomplete data as inactivity."""
+
+
+def _http_retry_after(error):
+    error = unwrap_command_error(error)
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", {}) or {}
+    try:
+        return max(0.0, float(headers.get("Retry-After", 0) or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _register_discord_outage(error):
+    global _discord_unavailable_until, _discord_429_streak, _discord_last_429_at
+    if not discord_service_failure(error):
+        return
+    now = monotonic()
+    unwrapped = unwrap_command_error(error)
+    status = int(getattr(unwrapped, "status", 0) or 0)
+    if status == 429:
+        if now - _discord_last_429_at > 21600:
+            _discord_429_streak = 0
+        # A simultaneous pile-up of 429s should count as one incident.
+        if now - _discord_last_429_at > 10:
+            _discord_429_streak = min(_discord_429_streak + 1, 5)
+        _discord_last_429_at = now
+        duration = min(
+            DISCORD_BACKOFF_MAX_SECONDS,
+            DISCORD_BACKOFF_START_SECONDS * (2 ** max(0, _discord_429_streak - 1)),
+        )
+    else:
+        duration = 90
+    duration = max(duration, min(_http_retry_after(error), 3600))
+    _discord_unavailable_until = max(_discord_unavailable_until, now + duration)
+
+
+def discord_background_allowed():
+    """Prefer user-initiated commands over periodic Discord history/board work."""
+    return (
+        not discord_requests_paused()
+        and _active_slash_commands == 0
+        and monotonic() - _last_slash_command_at >= DISCORD_BACKGROUND_QUIET_SECONDS
+    )
+
+
+async def wait_for_background_turn(*, foreground=False):
+    """Yield between REST pages; an outage cancels the audit safely."""
+    if discord_requests_paused():
+        raise BackgroundDiscordPaused("Discord API is rate-limited; retry the audit later.")
+    if foreground:
+        return
+    while not discord_background_allowed():
+        if discord_requests_paused():
+            raise BackgroundDiscordPaused("Discord API is rate-limited; retry the audit later.")
+        await asyncio.sleep(0.4)
+
 
 
 def unwrap_command_error(error):
@@ -60,8 +132,7 @@ def concise_error(error):
 def log_error(context, error):
     global _discord_unavailable_until
     now = monotonic()
-    if discord_service_failure(error):
-        _discord_unavailable_until = max(_discord_unavailable_until, now + 60)
+    _register_discord_outage(error)
     context = " ".join(str(context).split())[:180]
     summary = concise_error(error)
     key = (context, summary)
@@ -95,9 +166,42 @@ intents = discord.Intents.default()
 intents.message_content = False
 intents.members = True
 
+class ResponsiveCommandTree(app_commands.CommandTree):
+    """Give slow slash commands their required acknowledgement automatically."""
+
+    async def _call(self, interaction):
+        # Autocomplete must return autocomplete choices, never a deferred reply.
+        if interaction.type == discord.InteractionType.autocomplete:
+            return await super()._call(interaction)
+        global _active_slash_commands, _last_slash_command_at
+        _active_slash_commands += 1
+        _last_slash_command_at = monotonic()
+
+        async def acknowledge_if_slow():
+            try:
+                await asyncio.sleep(1.2)
+                if not interaction.response.is_done() and not discord_requests_paused():
+                    await interaction.response.defer(thinking=True)
+            except asyncio.CancelledError:
+                return
+            except discord.InteractionResponded:
+                return  # A command replied while the defer request was in flight.
+            except Exception as error:
+                log_error("Slow slash-command acknowledgement failed", error)
+
+        acknowledgement = asyncio.create_task(acknowledge_if_slow())
+        try:
+            return await super()._call(interaction)
+        finally:
+            acknowledgement.cancel()
+            _active_slash_commands = max(0, _active_slash_commands - 1)
+            _last_slash_command_at = monotonic()
+
+
 bot = commands.Bot(
     command_prefix="!",
-    intents=intents
+    intents=intents,
+    tree_cls=ResponsiveCommandTree,
 )
 
 # ─────────────────────────────
@@ -607,6 +711,7 @@ def fresh_default_data():
         "last_weekly_activity_audit_date": None,
         "weekly_activity_mod_report": None,
         "tupper_oc_activity": {},
+        "tupper_oc_verified_inactive_through": {},
         "last_high_rank_activity_audit_date": None,
         "high_rank_activity_pending_report": None,
         "honour_tracker_message_id": None,
@@ -623,6 +728,7 @@ def fresh_default_data():
         "aurora_active_until": None,
         "last_aurora_week": None,
         "allegiance_message_ids": {},
+        "allegiance_render_hashes": {},
         "last_moon_snapshot": None,
         "rules_onboarding_reminders": {},
         "active_role_quest": None,
@@ -698,6 +804,19 @@ def save_data(data_to_save):
 
 data = load_data()
 data_lock = asyncio.Lock()
+_db_save_lock = asyncio.Lock()
+
+
+async def save_data_async(data_to_save):
+    """Move Supabase HTTP I/O off the event loop without losing write ordering.
+
+    Most callers already hold data_lock while applying their changes. Deep-copy
+    before releasing it so a future mutation cannot alter an in-flight save.
+    The single save lock prevents overlapping Supabase UPSERTs racing each other.
+    """
+    snapshot = copy.deepcopy(data_to_save)
+    async with _db_save_lock:
+        await asyncio.to_thread(save_data, snapshot)
 
 
 def get_outsider_groups():
@@ -947,14 +1066,14 @@ MMEDICAL_COMMAND_CHANNEL_ID = 1503486789900570784
 
 async def medical_command_check(interaction: discord.Interaction):
     if not is_medical_staff(interaction):
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "You do not have permission to use medical commands.",
             ephemeral=True
         )
         return False
 
     if interaction.channel_id != MEDICAL_COMMAND_CHANNEL_ID:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "Use medical commands in the medical channel only.",
             ephemeral=True
         )
@@ -988,14 +1107,14 @@ def is_staff(interaction: discord.Interaction):
 
 async def staff_command_check(interaction: discord.Interaction):
     if not is_staff(interaction):
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "You do not have permission to use this command.",
             ephemeral=True
         )
         return False
 
     if interaction.channel_id != COMMAND_CHANNEL_ID:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "Use bot commands in the command channel only.",
             ephemeral=True
         )
@@ -1016,14 +1135,14 @@ def is_moderator_or_above(interaction: discord.Interaction):
 async def moderator_command_check(interaction: discord.Interaction):
     """Moderator+ permission gate for sensitive OC economy/profile adjustments."""
     if not is_moderator_or_above(interaction):
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ This command is restricted to Moderators and above.",
             ephemeral=True
         )
         return False
 
     if interaction.channel_id != COMMAND_CHANNEL_ID:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "Use bot commands in the command channel only.",
             ephemeral=True
         )
@@ -1049,7 +1168,7 @@ async def plot_command_check(interaction: discord.Interaction):
         return True
 
     if not is_moderator and not is_plot_manager:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ You do not have permission to use plot commands.",
             ephemeral=True
         )
@@ -1064,7 +1183,7 @@ async def plot_command_check(interaction: discord.Interaction):
             f"<#{allowed_id}>" for allowed_id in sorted(PLOT_MANAGER_CHANNEL_IDS)
         )
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"❌ Use plot commands in one of these channels: {allowed_channels}",
         ephemeral=True
     )
@@ -1369,7 +1488,7 @@ async def run_membership_milestone_check(post_to_channel=True):
     if changed:
         async with data_lock:
             data["last_membership_milestone_check"] = today_key
-            save_data(data)
+            await save_data_async(data)
 
     if post_to_channel and notices:
         channel = bot.get_channel(MEMBERSHIP_MILESTONE_CHANNEL_ID)
@@ -1837,11 +1956,20 @@ def dedupe_recent_history_for_display(history):
     return deduped
 
 
-async def safe_respond(interaction, message, ephemeral=False):
+async def safe_respond(interaction, message=None, ephemeral=False, **kwargs):
+    """Reply normally or finish a command that was deferred while doing I/O."""
     if interaction.response.is_done():
-        await interaction.followup.send(message, ephemeral=ephemeral)
-    else:
-        await interaction.response.send_message(message, ephemeral=ephemeral)
+        return await interaction.followup.send(message, ephemeral=ephemeral, **kwargs)
+    return await interaction.response.send_message(message, ephemeral=ephemeral, **kwargs)
+
+
+async def safe_defer(interaction, **kwargs):
+    """Existing explicit defers and delayed automatic defers can coexist."""
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer(**kwargs)
+        except discord.InteractionResponded:
+            pass
 
 
 async def respond_in_chunks(interaction, message, ephemeral=False):
@@ -2368,7 +2496,7 @@ async def get_allegiance_channel(channel_id):
 
     try:
         return await bot.fetch_channel(channel_id)
-    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+    except (discord.NotFound, discord.Forbidden):
         return None
 
 
@@ -2384,8 +2512,13 @@ async def update_allegiance_channel(channel_id, text, saved_message_ids):
         try:
             message = await channel.fetch_message(int(raw_id))
             old_messages.append(message)
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException, TypeError, ValueError):
+        except discord.NotFound:
+            # An actually deleted message will be recreated below.
             continue
+        except (TypeError, ValueError):
+            continue
+        # Do not mistake a rate-limited fetch for a deleted message: that would
+        # otherwise create duplicates and escalate Discord's restrictions.
 
     new_ids = []
     allowed_mentions = discord.AllowedMentions.none()
@@ -2393,7 +2526,8 @@ async def update_allegiance_channel(channel_id, text, saved_message_ids):
     for index, chunk in enumerate(chunks):
         if index < len(old_messages):
             message = old_messages[index]
-            await message.edit(content=chunk, allowed_mentions=allowed_mentions)
+            if message.content != chunk:
+                await message.edit(content=chunk, allowed_mentions=allowed_mentions)
         else:
             message = await channel.send(chunk, allowed_mentions=allowed_mentions)
         new_ids.append(message.id)
@@ -2401,7 +2535,7 @@ async def update_allegiance_channel(channel_id, text, saved_message_ids):
     for old_message in old_messages[len(chunks):]:
         try:
             await old_message.delete()
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        except discord.NotFound:
             pass
 
     return new_ids
@@ -2418,6 +2552,11 @@ async def refresh_all_allegiances(force=False):
         return {"updated": 0, "errors": [], "skipped": True}
 
     async with allegiance_refresh_lock:
+        if not force and not discord_background_allowed():
+            # This function is also called directly by user commands, so only
+            # suppress work when Discord itself is in a 429 cooldown.
+            if discord_requests_paused():
+                return {"updated": 0, "unchanged": 0, "errors": [], "skipped": True}
         # Render all six boards from one consistent copy of the tracker. /catinfo and
         # Allegiances therefore cannot disagree because a rank/Clan edit happened
         # halfway through rendering multiple channels.
@@ -2445,28 +2584,45 @@ async def refresh_all_allegiances(force=False):
                 print(f"Allegiance placement warning: {problem}")
 
         new_map = copy.deepcopy(existing_map)
-        updated = 0
+        old_hashes = live_data.get("allegiance_render_hashes") or {}
+        if not isinstance(old_hashes, dict):
+            old_hashes = {}
+        new_hashes = dict(old_hashes)
+        updated, unchanged = 0, 0
         errors = []
 
         for channel_id, content in board_text.items():
+            if discord_requests_paused():
+                errors.append("Discord API rate-limited; remaining allegiance boards deferred")
+                break
             key = str(channel_id)
+            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            # Only rely on a fingerprint if it corresponds to already-saved
+            # message IDs. /allegiance refresh (force=True) always verifies them.
+            if (not force and existing_map.get(key)
+                    and old_hashes.get(key) == digest):
+                unchanged += 1
+                continue
             try:
                 new_ids = await update_allegiance_channel(
-                    channel_id,
-                    content,
-                    existing_map.get(key, [])
+                    channel_id, content, existing_map.get(key, [])
                 )
                 new_map[key] = new_ids
+                new_hashes[key] = digest
                 updated += 1
             except Exception as error:
                 errors.append(f"{channel_id}: {concise_error(error)}")
                 log_error(f'Allegiance refresh failed for channel {channel_id}', error)
+                if discord_requests_paused():
+                    break  # No further Discord requests during a surfaced 429.
 
-        async with data_lock:
-            data["allegiance_message_ids"] = new_map
-            save_data(data)
+        if new_map != existing_map or new_hashes != old_hashes:
+            async with data_lock:
+                data["allegiance_message_ids"] = new_map
+                data["allegiance_render_hashes"] = new_hashes
+                await save_data_async(data)
 
-        return {"updated": updated, "errors": errors, "skipped": False}
+        return {"updated": updated, "unchanged": unchanged, "errors": errors, "skipped": False}
 
 
 async def refresh_allegiances_safely(reason=None, force=False):
@@ -2680,7 +2836,7 @@ def build_all_oc_owners():
 async def oc_list_command(interaction: discord.Interaction, user: str = None):
     # This roster is made from the same player links used by /allegiance add.
     # It is safe for members to view because that ownership is already public on Allegiances.
-    await interaction.response.defer()
+    await safe_defer(interaction,)
 
     allowed_mentions = discord.AllowedMentions.none()
 
@@ -2797,21 +2953,21 @@ def resolve_cat_name_casefold(raw_name):
 async def ocowner_command(interaction: discord.Interaction, cat_name: str):
     resolved_name = resolve_cat_name_casefold(cat_name)
     if not resolved_name:
-        await interaction.response.send_message(f"❌ I could not find an OC named **{cat_name}**.")
+        await safe_respond(interaction,f"❌ I could not find an OC named **{cat_name}**.")
         return
 
     cat = data["cats"][resolved_name]
     prepare_cat_record(resolved_name, cat)
 
     if bool(cat.get("is_npc", False)):
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             f"🐾 **{display_cat_name(resolved_name, cat)}** is an NPC and does not have a player owner."
         )
         return
 
     owner_id = oc_owner_id(cat)
     if not owner_id:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             f"❓ **{resolved_name}** does not currently have a saved player owner. Staff can link them with `/allegiance add`."
         )
         return
@@ -2820,7 +2976,7 @@ async def ocowner_command(interaction: discord.Interaction, cat_name: str):
     owner_label = member.mention if member else f"<@{owner_id}>"
     shown_name = allegiance_linked_cat_name(resolved_name, cat)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🐾 {shown_name} is owned by **{owner_label}**.",
         allowed_mentions=discord.AllowedMentions.none()
     )
@@ -3267,7 +3423,7 @@ timeline_group = app_commands.Group(
 async def timeline_view(interaction: discord.Interaction, clan: app_commands.Choice[str] = None):
     text = timeline_full_text(clan.value if clan else None)
     chunks = split_allegiance_text(text, max_length=1850)
-    await interaction.response.send_message(chunks[0])
+    await safe_respond(interaction,chunks[0])
     for chunk in chunks[1:]:
         await interaction.followup.send(chunk)
 
@@ -3284,11 +3440,11 @@ async def timeline_month(
     month_number = timeline_month_number(month)
     year_value = timeline_validate_year(year)
     if month_number is None or year_value is None:
-        await interaction.response.send_message("❌ Please choose a valid month and year.", ephemeral=True)
+        await safe_respond(interaction,"❌ Please choose a valid month and year.", ephemeral=True)
         return
     text = timeline_snapshot_text(month_number, year_value, clan.value if clan else None)
     chunks = split_allegiance_text(text, max_length=1850)
-    await interaction.response.send_message(chunks[0])
+    await safe_respond(interaction,chunks[0])
     for chunk in chunks[1:]:
         await interaction.followup.send(chunk)
 
@@ -3301,7 +3457,7 @@ async def timeline_cat(interaction: discord.Interaction, cat_name: str):
     display_name = resolved_name or str(cat_name).strip()
     entries = timeline_entries_for_cat(display_name)
     if not entries:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             f"📜 **{display_name}** has no documented leadership timeline entries yet."
         )
         return
@@ -3336,7 +3492,7 @@ async def timeline_cat(interaction: discord.Interaction, cat_name: str):
         lines.extend(["", f"💀 **Cause of Death:** {cause}"])
 
     chunks = split_allegiance_text("\n".join(lines), max_length=1850)
-    await interaction.response.send_message(chunks[0])
+    await safe_respond(interaction,chunks[0])
     for chunk in chunks[1:]:
         await interaction.followup.send(chunk)
 
@@ -3373,7 +3529,7 @@ async def timeline_add(
 
     resolved_name = resolve_cat_name_casefold(cat_name)
     if not resolved_name:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             f"❌ **{cat_name}** is not registered in CODY. Add the living, deceased, or NPC cat record first.",
             ephemeral=True,
         )
@@ -3390,20 +3546,20 @@ async def timeline_add(
     }
     validation_error = timeline_validate_candidate(candidate)
     if validation_error:
-        await interaction.response.send_message(validation_error, ephemeral=True)
+        await safe_respond(interaction,validation_error, ephemeral=True)
         return
 
     cat = data["cats"][resolved_name]
     prepare_cat_record(resolved_name, cat)
     if candidate["end_month"] is None:
         if allegiance_tracker_status(cat).casefold() == "dead":
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ **{resolved_name}** is deceased, so their historical term needs an end month and year.",
                 ephemeral=True,
             )
             return
         if not timeline_current_role_matches(cat, candidate["clan"], candidate["position"]):
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ An ongoing timeline term must match the OC's current tracker record. **{resolved_name}** is currently "
                 f"**{cat.get('clan')} {cat.get('rank')}**.",
                 ephemeral=True,
@@ -3412,7 +3568,7 @@ async def timeline_add(
 
     conflict_type, conflicts = timeline_conflicts(candidate)
     if conflict_type:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             timeline_conflict_text(candidate, conflict_type, conflicts),
             ephemeral=True,
         )
@@ -3424,9 +3580,9 @@ async def timeline_add(
         entry["created_by"] = str(interaction.user.id)
         entry["created_at"] = datetime.now(TZ).isoformat()
         data.setdefault("leadership_timeline", []).append(entry)
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"📜 **TIMELINE ENTRY ADDED**\n"
         f"{TIMELINE_POSITION_ICONS.get(entry['position'], '🐾')} {TIMELINE_CLAN_ICONS.get(entry['clan'], '🐾')} **{timeline_display_cat_name(entry['cat_name'])} — {entry['clan']} {entry['position']}**\n"
         f"**Term:** {timeline_period_text(entry)}\n"
@@ -3470,14 +3626,14 @@ async def timeline_edit(
 
     existing = timeline_entry_by_id(entry_id)
     if not existing:
-        await interaction.response.send_message("❌ I couldn't find that timeline entry.", ephemeral=True)
+        await safe_respond(interaction,"❌ I couldn't find that timeline entry.", ephemeral=True)
         return
 
     candidate = copy.deepcopy(existing)
     if cat_name:
         resolved_name = resolve_cat_name_casefold(cat_name)
         if not resolved_name:
-            await interaction.response.send_message(f"❌ **{cat_name}** is not registered in CODY.", ephemeral=True)
+            await safe_respond(interaction,f"❌ **{cat_name}** is not registered in CODY.", ephemeral=True)
             return
         candidate["cat_name"] = resolved_name
     if clan:
@@ -3490,7 +3646,7 @@ async def timeline_edit(
         candidate["start_year"] = start_year
 
     if make_ongoing and (end_month is not None or end_year is not None):
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Use either `make_ongoing:True` or provide an end date, not both.",
             ephemeral=True,
         )
@@ -3502,7 +3658,7 @@ async def timeline_edit(
         new_end_month = timeline_month_number(end_month) if end_month else candidate.get("end_month")
         new_end_year = end_year if end_year is not None else candidate.get("end_year")
         if new_end_month is None or new_end_year is None:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 "❌ To set an end date on an ongoing entry, provide both `end_month` and `end_year`.",
                 ephemeral=True,
             )
@@ -3512,12 +3668,12 @@ async def timeline_edit(
 
     validation_error = timeline_validate_candidate(candidate)
     if validation_error:
-        await interaction.response.send_message(validation_error, ephemeral=True)
+        await safe_respond(interaction,validation_error, ephemeral=True)
         return
 
     resolved_name = resolve_cat_name_casefold(candidate["cat_name"])
     if not resolved_name:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             f"❌ **{candidate['cat_name']}** is no longer registered in CODY. Choose a registered cat before editing this entry.",
             ephemeral=True,
         )
@@ -3527,12 +3683,12 @@ async def timeline_edit(
     prepare_cat_record(resolved_name, cat)
     if candidate["end_month"] is None:
         if allegiance_tracker_status(cat).casefold() == "dead":
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ **{resolved_name}** is deceased, so their term cannot be marked Present.", ephemeral=True
             )
             return
         if not timeline_current_role_matches(cat, candidate["clan"], candidate["position"]):
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ A Present term must match the OC's current tracker record. **{resolved_name}** is currently "
                 f"**{cat.get('clan')} {cat.get('rank')}**.", ephemeral=True
             )
@@ -3540,7 +3696,7 @@ async def timeline_edit(
 
     conflict_type, conflicts = timeline_conflicts(candidate, exclude_id=existing.get("id"))
     if conflict_type:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             timeline_conflict_text(candidate, conflict_type, conflicts), ephemeral=True
         )
         return
@@ -3550,9 +3706,9 @@ async def timeline_edit(
         existing.update(candidate)
         existing["edited_by"] = str(interaction.user.id)
         existing["edited_at"] = datetime.now(TZ).isoformat()
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"✏️ **TIMELINE ENTRY UPDATED**\n"
         f"{TIMELINE_POSITION_ICONS.get(existing['position'], '🐾')} {TIMELINE_CLAN_ICONS.get(existing['clan'], '🐾')} **{timeline_display_cat_name(existing['cat_name'])} — {existing['clan']} {existing['position']}**\n"
         f"**Term:** {timeline_period_text(existing)}\n"
@@ -3568,7 +3724,7 @@ async def timeline_remove(interaction: discord.Interaction, entry_id: str, reaso
         return
     existing = timeline_entry_by_id(entry_id)
     if not existing:
-        await interaction.response.send_message("❌ I couldn't find that timeline entry.", ephemeral=True)
+        await safe_respond(interaction,"❌ I couldn't find that timeline entry.", ephemeral=True)
         return
 
     removed = copy.deepcopy(existing)
@@ -3583,10 +3739,10 @@ async def timeline_remove(interaction: discord.Interaction, entry_id: str, reaso
             "removed_at": datetime.now(TZ).isoformat(),
             "removal_reason": str(reason or "").strip() or None,
         })
-        save_data(data)
+        await save_data_async(data)
 
     reason_line = f"\n**Reason:** {str(reason).strip()}" if str(reason or "").strip() else ""
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🗑️ **TIMELINE ENTRY REMOVED**\n"
         f"{TIMELINE_POSITION_ICONS.get(removed.get('position'), '🐾')} **{timeline_display_cat_name(removed.get('cat_name'))} — {removed.get('clan')} {removed.get('position')}**\n"
         f"**Term:** {timeline_period_text(removed)}{reason_line}"
@@ -3697,20 +3853,21 @@ async def update_honour_tracker_message():
     if saved_message_id:
         try:
             tracker_message = await channel.fetch_message(int(saved_message_id))
-            await tracker_message.edit(content=tracker_text)
+            if tracker_message.content != tracker_text:
+                await tracker_message.edit(content=tracker_text)
             return tracker_message
         except discord.NotFound:
             tracker_message = None
         except discord.Forbidden as error:
             raise RuntimeError("The bot cannot edit the Honour Role tracker message.") from error
-        except (discord.HTTPException, ValueError, TypeError):
+        except (ValueError, TypeError):
             tracker_message = None
 
     tracker_message = await channel.send(tracker_text)
 
     async with data_lock:
         data["honour_tracker_message_id"] = tracker_message.id
-        save_data(data)
+        await save_data_async(data)
 
     return tracker_message
 
@@ -4423,7 +4580,7 @@ async def question(interaction: discord.Interaction):
         usage = data["question_usage"].setdefault(today, 0)
 
         if usage >= 2:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 "❌ The OC question command has already been used twice today. Try again tomorrow!",
                 ephemeral=True
             )
@@ -4443,9 +4600,9 @@ async def question(interaction: discord.Interaction):
         data["used_questions"].append(chosen_question)
         data["question_usage"][today] = usage + 1
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"<@&1503421848329650196> 🌟 **Gather round, mountain cats!** 🌟\n\n"
         f"🐾 **Today’s OC Question:**\n"
         f"**{chosen_question}**\n\n"
@@ -4778,7 +4935,7 @@ async def run_moon_update():
         handle_succession(report)
         handle_medicine_succession(report)
         generate_prophecy(report)
-        save_data(data)
+        await save_data_async(data)
 
         return report
 
@@ -5067,7 +5224,7 @@ async def moontest(interaction: discord.Interaction, target_moon: int):
     current_moon = data.get("moon", 0)
 
     if target_moon <= current_moon:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             f"Please choose a moon higher than the current moon. Current moon is **{current_moon}**.",
             ephemeral=True
         )
@@ -5145,12 +5302,12 @@ async def moontest(interaction: discord.Interaction, target_moon: int):
 
     if channel:
         await send_long_message(channel, message)
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             f"🌙 Moon {target_moon} preview sent.",
             ephemeral=True
         )
     else:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "Command channel not found.",
             ephemeral=True
         )
@@ -5256,7 +5413,7 @@ async def freezecat(
         return
 
     if days is not None and days <= 0:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Days must be 1 or higher. Leave days blank for an indefinite freeze.",
             ephemeral=True
         )
@@ -5267,7 +5424,7 @@ async def freezecat(
         cat = data.get("cats", {}).get(resolved_name)
 
         if not cat:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ Cat '{cat_name}' was not found.",
                 ephemeral=True
             )
@@ -5281,9 +5438,9 @@ async def freezecat(
         age_freeze_text = freeze_remaining_text(cat, "freeze_age", "freeze_age_until")
         hunger_freeze_text = freeze_remaining_text(cat, "freeze_hunger", "freeze_hunger_until")
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"❄️ **{cat_name} freeze settings updated.**\n"
         f"**Age:** {'Frozen ' + age_freeze_text if age_freeze_text else 'Not frozen'}\n"
         f"**Hunger:** {'Frozen ' + hunger_freeze_text if hunger_freeze_text else 'Not frozen'}"
@@ -5316,13 +5473,13 @@ async def freezeuser(
         return
 
     if days is not None and days <= 0:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Days must be 1 or higher. Leave days blank for an indefinite freeze.",
             ephemeral=True
         )
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
 
     member, member_error = await resolve_allegiance_member(interaction.guild, user)
     if member_error:
@@ -5355,7 +5512,7 @@ async def freezeuser(
             affected_names.append(cat_name)
 
         if affected_names:
-            save_data(data)
+            await save_data_async(data)
 
     if not affected_names:
         extra = ""
@@ -7250,7 +7407,7 @@ async def run_automatic_severe_weather(mark_week=True):
             "checked_at": now.isoformat()
         }
         prune_severe_week_results()
-        save_data(data)
+        await save_data_async(data)
 
         snapshot = copy.deepcopy(events)
 
@@ -7300,7 +7457,7 @@ async def trigger_northern_lights(manual=False):
         active_until = now + timedelta(hours=NORTHERN_LIGHTS_DURATION_HOURS)
         data["aurora_active_until"] = active_until.isoformat()
         data["last_aurora_week"] = week
-        save_data(data)
+        await save_data_async(data)
 
     channel = bot.get_channel(WEATHER_CHANNEL_ID)
     if channel is None:
@@ -7588,7 +7745,7 @@ async def ensure_discord_gathering_event(cycle_key, medicine=False):
         saved = data.setdefault(store_key, {}).setdefault(cycle_key, {})
         saved["scheduled_event_id"] = event.id
         saved["scheduled_event_url"] = getattr(event, "url", None)
-        save_data(data)
+        await save_data_async(data)
     return getattr(event, "url", None)
 
 
@@ -7650,7 +7807,7 @@ async def post_gathering_vote(cycle_key, times, medicine=False):
                     "recorded_at": datetime.now(TZ).isoformat()
                 })
                 data["medicine_gathering_history"] = data["medicine_gathering_history"][-24:]
-                save_data(data)
+                await save_data_async(data)
             await ensure_discord_gathering_event(cycle_key, medicine=True)
             return True
 
@@ -7669,7 +7826,7 @@ async def post_gathering_vote(cycle_key, times, medicine=False):
         async with data_lock:
             cycle = data.setdefault("medicine_gathering_cycles", {}).setdefault(cycle_key, {})
             cycle.update({"vote_posted": True, "vote_message_id": message.id, "forced_must_happen": False})
-            save_data(data)
+            await save_data_async(data)
         return True
 
     # Full Clan Gathering.
@@ -7701,7 +7858,7 @@ async def post_gathering_vote(cycle_key, times, medicine=False):
                 "recorded_at": datetime.now(TZ).isoformat()
             })
             data["gathering_history"] = data["gathering_history"][-24:]
-            save_data(data)
+            await save_data_async(data)
         await ensure_discord_gathering_event(cycle_key, medicine=False)
         return True
 
@@ -7719,7 +7876,7 @@ async def post_gathering_vote(cycle_key, times, medicine=False):
     async with data_lock:
         cycle = data.setdefault("gathering_cycles", {}).setdefault(cycle_key, {})
         cycle.update({"vote_posted": True, "vote_message_id": message.id, "forced_must_happen": False})
-        save_data(data)
+        await save_data_async(data)
     return True
 
 
@@ -7786,7 +7943,7 @@ async def finalize_gathering_vote(cycle_key, medicine=False):
                 "recorded_at": datetime.now(TZ).isoformat()
             })
             data[history_key] = data[history_key][-24:]
-            save_data(data)
+            await save_data_async(data)
         event_url = await ensure_discord_gathering_event(cycle_key, medicine=medicine)
         if medicine:
             volunteer_text = (
@@ -7840,7 +7997,7 @@ async def finalize_gathering_vote(cycle_key, medicine=False):
             "recorded_at": datetime.now(TZ).isoformat()
         })
         data[history_key] = data[history_key][-24:]
-        save_data(data)
+        await save_data_async(data)
 
     if medicine:
         result_text = medicine_cancellation_message(outcome, yes_votes, no_votes)
@@ -7904,7 +8061,7 @@ async def send_gathering_reminder(cycle_key, times, medicine=False):
         saved["reminder_sent_at"] = datetime.now(TZ).isoformat()
         if medicine:
             saved["starclan_volunteer_ids"] = sorted(volunteers)
-        save_data(data)
+        await save_data_async(data)
     return True
 
 
@@ -7919,7 +8076,7 @@ async def process_one_gathering_system(now, medicine=False):
                 saved = data.setdefault(store_key, {}).setdefault(cycle_key, {})
                 saved["closed"] = True
                 saved["closed_at"] = now.isoformat()
-                save_data(data)
+                await save_data_async(data)
         return
 
     if now >= times["vote_open"] and now < times["start"] and not cycle.get("vote_posted"):
@@ -8082,7 +8239,7 @@ async def check_rules_onboarding():
                     log_error(f'Could not remove New Member role from {member.id}', error)
 
         if changed:
-            save_data(data)
+            await save_data_async(data)
 
 
 
@@ -9099,7 +9256,7 @@ def choose_hunt_result(location):
 async def hunt_command(interaction: discord.Interaction):
     channel_info = HUNT_CHANNELS.get(interaction.channel_id)
     if not channel_info:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ `/hunt` only works inside Echostone Mountain's designated hunting and territory channels.",
             ephemeral=True
         )
@@ -9109,11 +9266,11 @@ async def hunt_command(interaction: discord.Interaction):
     result = choose_hunt_result(location)
 
     if result["kind"] == "error":
-        await interaction.response.send_message(result["text"], ephemeral=True)
+        await safe_respond(interaction,result["text"], ephemeral=True)
         return
 
     header_icon = "⚠️" if result["kind"] == "threat" else channel_info["emoji"]
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"{header_icon} **Hunt — {location}**\n\n{result['text']}",
         allowed_mentions=discord.AllowedMentions.none()
     )
@@ -9135,7 +9292,7 @@ async def feast_command(
     if not await moderator_command_check(interaction):
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
 
     target_clans = [clan.value] if clan is not None else list(CLAN_NAMES_ONLY)
     successes = []
@@ -9214,11 +9371,15 @@ _ambient_hazard_last_checked_memory = {}
 @tasks.loop(hours=1)
 async def ambient_hunt_hazards():
     """Rare ambient hazards in special non-hunting locations, only after recent RP activity."""
+    if not discord_background_allowed():
+        return
     now = datetime.now(TZ)
     since = now - timedelta(hours=1)
     hour_key = now.strftime("%Y-%m-%dT%H")
 
     for channel_id, hazard in AMBIENT_HUNT_HAZARDS.items():
+        if not discord_background_allowed():
+            return
         key = str(channel_id)
 
         async with data_lock:
@@ -9280,7 +9441,7 @@ async def ambient_hunt_hazards():
 
         async with data_lock:
             data.setdefault("ambient_hazard_last_triggered", {})[key] = now.isoformat()
-            save_data(data)
+            await save_data_async(data)
 
         print(f"Triggered ambient hunt hazard {hazard.get('name')} in {channel_id}.")
 
@@ -9334,7 +9495,7 @@ async def on_ready():
             broadened_quests = broaden_current_hunting_quests_once()
             rollout_role_quests = ensure_role_quest_rollout_once()
             if broadened_quests or rollout_role_quests:
-                save_data(data)
+                await save_data_async(data)
 
         quest_channel = bot.get_channel(QUEST_CHANNEL_ID)
         if quest_channel and broadened_quests:
@@ -9379,7 +9540,7 @@ async def on_ready():
     if not ambient_hunt_hazards.is_running():
         ambient_hunt_hazards.start()
 
-    if _startup_boards_refreshed or discord_requests_paused():
+    if _startup_boards_refreshed or not discord_background_allowed():
         return
     boards_ok = True
     try:
@@ -9460,7 +9621,7 @@ async def add_litter(
         cats = data.get("cats", {})
 
         if mother not in cats:
-            await interaction.response.send_message("Mother cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Mother cat not found.", ephemeral=True)
             return
 
         kit_names = [name for name in [kit1, kit2, kit3, kit4, kit5, kit6] if name]
@@ -9468,7 +9629,7 @@ async def add_litter(
         missing_kits = [kit_name for kit_name in kit_names if kit_name not in cats]
 
         if missing_kits:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"These kits are not in the records yet: {', '.join(missing_kits)}\n"
                 f"Add them first with `/add`, then use `/addlitter`.",
                 ephemeral=True
@@ -9483,9 +9644,9 @@ async def add_litter(
         litter_text = ", ".join(kit_names)
         add_history(cats[mother], f"Had a litter: {litter_text}")
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🍼 Litter recorded for **{mother}**:\n"
         + "\n".join([f"• {kit_name}" for kit_name in kit_names])
     )
@@ -9505,9 +9666,9 @@ async def resetmoon(interaction: discord.Interaction, moon: int = 4):
             if str(cat.get("status", "Alive")).lower() != "dead":
                 cat["age"] = max(0, cat.get("age", 0) + difference)
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(f"🌙 Moon set to {moon} and all living ages adjusted by {difference} moons.")
+    await safe_respond(interaction,f"🌙 Moon set to {moon} and all living ages adjusted by {difference} moons.")
 
 @bot.tree.command(name="revertmoon", description="Staff only. Revert to the saved state before the last moon advance")
 @app_commands.describe(
@@ -9518,7 +9679,7 @@ async def revertmoon(interaction: discord.Interaction, confirm: str):
         return
 
     if confirm != "YES":
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "⚠️ This will restore the bot to the saved state before the last moon advance.\n"
             "Run `/revertmoon confirm: YES` if you are sure.",
             ephemeral=True
@@ -9529,7 +9690,7 @@ async def revertmoon(interaction: discord.Interaction, confirm: str):
         snapshot = data.get("last_moon_snapshot")
 
         if not snapshot:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 "❌ No moon snapshot was found. I can only revert a moon after `/advancemoon` has saved a snapshot.",
                 ephemeral=True
             )
@@ -9544,9 +9705,9 @@ async def revertmoon(interaction: discord.Interaction, confirm: str):
         # Keep a copy so you do not lose the ability to inspect/revert info immediately
         data["last_moon_snapshot"] = snapshot
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"↩️ Moon reverted successfully.\n"
         f"Restored from **Moon {current_moon}** back to **Moon {snapshot_moon}**.",
         ephemeral=True
@@ -9568,7 +9729,7 @@ async def prophecy_post(interaction: discord.Interaction, text: str):
 
     async with data_lock:
         data["active_prophecy"] = text
-        save_data(data)
+        await save_data_async(data)
 
     message = (
         f"{prophecy_role_mentions()}\n"
@@ -9580,12 +9741,12 @@ async def prophecy_post(interaction: discord.Interaction, text: str):
 
     if channel:
         await send_long_message(channel, message)
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "🌙 Custom prophecy posted and saved as the active prophecy.",
             ephemeral=True
         )
     else:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "Could not find the report channel.",
             ephemeral=True
         )
@@ -9608,15 +9769,15 @@ async def prophecy_pause(interaction: discord.Interaction, current_prophecy: str
             get_saved_active_prophecy()
 
         active_prophecy = data.get("active_prophecy")
-        save_data(data)
+        await save_data_async(data)
 
     if active_prophecy:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             f"🌙 Prophecy rolls are now paused. The active prophecy will remain:\n\n{active_prophecy}",
             ephemeral=True
         )
     else:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "🌙 Prophecy rolls are now paused. No active prophecy was found, so no new prophecy will roll until `/prophecy unpause` is used.",
             ephemeral=True
         )
@@ -9629,9 +9790,9 @@ async def prophecy_unpause(interaction: discord.Interaction):
 
     async with data_lock:
         data["prophecies_paused"] = False
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         "🌙 Prophecy rolls are no longer paused. The next moon report can roll a new prophecy.",
         ephemeral=True
     )
@@ -9646,7 +9807,7 @@ async def prophecy_status(interaction: discord.Interaction):
     active_prophecy = data.get("active_prophecy") or "None saved."
     status_text = "Paused" if paused else "Rolling normally"
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🌙 **Prophecy Status:** {status_text}\n"
         f"**Active Prophecy:** {active_prophecy}",
         ephemeral=True
@@ -9658,7 +9819,7 @@ async def advance_moon(interaction: discord.Interaction):
     if not await staff_command_check(interaction):
         return
 
-    await interaction.response.defer()
+    await safe_defer(interaction,)
 
     report = await run_moon_update()
     story_message = await build_clan_report_text(report)
@@ -9852,7 +10013,7 @@ async def botinfo(interaction: discord.Interaction):
         "🌟 Tip: If records seem broken, check `/catinfo` first before editing anything."
     )
 
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
 
     max_length = 1900
     while message:
@@ -9899,7 +10060,7 @@ async def allegiance_add_command(
     if not await staff_command_check(interaction):
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
 
     member, member_error = await resolve_allegiance_member(interaction.guild, user)
     if member_error:
@@ -9947,9 +10108,9 @@ async def allegiance_add_command(
         cat["oc_owner_id"] = str(member.id)
         cat["oc_owner_name"] = member.display_name
         cat["character_sheet_url"] = sheet_url
-        save_data(data)
+        await save_data_async(data)
 
-    result = await refresh_allegiances_safely("/allegiance add", force=True)
+    result = await refresh_allegiances_safely("/allegiance add")
     error_note = ""
     if result.get("errors"):
         error_note = "\n⚠️ The record saved, but one or more allegiance channels could not be updated. Send the error to the bot owner."
@@ -9972,7 +10133,7 @@ async def allegiance_addnpc_command(interaction: discord.Interaction, cat_name: 
     if not await staff_command_check(interaction):
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
 
     async with data_lock:
         cats = data.get("cats", {})
@@ -10010,9 +10171,9 @@ async def allegiance_addnpc_command(interaction: discord.Interaction, cat_name: 
         cat["oc_owner_id"] = None
         cat["oc_owner_name"] = None
         cat["character_sheet_url"] = None
-        save_data(data)
+        await save_data_async(data)
 
-    result = await refresh_allegiances_safely("/allegiance addnpc", force=True)
+    result = await refresh_allegiances_safely("/allegiance addnpc")
     error_note = ""
     if result.get("errors"):
         error_note = "\n⚠️ The NPC was saved, but one or more allegiance channels could not be updated. Send the error to the bot owner."
@@ -10035,7 +10196,7 @@ async def allegiance_remove_command(interaction: discord.Interaction, cat_name: 
     if not await staff_command_check(interaction):
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
 
     async with data_lock:
         cats = data.get("cats", {})
@@ -10066,9 +10227,9 @@ async def allegiance_remove_command(interaction: discord.Interaction, cat_name: 
         cat["allegiance_owner_name"] = None
         cat["character_sheet_url"] = None
         cat["allegiance_npc"] = False
-        save_data(data)
+        await save_data_async(data)
 
-    result = await refresh_allegiances_safely("/allegiance remove", force=True)
+    result = await refresh_allegiances_safely("/allegiance remove")
     error_note = ""
     if result.get("errors"):
         error_note = " One or more allegiance channels could not be refreshed."
@@ -10083,7 +10244,7 @@ async def allegiance_refresh_command(interaction: discord.Interaction):
     if not await staff_command_check(interaction):
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
     result = await refresh_allegiances_safely("/allegiance refresh", force=True)
 
     if result.get("errors"):
@@ -10108,14 +10269,14 @@ async def outsider_group_add_command(interaction: discord.Interaction, name: str
 
     clean_name = name.strip()
     if not clean_name:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Outsider group name cannot be blank.",
             ephemeral=True
         )
         return
 
     if len(clean_name) > 80:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Keep Outsider group names to 80 characters or fewer.",
             ephemeral=True
         )
@@ -10125,7 +10286,7 @@ async def outsider_group_add_command(interaction: discord.Interaction, name: str
         existing = get_outsider_groups()
         if any(group.casefold() == clean_name.casefold() for group in existing):
             matched = next(group for group in existing if group.casefold() == clean_name.casefold())
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ **{matched}** already exists as an Outsider group.",
                 ephemeral=True
             )
@@ -10133,9 +10294,9 @@ async def outsider_group_add_command(interaction: discord.Interaction, name: str
 
         # This also un-retires a previously deleted built-in group with the same name.
         activate_outsider_group_name(clean_name)
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🌫️ Added **{clean_name}** as a new Outsider group. It can now be selected when adding Outsider cats or NPCs."
     )
 
@@ -10144,7 +10305,7 @@ async def change_outsider_cat_group(interaction, cat_name, group, command_label)
     """Shared implementation for /outsidergroup assign and /outsidergroup change."""
     resolved_group = resolve_outsider_group(group)
     if resolved_group is None:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ That Outsider group does not exist. Add it first with `/outsidergroup add`.",
             ephemeral=True
         )
@@ -10153,19 +10314,19 @@ async def change_outsider_cat_group(interaction, cat_name, group, command_label)
     async with data_lock:
         cats = data.get("cats", {})
         if cat_name not in cats:
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         cat = cats[cat_name]
         if cat.get("clan") != "Outsider":
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ **{cat_name}** is not recorded as an Outsider.",
                 ephemeral=True
             )
             return
 
         if cat.get("rank") == "Kittypet":
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 "❌ Kittypets cannot be assigned to an Outsider group.",
                 ephemeral=True
             )
@@ -10173,7 +10334,7 @@ async def change_outsider_cat_group(interaction, cat_name, group, command_label)
 
         old_group = str(cat.get("faction") or "").strip() or None
         if old_group and old_group.casefold() == resolved_group.casefold():
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"ℹ️ **{cat_name}** is already part of **{resolved_group}**.",
                 ephemeral=True
             )
@@ -10181,9 +10342,9 @@ async def change_outsider_cat_group(interaction, cat_name, group, command_label)
 
         cat["faction"] = resolved_group
         add_history(cat, f"Outsider group changed from {old_group or 'None'} to {resolved_group}")
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🌫️ **{cat_name}** moved from **{old_group or 'Unaffiliated'}** to **{resolved_group}**."
     )
     await refresh_allegiances_safely(command_label)
@@ -10228,7 +10389,7 @@ async def outsider_group_rename_command(
 
     resolved_group = resolve_outsider_group(group)
     if resolved_group is None:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ That Outsider group does not exist.",
             ephemeral=True
         )
@@ -10236,19 +10397,19 @@ async def outsider_group_rename_command(
 
     clean_new_name = str(new_name or "").strip()
     if not clean_new_name:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ The new group name cannot be blank.",
             ephemeral=True
         )
         return
     if len(clean_new_name) > 80:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Keep Outsider group names to 80 characters or fewer.",
             ephemeral=True
         )
         return
     if resolved_group.casefold() == clean_new_name.casefold():
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             f"ℹ️ **{resolved_group}** already has that name.",
             ephemeral=True
         )
@@ -10260,7 +10421,7 @@ async def outsider_group_rename_command(
         None
     )
     if duplicate:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             f"❌ **{duplicate}** already exists. Use `/outsidergroup change` to move individual cats into it instead.",
             ephemeral=True
         )
@@ -10268,13 +10429,13 @@ async def outsider_group_rename_command(
 
     async with data_lock:
         affected = rename_outsider_group_records(resolved_group, clean_new_name)
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"✏️ Renamed **{resolved_group}** to **{clean_new_name}**. "
         f"Updated **{affected}** cat{'s' if affected != 1 else ''} automatically."
     )
-    await refresh_allegiances_safely("Outsider group rename", force=True)
+    await refresh_allegiances_safely("Outsider group rename")
 
 
 @outsider_group.command(name="delete", description="Delete an Outsider group and make its cats unaffiliated")
@@ -10289,7 +10450,7 @@ async def outsider_group_delete_command(
 
     resolved_group = resolve_outsider_group(group)
     if resolved_group is None:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ That Outsider group does not exist.",
             ephemeral=True
         )
@@ -10297,7 +10458,7 @@ async def outsider_group_delete_command(
 
     async with data_lock:
         affected = delete_outsider_group_records(resolved_group)
-        save_data(data)
+        await save_data_async(data)
 
     if affected:
         cat_note = (
@@ -10307,16 +10468,16 @@ async def outsider_group_delete_command(
     else:
         cat_note = " No cats were assigned to it."
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🗑️ Deleted the Outsider group **{resolved_group}**.{cat_note}"
     )
-    await refresh_allegiances_safely("Outsider group deletion", force=True)
+    await refresh_allegiances_safely("Outsider group deletion")
 
 
 @outsider_group.command(name="list", description="List all available Outsider groups")
 async def outsider_group_list_command(interaction: discord.Interaction):
     groups = get_outsider_groups()
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         "🌫️ **Outsider Groups**\n" + "\n".join(f"• {group}" for group in groups),
         ephemeral=True
     )
@@ -10344,12 +10505,12 @@ async def npc_add_command(
         return
 
     if age < 0:
-        await interaction.response.send_message("❌ Age cannot be negative.", ephemeral=True)
+        await safe_respond(interaction,"❌ Age cannot be negative.", ephemeral=True)
         return
 
     faction_value = resolve_outsider_group(faction) if faction else None
     if faction and faction_value is None:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ That Outsider group does not exist. Add it first with `/outsidergroup add`.",
             ephemeral=True
         )
@@ -10357,12 +10518,12 @@ async def npc_add_command(
 
     validation_error = validate_cat_rank(clan.value, rank.value, faction_value)
     if validation_error:
-        await interaction.response.send_message(validation_error, ephemeral=True)
+        await safe_respond(interaction,validation_error, ephemeral=True)
         return
 
     async with data_lock:
         if name in data.get("cats", {}):
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 "❌ That cat already exists. Use `/npc convert` to turn an existing cat into an NPC.",
                 ephemeral=True
             )
@@ -10384,9 +10545,9 @@ async def npc_add_command(
             "last_fed": None,
             "last_hunger_update": None
         }
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🐾 Added **{name} (NPC)** to **{clan.value}** as **{rank.value}** at **{age} moons**."
     )
 
@@ -10417,12 +10578,12 @@ async def npc_adddead_command(
         return
 
     if age < 0:
-        await interaction.response.send_message("❌ Age cannot be negative.", ephemeral=True)
+        await safe_respond(interaction,"❌ Age cannot be negative.", ephemeral=True)
         return
 
     group_value = resolve_outsider_group(group) if group else None
     if group and group_value is None:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ That Outsider group does not exist. Add it first with `/outsidergroup add`.",
             ephemeral=True
         )
@@ -10430,13 +10591,13 @@ async def npc_adddead_command(
 
     validation_error = validate_cat_rank(clan.value, rank.value, group_value)
     if validation_error:
-        await interaction.response.send_message(validation_error, ephemeral=True)
+        await safe_respond(interaction,validation_error, ephemeral=True)
         return
 
     async with data_lock:
         cats = data.setdefault("cats", {})
         if name in cats:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 "❌ That cat already exists. If they are a living NPC, use `/npc markdead` instead.",
                 ephemeral=True
             )
@@ -10464,11 +10625,11 @@ async def npc_adddead_command(
             "last_fed": None,
             "last_hunger_update": None
         }
-        save_data(data)
+        await save_data_async(data)
 
     group_line = f"\n🌫️ Outsider Group: {group_value}" if group_value else ""
     cause_line = f"\n🩸 Cause of Death: {cause}" if cause else ""
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"💀 Added deceased NPC **{name} (NPC)**\n"
         f"⛺ Clan: {clan.value}\n"
         f"⚔ Rank at death: {rank.value}\n"
@@ -10487,14 +10648,14 @@ async def npc_convert_command(interaction: discord.Interaction, cat_name: str):
     async with data_lock:
         cats = data.get("cats", {})
         if cat_name not in cats:
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         cat = cats[cat_name]
         prepare_cat_record(cat_name, cat)
 
         if cat.get("is_npc"):
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ **{cat_name}** is already an NPC.",
                 ephemeral=True
             )
@@ -10502,9 +10663,9 @@ async def npc_convert_command(interaction: discord.Interaction, cat_name: str):
 
         cat["is_npc"] = True
         add_history(cat, "Changed to NPC status")
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🐾 **{cat_name}** is now marked as **{cat_name} (NPC)** on rosters. Their hunger will no longer decay."
     )
     await refresh_allegiances_safely("NPC conversion")
@@ -10529,21 +10690,21 @@ async def npc_markdead_command(
     async with data_lock:
         cats = data.get("cats", {})
         if cat_name not in cats:
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         cat = cats[cat_name]
         prepare_cat_record(cat_name, cat)
 
         if not cat.get("is_npc"):
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ **{cat_name}** is not marked as an NPC. Use `/cat markdead` for regular OCs.",
                 ephemeral=True
             )
             return
 
         if cat_is_dead(cat):
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ **{cat_name} (NPC)** is already deceased.",
                 ephemeral=True
             )
@@ -10560,9 +10721,9 @@ async def npc_markdead_command(
         else:
             add_history(cat, f"Died and went to {afterlife.value}")
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"💀 **{cat_name} (NPC)** has died and gone to **{afterlife.value}**."
     )
 
@@ -10604,7 +10765,7 @@ async def plot_member_command(
     if not await plot_command_check(interaction):
         return
 
-    await interaction.response.defer()
+    await safe_defer(interaction,)
 
     async with data_lock:
         cats = data.get("cats", {})
@@ -10678,7 +10839,7 @@ async def plot_member_command(
                 return
 
         plot_members[cat_name] = new_record
-        save_data(data)
+        await save_data_async(data)
 
     action = "updated on" if old_record else "added to"
     await interaction.edit_original_response(
@@ -10692,7 +10853,7 @@ async def plot_remove_command(interaction: discord.Interaction, cat_name: str):
     if not await plot_command_check(interaction):
         return
 
-    await interaction.response.defer()
+    await safe_defer(interaction,)
 
     async with data_lock:
         plot_members = data.setdefault("plot_members", {})
@@ -10704,7 +10865,7 @@ async def plot_remove_command(interaction: discord.Interaction, cat_name: str):
             return
 
         del plot_members[cat_name]
-        save_data(data)
+        await save_data_async(data)
 
     await interaction.edit_original_response(
         content=f"🧹 **{cat_name}** has been removed from the plot roster."
@@ -10716,7 +10877,7 @@ async def plot_roster_command(interaction: discord.Interaction):
     if not await plot_command_check(interaction):
         return
 
-    await interaction.response.defer()
+    await safe_defer(interaction,)
 
     async with data_lock:
         cats = copy.deepcopy(data.get("cats", {}))
@@ -10818,14 +10979,14 @@ async def condition_add_command(
     clean_condition = condition.strip()
 
     if not clean_condition:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ The permanent status cannot be blank.",
             ephemeral=True
         )
         return
 
     if len(clean_condition) > 100:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Keep the permanent status to 100 characters or fewer.",
             ephemeral=True
         )
@@ -10835,7 +10996,7 @@ async def condition_add_command(
         cats = data.get("cats", {})
 
         if cat_name not in cats:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ Cat '{cat_name}' was not found.",
                 ephemeral=True
             )
@@ -10846,7 +11007,7 @@ async def condition_add_command(
         conditions = normalize_permanent_conditions(cat)
 
         if any(saved.casefold() == clean_condition.casefold() for saved in conditions):
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ **{cat_name}** already has **{clean_condition}** listed as a permanent status.",
                 ephemeral=True
             )
@@ -10854,9 +11015,9 @@ async def condition_add_command(
 
         conditions.append(clean_condition)
         cat["permanent_conditions"] = conditions
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"♾️ Added **{clean_condition}** as a permanent status for **{cat_name}**."
     )
 
@@ -10877,7 +11038,7 @@ async def condition_remove_command(
     clean_condition = condition.strip()
 
     if not clean_condition:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Enter the permanent status you want to remove.",
             ephemeral=True
         )
@@ -10887,7 +11048,7 @@ async def condition_remove_command(
         cats = data.get("cats", {})
 
         if cat_name not in cats:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ Cat '{cat_name}' was not found.",
                 ephemeral=True
             )
@@ -10903,7 +11064,7 @@ async def condition_remove_command(
 
         if matching_condition is None:
             current_text = ", ".join(conditions) if conditions else "None"
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ **{cat_name}** does not have **{clean_condition}** listed.\n"
                 f"**Current permanent status:** {current_text}",
                 ephemeral=True
@@ -10914,9 +11075,9 @@ async def condition_remove_command(
             saved for saved in conditions
             if saved.casefold() != matching_condition.casefold()
         ]
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🧹 Removed **{matching_condition}** from **{cat_name}**'s permanent status."
     )
 
@@ -10931,7 +11092,7 @@ async def condition_clear_command(interaction: discord.Interaction, cat_name: st
         cats = data.get("cats", {})
 
         if cat_name not in cats:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ Cat '{cat_name}' was not found.",
                 ephemeral=True
             )
@@ -10942,7 +11103,7 @@ async def condition_clear_command(interaction: discord.Interaction, cat_name: st
         conditions = normalize_permanent_conditions(cat)
 
         if not conditions:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ **{cat_name}** has no permanent status conditions to clear.",
                 ephemeral=True
             )
@@ -10950,9 +11111,9 @@ async def condition_clear_command(interaction: discord.Interaction, cat_name: st
 
         removed_text = ", ".join(conditions)
         cat["permanent_conditions"] = []
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🧹 Cleared all permanent statuses from **{cat_name}**.\n"
         f"**Removed:** {removed_text}"
     )
@@ -10972,7 +11133,7 @@ async def honour_role_command(
     if not await staff_command_check(interaction):
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
     role_category = role.value
 
     async with data_lock:
@@ -11043,7 +11204,7 @@ async def honour_role_command(
 
         cat["honour_role"] = display_role
         add_history(cat, f"Earned the Honour Role {display_role}")
-        save_data(data)
+        await save_data_async(data)
 
     await interaction.edit_original_response(
         content=(
@@ -11101,7 +11262,7 @@ async def honour_remove_command(interaction: discord.Interaction, cat_name: str)
     if not await staff_command_check(interaction):
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
 
     async with data_lock:
         cats = data.get("cats", {})
@@ -11125,7 +11286,7 @@ async def honour_remove_command(interaction: discord.Interaction, cat_name: str)
 
         cat["honour_role"] = None
         add_history(cat, f"Honour Role {old_role} removed")
-        save_data(data)
+        await save_data_async(data)
 
     try:
         await asyncio.wait_for(
@@ -11148,7 +11309,7 @@ async def honour_tracker_command(interaction: discord.Interaction):
     if not await staff_command_check(interaction):
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
 
     try:
         tracker_message = await asyncio.wait_for(
@@ -11178,7 +11339,7 @@ async def hiatus_add(interaction: discord.Interaction, user_id: str, days: int):
         return
 
     if days < 1:
-        await interaction.response.send_message("Hiatus must be at least 1 day.", ephemeral=True)
+        await safe_respond(interaction,"Hiatus must be at least 1 day.", ephemeral=True)
         return
 
     end_date = datetime.now(TZ) + timedelta(days=days)
@@ -11193,7 +11354,7 @@ async def hiatus_add(interaction: discord.Interaction, user_id: str, days: int):
             "guild_id": guild_id
         }
 
-        save_data(data)
+        await save_data_async(data)
 
     role_success, role_message = await update_hiatus_roles(interaction.guild, user_id, on_hiatus=True)
 
@@ -11207,7 +11368,7 @@ async def hiatus_add(interaction: discord.Interaction, user_id: str, days: int):
     else:
         response += f"\n⚠️ Hiatus was saved, but roles were not changed: {role_message}"
 
-    await interaction.response.send_message(response)
+    await safe_respond(interaction,response)
 
 
 @hiatus_group.command(name="end", description="Manually end a hiatus using a raw Discord user ID")
@@ -11220,14 +11381,14 @@ async def hiatus_end(interaction: discord.Interaction, user_id: str):
         data.setdefault("hiatuses", {})
 
         if user_id not in data["hiatuses"]:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"<@{user_id}> is not currently listed as on hiatus.",
                 ephemeral=True
             )
             return
 
         del data["hiatuses"][user_id]
-        save_data(data)
+        await save_data_async(data)
 
     role_success, role_message = await update_hiatus_roles(interaction.guild, user_id, on_hiatus=False)
 
@@ -11238,7 +11399,7 @@ async def hiatus_end(interaction: discord.Interaction, user_id: str):
     else:
         response += f"\n⚠️ Hiatus was ended, but roles were not changed: {role_message}"
 
-    await interaction.response.send_message(response)
+    await safe_respond(interaction,response)
 
 @hiatus_group.command(name="all", description="View everyone currently on hiatus")
 async def hiatus_all(interaction: discord.Interaction):
@@ -11252,7 +11413,7 @@ async def hiatus_all(interaction: discord.Interaction):
         hiatuses = data["hiatuses"]
 
         if not hiatuses:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 "✅ No one is currently on hiatus.",
                 ephemeral=True
             )
@@ -11276,7 +11437,7 @@ async def hiatus_all(interaction: discord.Interaction):
                 f"(returns **{end_date.strftime('%B %d, %Y')}**)"
             )
 
-    await interaction.response.send_message("\n".join(lines)[:1900])
+    await safe_respond(interaction,"\n".join(lines)[:1900])
 
 @hiatus_group.command(name="edit", description="Edit how long a current hiatus lasts")
 @app_commands.describe(
@@ -11288,14 +11449,14 @@ async def hiatus_edit(interaction: discord.Interaction, user_id: str, days: int)
         return
 
     if days < 1:
-        await interaction.response.send_message("Hiatus must be at least 1 day.", ephemeral=True)
+        await safe_respond(interaction,"Hiatus must be at least 1 day.", ephemeral=True)
         return
 
     async with data_lock:
         data.setdefault("hiatuses", {})
 
         if user_id not in data["hiatuses"]:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"<@{user_id}> is not currently listed as on hiatus.",
                 ephemeral=True
             )
@@ -11306,9 +11467,9 @@ async def hiatus_edit(interaction: discord.Interaction, user_id: str, days: int)
         data["hiatuses"][user_id]["days"] = days
         data["hiatuses"][user_id]["end_date"] = end_date.date().isoformat()
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"✏️ <@{user_id}>'s hiatus has been updated to **{days} day(s)** from today.\n"
         f"They are now set to return on **{end_date.strftime('%B %d, %Y')}**."
     )
@@ -11397,13 +11558,13 @@ async def train_apprentice_autocomplete(interaction: discord.Interaction, curren
 async def train_command(interaction: discord.Interaction, cat_name: str, scene_link: str = None):
     resolved = resolve_cat_name_casefold(cat_name)
     if not resolved:
-        await interaction.response.send_message("❌ I couldn't find that registered OC.", ephemeral=True)
+        await safe_respond(interaction,"❌ I couldn't find that registered OC.", ephemeral=True)
         return
 
     if scene_link:
         scene_link = str(scene_link).strip()
         if not re.match(r"^https://(?:www\.)?(?:discord\.com|discordapp\.com)/channels/\d+/\d+(?:/\d+)?(?:[/?#].*)?$", scene_link, flags=re.I):
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 "❌ Please link the completed Discord training scene/thread (or a message in it), or leave `scene_link` blank.",
                 ephemeral=True,
             )
@@ -11412,7 +11573,7 @@ async def train_command(interaction: discord.Interaction, cat_name: str, scene_l
     async with data_lock:
         cat = data["cats"].get(resolved)
         if cat is None or cat_is_dead(cat) or cat.get("rank") != "Apprentice" or bool(cat.get("is_npc", False)):
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 "❌ `/train` is for living, player-owned **Apprentice** OCs (not Medicine Cat Apprentices).",
                 ephemeral=True,
             )
@@ -11425,7 +11586,7 @@ async def train_command(interaction: discord.Interaction, cat_name: str, scene_l
         if scene_link and any(
             str(item.get("scene_link") or "") == scene_link for item in sessions if isinstance(item, dict)
         ):
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"🐾 That scene is already recorded for **{resolved}**. "
                 f"Training sessions: **{len(sessions)}/{APPRENTICE_TRAINING_MINIMUM}**.",
                 ephemeral=True,
@@ -11440,7 +11601,7 @@ async def train_command(interaction: discord.Interaction, cat_name: str, scene_l
         age = int(cat.get("age", 0) or 0)
         if count == APPRENTICE_TRAINING_MINIMUM:
             add_history(cat, f"Completed the minimum {APPRENTICE_TRAINING_MINIMUM} training sessions")
-        save_data(data)
+        await save_data_async(data)
 
     response = (
         f"🐾 **Training Recorded — {resolved}**\n"
@@ -11461,7 +11622,7 @@ async def train_command(interaction: discord.Interaction, cat_name: str, scene_l
     else:
         response += f"Keep it up — {APPRENTICE_TRAINING_MINIMUM - count} more session(s) until the training requirement is met."
     response += "\n-# Please only record your own OCs' completed training scenes."
-    await interaction.response.send_message(response)
+    await safe_respond(interaction,response)
 
 
 # ─────────────────────────────
@@ -11491,13 +11652,13 @@ async def cat_add(
 
     async with data_lock:
         if name in data["cats"]:
-            await interaction.response.send_message("That cat already exists.", ephemeral=True)
+            await safe_respond(interaction,"That cat already exists.", ephemeral=True)
             return
 
         faction_value = resolve_outsider_group(faction) if faction else None
 
         if faction and faction_value is None:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 "❌ That Outsider group does not exist. Add it first with `/outsidergroup add`.",
                 ephemeral=True
             )
@@ -11505,7 +11666,7 @@ async def cat_add(
 
         validation_error = validate_cat_rank(clan.value, rank.value, faction_value)
         if validation_error:
-            await interaction.response.send_message(validation_error, ephemeral=True)
+            await safe_respond(interaction,validation_error, ephemeral=True)
             return
 
         data["cats"][name] = {
@@ -11521,9 +11682,9 @@ async def cat_add(
             "exclude_from_tinder": False
         }
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🐾 Added **{name}**\n\n"
         f"⛺ Clan: {clan.value}\n"
         f"⚔ Rank: {rank.value}\n"
@@ -11538,17 +11699,17 @@ async def cat_age(interaction: discord.Interaction, name: str, age: int):
 
     async with data_lock:
         if name not in data["cats"]:
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         data["cats"][name]["age"] = age
         add_history(data["cats"][name], f"Age changed to {age} moons")
         ready = apprentice_assessment_ready(data["cats"][name])
-        save_data(data)
+        await save_data_async(data)
 
     note = ("\n⚔ Their training is complete and they're ready for a Warrior Assessment, "
             "which can be roleplayed or arranged off-screen with staff.") if ready else ""
-    await interaction.response.send_message(f"🌙 **{name}** is now **{age} moons** old.{note}")
+    await safe_respond(interaction,f"🌙 **{name}** is now **{age} moons** old.{note}")
 
 
 @cat_group.command(name="rank", description="Change a cat's rank")
@@ -11563,7 +11724,7 @@ async def cat_rank(interaction: discord.Interaction, name: str, rank: app_comman
 
     async with data_lock:
         if name not in data["cats"]:
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         cat = data["cats"][name]
@@ -11572,13 +11733,13 @@ async def cat_rank(interaction: discord.Interaction, name: str, rank: app_comman
 
         validation_error = validate_cat_rank(cat.get("clan"), rank.value, cat.get("faction"))
         if validation_error:
-            await interaction.response.send_message(validation_error, ephemeral=True)
+            await safe_respond(interaction,validation_error, ephemeral=True)
             return
 
         if old_rank == "Apprentice" and rank.value == "Warrior":
             promotion_problem = apprentice_promotion_problem(cat)
             if promotion_problem:
-                await interaction.response.send_message(promotion_problem, ephemeral=True)
+                await safe_respond(interaction,promotion_problem, ephemeral=True)
                 return
 
         cat["rank"] = rank.value
@@ -11624,14 +11785,14 @@ async def cat_rank(interaction: discord.Interaction, name: str, rank: app_comman
                 add_history(mentor_cat, f"Former apprentice {name} became a Warrior")
 
         add_history(cat, f"Rank changed to {rank.value}")
-        save_data(data)
+        await save_data_async(data)
 
     response = f"⚔ **{name}** is now **{rank.value}**."
 
     if honour_role_note:
         response += f"\n🏅 {honour_role_note}"
 
-    await interaction.response.send_message(response)
+    await safe_respond(interaction,response)
 
     if honour_role_changed:
         try:
@@ -11670,7 +11831,7 @@ async def changeclan(
         cats = data.get("cats", {})
 
         if cat_name not in cats:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ Cat '{cat_name}' was not found.",
                 ephemeral=True
             )
@@ -11705,13 +11866,13 @@ async def changeclan(
             validation_error = validate_cat_rank(selected_clan, selected_rank, cat.get("faction"))
 
         if validation_error:
-            await interaction.response.send_message(validation_error, ephemeral=True)
+            await safe_respond(interaction,validation_error, ephemeral=True)
             return
 
         if old_rank == "Apprentice" and selected_rank == "Warrior":
             promotion_problem = apprentice_promotion_problem(cat)
             if promotion_problem:
-                await interaction.response.send_message(promotion_problem, ephemeral=True)
+                await safe_respond(interaction,promotion_problem, ephemeral=True)
                 return
 
         old_mentor = cat.get("mentor")
@@ -11749,7 +11910,7 @@ async def changeclan(
         if old_rank != selected_rank:
             add_history(cat, f"Rank changed to {selected_rank}")
 
-        save_data(data)
+        await save_data_async(data)
 
     response_lines = [
         f"⛺ **{cat_name}** has been moved.",
@@ -11766,7 +11927,7 @@ async def changeclan(
             f"🏅 Their Honour Role **{honour_role_removed}** was removed because Honour Roles belong to the Clan where they were earned."
         )
 
-    await interaction.response.send_message("\n".join(response_lines))
+    await safe_respond(interaction,"\n".join(response_lines))
 
     if honour_role_removed:
         try:
@@ -11784,11 +11945,11 @@ async def cat_rename(interaction: discord.Interaction, old_name: str, new_name: 
 
     async with data_lock:
         if old_name not in data["cats"]:
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         if new_name in data["cats"]:
-            await interaction.response.send_message("That new name already exists.", ephemeral=True)
+            await safe_respond(interaction,"That new name already exists.", ephemeral=True)
             return
 
         data["cats"][new_name] = data["cats"].pop(old_name)
@@ -11797,6 +11958,9 @@ async def cat_rename(interaction: discord.Interaction, old_name: str, new_name: 
 
         tupper_history = data.setdefault("tupper_oc_activity", {})
         old_key, new_key = old_name.casefold(), new_name.casefold()
+        verified = data.setdefault("tupper_oc_verified_inactive_through", {})
+        verified.pop(old_key, None)
+        verified.pop(new_key, None)
         if old_key in tupper_history:
             previous = tupper_history.pop(old_key)
             existing = tupper_history.get(new_key)
@@ -11828,9 +11992,9 @@ async def cat_rename(interaction: discord.Interaction, old_name: str, new_name: 
                     for relative in family[relation]
                 ]
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(f"✏️ Renamed **{old_name} → {new_name}**")
+    await safe_respond(interaction,f"✏️ Renamed **{old_name} → {new_name}**")
     await refresh_allegiances_safely("cat rename")
 
 
@@ -11852,7 +12016,7 @@ async def cat_markdead(
 
     async with data_lock:
         if name not in data["cats"]:
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         cat = data["cats"][name]
@@ -11867,9 +12031,9 @@ async def cat_markdead(
         else:
             add_history(cat, f"Died and went to {afterlife.value}")
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"💀 **{name}** has been sent to **{afterlife.value}**."
     )
 
@@ -11918,12 +12082,12 @@ async def cat_adddead(
 
     async with data_lock:
         if name in data["cats"]:
-            await interaction.response.send_message("That cat already exists.", ephemeral=True)
+            await safe_respond(interaction,"That cat already exists.", ephemeral=True)
             return
 
         validation_error = validate_cat_rank(clan.value, rank.value, None)
         if validation_error:
-            await interaction.response.send_message(validation_error, ephemeral=True)
+            await safe_respond(interaction,validation_error, ephemeral=True)
             return
 
         data["cats"][name] = {
@@ -11946,9 +12110,9 @@ async def cat_adddead(
             "exclude_from_tinder": True
         }
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"💀 Added deceased cat **{name}**\n"
         f"⛺ Clan: {clan.value}\n"
         f"⚔ Rank at death: {rank.value}\n"
@@ -11976,11 +12140,11 @@ async def cat_cause_of_death(
 
     resolved_name = resolve_cat_name_casefold(name)
     if not resolved_name:
-        await interaction.response.send_message("Cat not found.", ephemeral=True)
+        await safe_respond(interaction,"Cat not found.", ephemeral=True)
         return
 
     if clear and str(cause or "").strip():
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Use either `cause` to save a cause of death or `clear:True` to remove it, not both.",
             ephemeral=True
         )
@@ -11991,7 +12155,7 @@ async def cat_cause_of_death(
         prepare_cat_record(resolved_name, cat)
 
         if allegiance_tracker_status(cat).casefold() != "dead":
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ **{timeline_display_cat_name(resolved_name)}** is still alive. Cause of death can only be saved for deceased cats.",
                 ephemeral=True
             )
@@ -12002,13 +12166,13 @@ async def cat_cause_of_death(
         if clear:
             cat["cause_of_death"] = None
             add_history(cat, "Cause of death record cleared")
-            save_data(data)
+            await save_data_async(data)
             response = f"🧹 Cleared the saved cause of death for **{timeline_display_cat_name(resolved_name)}**."
         elif str(cause or "").strip():
             clean_cause = str(cause).strip()
             cat["cause_of_death"] = clean_cause
             add_history(cat, f"Cause of death recorded as {clean_cause}")
-            save_data(data)
+            await save_data_async(data)
             response = (
                 f"💀 **Cause of Death Updated**\n"
                 f"**{timeline_display_cat_name(resolved_name)}:** {clean_cause}\n"
@@ -12020,7 +12184,7 @@ async def cat_cause_of_death(
                 f"**Cause of Death:** {current or 'Not recorded'}"
             )
 
-    await interaction.response.send_message(response)
+    await safe_respond(interaction,response)
 
 
 @cat_group.command(name="delete", description="Delete a cat permanently")
@@ -12032,7 +12196,7 @@ async def cat_delete(interaction: discord.Interaction, name: str):
 
     async with data_lock:
         if name not in data["cats"]:
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         had_honour_role = bool(data["cats"][name].get("honour_role"))
@@ -12057,9 +12221,9 @@ async def cat_delete(interaction: discord.Interaction, name: str):
 
         del data["cats"][name]
         data.setdefault("plot_members", {}).pop(name, None)
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🗑 Deleted **{name}** permanently and removed related records."
     )
 
@@ -12079,25 +12243,25 @@ async def cat_delayceremony(interaction: discord.Interaction, name: str, moons: 
         return
 
     if moons < 1:
-        await interaction.response.send_message("Delay must be at least 1 moon.", ephemeral=True)
+        await safe_respond(interaction,"Delay must be at least 1 moon.", ephemeral=True)
         return
 
     async with data_lock:
         if name not in data.get("cats", {}):
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         cat = data["cats"][name]
 
         if cat_is_dead(cat):
-            await interaction.response.send_message("Dead cats cannot have ceremonies delayed.", ephemeral=True)
+            await safe_respond(interaction,"Dead cats cannot have ceremonies delayed.", ephemeral=True)
             return
 
         cat["ceremony_delay"] = moons
         add_history(cat, f"Ceremony delayed by {moons} moon(s)")
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"⏳ **{name}**'s ceremony has been delayed by **{moons} moon(s)**."
     )
 
@@ -12115,7 +12279,7 @@ async def cat_tinderhide(interaction: discord.Interaction, name: str, hidden: bo
         cats = data.get("cats", {})
 
         if name not in cats:
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         cats[name]["exclude_from_tinder"] = hidden
@@ -12127,9 +12291,9 @@ async def cat_tinderhide(interaction: discord.Interaction, name: str, hidden: bo
             add_history(cats[name], "Included in Cat Tinder again")
             message = f"💕 **{name}** can now appear in Cat Tinder searches again."
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(message)
+    await safe_respond(interaction,message)
 
 @cat_group.command(name="clearhistorymoon", description="Delete cat history entries from a specific moon")
 @app_commands.describe(
@@ -12145,7 +12309,7 @@ async def cat_clear_history_moon(
         return
 
     if moon < 0:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "Moon number must be 0 or higher.",
             ephemeral=True
         )
@@ -12158,7 +12322,7 @@ async def cat_clear_history_moon(
 
         if cat_name:
             if cat_name not in cats:
-                await interaction.response.send_message(
+                await safe_respond(interaction,
                     f"Cat not found: **{cat_name}**",
                     ephemeral=True
                 )
@@ -12173,9 +12337,9 @@ async def cat_clear_history_moon(
             ]
 
             removed_count = old_count - len(cat["history"])
-            save_data(data)
+            await save_data_async(data)
 
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"🧹 Removed **{removed_count}** history entr{'y' if removed_count == 1 else 'ies'} from **{cat_name}** for **Moon {moon}**.",
                 ephemeral=True
             )
@@ -12198,9 +12362,9 @@ async def cat_clear_history_moon(
                 total_removed += removed_count
                 affected_cats += 1
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🧹 Removed **{total_removed}** history entr{'y' if total_removed == 1 else 'ies'} from **Moon {moon}** across **{affected_cats}** cat{'s' if affected_cats != 1 else ''}.",
         ephemeral=True
     )
@@ -12228,18 +12392,18 @@ async def injury_add(
         return
 
     if severity < 1 or severity > 10:
-        await interaction.response.send_message("Severity must be between 1 and 10.", ephemeral=True)
+        await safe_respond(interaction,"Severity must be between 1 and 10.", ephemeral=True)
         return
 
     async with data_lock:
         if name not in data.get("cats", {}):
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         cat = data["cats"][name]
 
         if cat_is_dead(cat):
-            await interaction.response.send_message("Dead cats cannot be injured.", ephemeral=True)
+            await safe_respond(interaction,"Dead cats cannot be injured.", ephemeral=True)
             return
 
         injury_moon = moon if moon is not None else data.get("moon", 0)
@@ -12264,13 +12428,13 @@ async def injury_add(
         }
 
         add_history(cat, f"Injured/ill: {injury} | Severity {severity}/10 | Moon {injury_moon}")
-        save_data(data)
+        await save_data_async(data)
 
     reduction_note = ""
     if role_quest_reduction_applied:
         reduction_note = f"\n🌟 Role Quest reward applied: severity reduced from **{original_severity}** to **{severity}**."
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🩹 **{name}** now has **{injury}**.\n"
         f"Severity: **{severity}/10, {severity_label(severity)}**\n"
         f"Injury Moon: **Moon {injury_moon}**"
@@ -12297,13 +12461,13 @@ async def injury_remove(
 
     async with data_lock:
         if name not in data.get("cats", {}):
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         cat = data["cats"][name]
 
         if not cat.get("injury"):
-            await interaction.response.send_message(f"{name} has no injury to remove.", ephemeral=True)
+            await safe_respond(interaction,f"{name} has no injury to remove.", ephemeral=True)
             return
 
         old_injury = cat["injury"].get("type", "Unknown injury")
@@ -12319,9 +12483,9 @@ async def injury_remove(
             ]
             response = f"🧹 Deleted **{old_injury}** from **{name}**'s records."
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(response)
+    await safe_respond(interaction,response)
 
 
 @injury_group.command(name="severity", description="Override a cat's injury severity")
@@ -12330,27 +12494,27 @@ async def injury_severity(interaction: discord.Interaction, name: str, severity:
         return
 
     if severity < 1 or severity > 10:
-        await interaction.response.send_message("Severity must be between 1 and 10.", ephemeral=True)
+        await safe_respond(interaction,"Severity must be between 1 and 10.", ephemeral=True)
         return
 
     async with data_lock:
         if name not in data.get("cats", {}):
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         cat = data["cats"][name]
 
         if not cat.get("injury"):
-            await interaction.response.send_message(f"{name} has no injury to update.", ephemeral=True)
+            await safe_respond(interaction,f"{name} has no injury to update.", ephemeral=True)
             return
 
         cat["injury"]["severity"] = severity
         cat["injury"]["last_recovery_update"] = datetime.now(TZ).isoformat()
 
         add_history(cat, f"Injury severity changed to {severity}/10, {severity_label(severity)}")
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🩹 **{name}**'s injury severity is now **{severity}/10, {severity_label(severity)}**."
     )
 
@@ -12362,13 +12526,13 @@ async def injury_moon(interaction: discord.Interaction, name: str, moon: int):
 
     async with data_lock:
         if name not in data.get("cats", {}):
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         cat = data["cats"][name]
 
         if not cat.get("injury"):
-            await interaction.response.send_message(f"{name} has no injury to update.", ephemeral=True)
+            await safe_respond(interaction,f"{name} has no injury to update.", ephemeral=True)
             return
 
         injury_name = cat["injury"].get("type", "Unknown injury")
@@ -12389,9 +12553,9 @@ async def injury_moon(interaction: discord.Interaction, name: str, moon: int):
 
         cat["history"] = updated_history
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(f"🌙 **{name}**'s injury moon is now **Moon {moon}**.")
+    await safe_respond(interaction,f"🌙 **{name}**'s injury moon is now **Moon {moon}**.")
 
 # ─────────────────────────────
 # /MEDICAL COMMANDS
@@ -12431,7 +12595,7 @@ async def medical_report(
             injured_cats.append((cat.get("clan", "Unknown"), name, cat, severity, last_treated_days, last_recovery_days))
 
         if not injured_cats:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 "💚 No cats currently need medical treatment.",
                 ephemeral=True
             )
@@ -12466,7 +12630,7 @@ async def medical_report(
 
         message = "\n".join(lines)
 
-    await interaction.response.send_message("🩺 Medical report posted.", ephemeral=True)
+    await safe_respond(interaction,"🩺 Medical report posted.", ephemeral=True)
 
     channel = interaction.channel
     await send_long_message(channel, message)
@@ -12493,17 +12657,17 @@ async def medical_treat(
 
     async with data_lock:
         if name not in data.get("cats", {}):
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         cat = data["cats"][name]
 
         if cat_is_dead(cat):
-            await interaction.response.send_message("Dead cats cannot receive medical treatment.", ephemeral=True)
+            await safe_respond(interaction,"Dead cats cannot receive medical treatment.", ephemeral=True)
             return
 
         if not cat.get("injury"):
-            await interaction.response.send_message(f"**{name}** has no current injury or illness.", ephemeral=True)
+            await safe_respond(interaction,f"**{name}** has no current injury or illness.", ephemeral=True)
             return
 
         injury = cat["injury"]
@@ -12532,9 +12696,9 @@ async def medical_treat(
             add_history(cat, history_text)
             response = f"🩹 **{name}** received care for **{injury_name}** and is still recovering."
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(response)
+    await safe_respond(interaction,response)
 
 
 # ─────────────────────────────
@@ -12569,22 +12733,22 @@ async def mentor_assign(interaction: discord.Interaction, apprentice: str, mento
         cats = data.get("cats", {})
 
         if apprentice not in cats:
-            await interaction.response.send_message("Apprentice not found.", ephemeral=True)
+            await safe_respond(interaction,"Apprentice not found.", ephemeral=True)
             return
 
         if mentor not in cats:
-            await interaction.response.send_message("Mentor not found.", ephemeral=True)
+            await safe_respond(interaction,"Mentor not found.", ephemeral=True)
             return
 
         app_cat = cats[apprentice]
         mentor_cat = cats[mentor]
 
         if cat_is_dead(app_cat) or cat_is_dead(mentor_cat):
-            await interaction.response.send_message("Dead cats cannot be assigned as mentors/apprentices.", ephemeral=True)
+            await safe_respond(interaction,"Dead cats cannot be assigned as mentors/apprentices.", ephemeral=True)
             return
 
         if app_cat.get("rank") not in ["Apprentice", "Medicine Cat Apprentice"]:
-            await interaction.response.send_message(f"{apprentice} is not an apprentice.", ephemeral=True)
+            await safe_respond(interaction,f"{apprentice} is not an apprentice.", ephemeral=True)
             return
 
         valid_mentor_ranks = [
@@ -12601,7 +12765,7 @@ async def mentor_assign(interaction: discord.Interaction, apprentice: str, mento
         ]
 
         if mentor_cat.get("rank") not in valid_mentor_ranks:
-            await interaction.response.send_message(f"{mentor} cannot mentor apprentices.", ephemeral=True)
+            await safe_respond(interaction,f"{mentor} cannot mentor apprentices.", ephemeral=True)
             return
 
         old_mentor = app_cat.get("mentor")
@@ -12634,9 +12798,9 @@ async def mentor_assign(interaction: discord.Interaction, apprentice: str, mento
         add_history(app_cat, f"Assigned {mentor} as mentor")
         add_history(mentor_cat, f"Became mentor to {apprentice}")
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(f"🐾 **{mentor}** is now mentoring **{apprentice}**.")
+    await safe_respond(interaction,f"🐾 **{mentor}** is now mentoring **{apprentice}**.")
     await refresh_allegiances_safely("mentor assignment")
 
 
@@ -12649,11 +12813,11 @@ async def mentor_previous(interaction: discord.Interaction, name: str, mentor: s
         cats = data.get("cats", {})
 
         if name not in cats:
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         if mentor not in cats:
-            await interaction.response.send_message("Mentor not found.", ephemeral=True)
+            await safe_respond(interaction,"Mentor not found.", ephemeral=True)
             return
 
         cat = cats[name]
@@ -12664,7 +12828,7 @@ async def mentor_previous(interaction: discord.Interaction, name: str, mentor: s
 
         current_mentor = cat.get("mentor")
         if current_mentor and name_matches(current_mentor, mentor):
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"🐾 **{mentor}** is already **{name}**'s current mentor.",
                 ephemeral=True
             )
@@ -12674,7 +12838,7 @@ async def mentor_previous(interaction: discord.Interaction, name: str, mentor: s
         added_past_apprentice = add_unique_name(mentor_cat, "past_apprentices", name)
 
         if not added_previous_mentor and not added_past_apprentice:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"🐾 **{mentor}** is already listed as **{name}**'s previous mentor.",
                 ephemeral=True
             )
@@ -12686,9 +12850,9 @@ async def mentor_previous(interaction: discord.Interaction, name: str, mentor: s
         add_history(cat, f"{mentor} added as a previous mentor")
         add_history(mentor_cat, f"{name} added as a previous apprentice")
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🐾 **{mentor}** is now listed as **{name}**'s previous mentor."
     )
 
@@ -12702,11 +12866,11 @@ async def mentor_remove(interaction: discord.Interaction, apprentice: str, mento
         cats = data.get("cats", {})
 
         if apprentice not in cats:
-            await interaction.response.send_message("Apprentice/cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Apprentice/cat not found.", ephemeral=True)
             return
 
         if mentor not in cats:
-            await interaction.response.send_message("Mentor not found.", ephemeral=True)
+            await safe_respond(interaction,"Mentor not found.", ephemeral=True)
             return
 
         app_cat = cats[apprentice]
@@ -12736,9 +12900,9 @@ async def mentor_remove(interaction: discord.Interaction, apprentice: str, mento
         remove_mentor_history_between(app_cat, mentor)
         remove_mentor_history_between(mentor_cat, apprentice)
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🧹 Removed mentor records between **{apprentice}** and **{mentor}**."
     )
     await refresh_allegiances_safely("mentor removal")
@@ -12754,18 +12918,18 @@ async def relationship_mate(interaction: discord.Interaction, cat1: str, cat2: s
         return
 
     if cat1 == cat2:
-        await interaction.response.send_message("A cat cannot be mates with themselves.", ephemeral=True)
+        await safe_respond(interaction,"A cat cannot be mates with themselves.", ephemeral=True)
         return
 
     async with data_lock:
         cats = data.get("cats", {})
 
         if cat1 not in cats:
-            await interaction.response.send_message("First cat not found.", ephemeral=True)
+            await safe_respond(interaction,"First cat not found.", ephemeral=True)
             return
 
         if cat2 not in cats:
-            await interaction.response.send_message("Second cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Second cat not found.", ephemeral=True)
             return
 
         cats[cat1].setdefault("mates", [])
@@ -12783,9 +12947,9 @@ async def relationship_mate(interaction: discord.Interaction, cat1: str, cat2: s
         add_history(cats[cat1], f"Became mates with {cat2}")
         add_history(cats[cat2], f"Became mates with {cat1}")
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(f"💕 **{cat1}** and **{cat2}** are now mates.")
+    await safe_respond(interaction,f"💕 **{cat1}** and **{cat2}** are now mates.")
 
 
 @relationship_group.command(name="breakup", description="Break up two mates and mark them as ex-mates")
@@ -12797,11 +12961,11 @@ async def relationship_breakup(interaction: discord.Interaction, cat1: str, cat2
         cats = data.get("cats", {})
 
         if cat1 not in cats:
-            await interaction.response.send_message("First cat not found.", ephemeral=True)
+            await safe_respond(interaction,"First cat not found.", ephemeral=True)
             return
 
         if cat2 not in cats:
-            await interaction.response.send_message("Second cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Second cat not found.", ephemeral=True)
             return
 
         remove_from_list(cats[cat1], "mates", cat2)
@@ -12819,9 +12983,9 @@ async def relationship_breakup(interaction: discord.Interaction, cat1: str, cat2
         add_history(cats[cat1], f"Broke up with {cat2}")
         add_history(cats[cat2], f"Broke up with {cat1}")
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(f"💔 **{cat1}** and **{cat2}** are now ex-mates.")
+    await safe_respond(interaction,f"💔 **{cat1}** and **{cat2}** are now ex-mates.")
 
 
 @relationship_group.command(name="family", description="Add a family relation between two cats")
@@ -12848,18 +13012,18 @@ async def relationship_family(
         cats = data.get("cats", {})
 
         if name not in cats:
-            await interaction.response.send_message("First cat not found.", ephemeral=True)
+            await safe_respond(interaction,"First cat not found.", ephemeral=True)
             return
 
         if relative not in cats:
-            await interaction.response.send_message("Second cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Second cat not found.", ephemeral=True)
             return
 
         relation_value = relation.value
 
         if relation_value == "Other":
             if not custom_relation or not custom_reverse_relation:
-                await interaction.response.send_message(
+                await safe_respond(interaction,
                     "When using Other, please fill in both custom_relation and custom_reverse_relation.\n"
                     "Example: Rabbitpaw → Uncle: Sher, Sher → Nephew: Rabbitpaw",
                     ephemeral=True
@@ -12877,9 +13041,9 @@ async def relationship_family(
         add_history(cats[name], f"Family relation added: {relative} as {relation_value}")
         add_history(cats[relative], f"Family relation added: {name} as {reverse_relation}")
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"👪 Family relation added:\n"
         f"**{name}** → {relation_value}: **{relative}**\n"
         f"**{relative}** → {reverse_relation}: **{name}**"
@@ -12905,11 +13069,11 @@ async def relationship_remove(
         cats = data.get("cats", {})
 
         if cat1 not in cats:
-            await interaction.response.send_message("First cat not found.", ephemeral=True)
+            await safe_respond(interaction,"First cat not found.", ephemeral=True)
             return
 
         if cat2 not in cats:
-            await interaction.response.send_message("Second cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Second cat not found.", ephemeral=True)
             return
 
         relation_value = relation.strip()
@@ -12947,9 +13111,9 @@ async def relationship_remove(
         add_history(cats[cat1], f"Removed relationship with {cat2}: {relation_value}")
         add_history(cats[cat2], f"Removed relationship with {cat1}: {relation_value}")
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🧹 Removed **{relation_value}** relationship between **{cat1}** and **{cat2}**."
     )
 
@@ -12963,19 +13127,19 @@ async def relationship_clearhistory(interaction: discord.Interaction, cat1: str,
         cats = data.get("cats", {})
 
         if cat1 not in cats:
-            await interaction.response.send_message("First cat not found.", ephemeral=True)
+            await safe_respond(interaction,"First cat not found.", ephemeral=True)
             return
 
         if cat2 not in cats:
-            await interaction.response.send_message("Second cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Second cat not found.", ephemeral=True)
             return
 
         remove_relationship_history_between(cats[cat1], cat2)
         remove_relationship_history_between(cats[cat2], cat1)
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🧹 Cleared relationship history between **{cat1}** and **{cat2}**."
     )
 
@@ -12989,7 +13153,7 @@ async def relationship_removeall(interaction: discord.Interaction, name: str):
         cats = data.get("cats", {})
 
         if name not in cats:
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         target_cat = cats[name]
@@ -13027,9 +13191,9 @@ async def relationship_removeall(interaction: discord.Interaction, name: str):
 
         add_history(target_cat, "All relationship records removed")
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🧹 Removed all relationship records for **{name}**."
     )
 # ─────────────────────────────
@@ -13046,21 +13210,21 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
     cats = data.get("cats", {})
 
     if name not in cats:
-        await interaction.response.send_message("Cat not found.", ephemeral=True)
+        await safe_respond(interaction,"Cat not found.", ephemeral=True)
         return
 
     seeker = cats[name]
 
     if cat_is_dead(seeker):
-        await interaction.response.send_message("Dead cats cannot use Cat Tinder.", ephemeral=True)
+        await safe_respond(interaction,"Dead cats cannot use Cat Tinder.", ephemeral=True)
         return
 
     if cat_is_tinder_hidden(seeker):
-        await interaction.response.send_message("This cat is hidden from Cat Tinder.", ephemeral=True)
+        await safe_respond(interaction,"This cat is hidden from Cat Tinder.", ephemeral=True)
         return
 
     if seeker.get("mates"):
-        await interaction.response.send_message("Cats who already have mates cannot use Cat Tinder.", ephemeral=True)
+        await safe_respond(interaction,"Cats who already have mates cannot use Cat Tinder.", ephemeral=True)
         return
 
     seeker_age = int(seeker.get("age", 0))
@@ -13068,7 +13232,7 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
     selected_clan = clan.value
 
     if seeker_age < 6:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "Cats under 6 moons are too young for Cat Tinder.",
             ephemeral=True
         )
@@ -13221,7 +13385,7 @@ async def cattinder(interaction: discord.Interaction, name: str, clan: app_comma
 
     chunks.append(full_message)
 
-    await interaction.response.send_message(chunks[0])
+    await safe_respond(interaction,chunks[0])
 
     for chunk in chunks[1:]:
         await interaction.followup.send(chunk)
@@ -13249,7 +13413,7 @@ async def weekly_weather_report():
         details["week"] = this_week
         data["last_weather_week"] = this_week
         data["current_weather"] = details
-        save_data(data)
+        await save_data_async(data)
 
     channel = bot.get_channel(WEATHER_CHANNEL_ID)
     if channel:
@@ -13309,28 +13473,28 @@ async def severeweather_trigger_command(
         return
 
     if not event_name.strip():
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Event name cannot be blank.",
             ephemeral=True
         )
         return
 
     if primary_modifier < -10 or primary_modifier > 0:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Primary modifier must be between **-10 and 0**.",
             ephemeral=True
         )
         return
 
     if secondary_modifier < -10 or secondary_modifier > 0:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Secondary modifier must be between **-10 and 0**.",
             ephemeral=True
         )
         return
 
     if duration_days < 1 or duration_days > 30:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Duration must be between **1 and 30 days**.",
             ephemeral=True
         )
@@ -13346,14 +13510,14 @@ async def severeweather_trigger_command(
             include_empty_outsider=True
         ) if secondary_targets else []
     except ValueError as error:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             f"❌ {concise_error(error)}",
             ephemeral=True
         )
         return
 
     if not primary_entities:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Choose at least one primary target.",
             ephemeral=True
         )
@@ -13376,7 +13540,7 @@ async def severeweather_trigger_command(
         else "hunting"
     )
 
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
     now = datetime.now(TZ)
     week = severe_week_key(now)
 
@@ -13433,7 +13597,7 @@ async def severeweather_trigger_command(
             "checked_at": now.isoformat()
         }
         prune_severe_week_results()
-        save_data(data)
+        await save_data_async(data)
 
     posted = await post_severe_weather_events([event_record], forced=False)
 
@@ -13469,7 +13633,7 @@ async def severeweather_roll_command(interaction: discord.Interaction):
     if not await staff_command_check(interaction):
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
     result = await run_automatic_severe_weather(mark_week=True)
 
     if result.get("already_handled"):
@@ -13509,13 +13673,13 @@ async def severeweather_roll_command(interaction: discord.Interaction):
     description="View currently active severe-weather effects and the Northern Lights."
 )
 async def severeweather_active_command(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
     now = datetime.now(TZ)
 
     async with data_lock:
         changed = cleanup_expired_severe_weather(now)
         if changed:
-            save_data(data)
+            await save_data_async(data)
 
         active = copy.deepcopy(data.get("active_severe_weather", []))
         aurora_until = data.get("aurora_active_until")
@@ -13609,7 +13773,7 @@ async def severeweather_modifier_command(
     target_entity = resolve_severe_target_name(target)
 
     if not target_entity:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Target not found. Use a Clan name or saved Outsider group name.",
             ephemeral=True
         )
@@ -13622,7 +13786,7 @@ async def severeweather_modifier_command(
     )
 
     if not matches:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             f"🌤️ No active severe-weather **{roll_type.value}** modifier applies to "
             f"**{target_entity['label']}** at **{location}**.",
             ephemeral=True
@@ -13634,7 +13798,7 @@ async def severeweather_modifier_command(
         for match in matches
     ]
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"⚠️ **Severe Weather Modifier**\n"
         f"**Target:** {target_entity['label']}\n"
         f"**Location:** {location}\n"
@@ -13677,7 +13841,7 @@ async def severeweather_effect_command(
         return
 
     if modifier < -10 or modifier > 0:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Modifier must be between **-10 and 0**.",
             ephemeral=True
         )
@@ -13685,13 +13849,13 @@ async def severeweather_effect_command(
 
     entity = resolve_severe_target_name(target)
     if not entity:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Target not found. Use a Clan name or saved Outsider group name.",
             ephemeral=True
         )
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
     now = datetime.now(TZ)
     week = severe_week_key(now)
 
@@ -13755,7 +13919,7 @@ async def severeweather_effect_command(
             }
             prune_severe_week_results()
 
-        save_data(data)
+        await save_data_async(data)
 
     channel = bot.get_channel(WEATHER_CHANNEL_ID)
     if channel:
@@ -13802,7 +13966,7 @@ async def severeweather_end_command(
         )
 
         if matching is None:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 "❌ Active severe-weather event not found.",
                 ephemeral=True
             )
@@ -13812,9 +13976,9 @@ async def severeweather_end_command(
             event for event in active
             if event is not matching
         ]
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"✅ Ended **{matching.get('name', 'Severe Weather')}** early.\n"
         "Its monthly disaster history remains recorded so the automatic system will not immediately replace it.",
         ephemeral=True
@@ -13829,7 +13993,7 @@ async def severeweather_aurora_command(interaction: discord.Interaction):
     if not await staff_command_check(interaction):
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
     triggered = await trigger_northern_lights(manual=True)
 
     if triggered:
@@ -13970,7 +14134,7 @@ def has_role_id(interaction: discord.Interaction, role_id: int):
 
 async def quest_force_check(interaction: discord.Interaction):
     if not has_role_id(interaction, QUEST_FORCE_ROLE_ID):
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "You do not have permission to force new quests.",
             ephemeral=True
         )
@@ -15353,7 +15517,7 @@ async def quest_reminders():
 
         data["quest_reminders_sent_v2"][reminder_key] = True
         message = build_quest_reminder(days_remaining)
-        save_data(data)
+        await save_data_async(data)
 
     channel = bot.get_channel(QUEST_CHANNEL_ID)
 
@@ -15466,7 +15630,7 @@ async def migrate_active_quests_to_monthly_schedule():
 
         data["quest_reminders_sent_v2"] = {}
         data["monthly_quest_schedule_migrated_v1"] = True
-        save_data(data)
+        await save_data_async(data)
 
         if changed:
             print(f"Migrated active quests to the monthly schedule. New due date: {next_due.isoformat()}")
@@ -15506,7 +15670,7 @@ async def monthly_quest_report():
         data["last_quest_period_v2"] = quest_period
         data["quest_reminders_sent_v2"] = {}
         message = build_quest_announcement(due_at=due_at)
-        save_data(data)
+        await save_data_async(data)
 
     channel = bot.get_channel(QUEST_CHANNEL_ID)
 
@@ -15985,7 +16149,7 @@ async def quest_progress(interaction: discord.Interaction):
 
     message = "📊 **Monthly Quest Progress**\n\n" + "\n\n━━━━━━━━━━━━━━━\n\n".join(blocks)
     chunks = split_allegiance_text(message, max_length=1850)
-    await interaction.response.send_message(chunks[0])
+    await safe_respond(interaction,chunks[0])
     for chunk in chunks[1:]:
         await interaction.followup.send(chunk)
 
@@ -15996,7 +16160,7 @@ async def quest_progress(interaction: discord.Interaction):
     prey="What they caught, for example mouse, trout, frog, sparrow, or vole"
 )
 async def quest_catch(interaction: discord.Interaction, cat_name: str, prey: str):
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
     completion_announcement = None
 
     async with data_lock:
@@ -16139,7 +16303,7 @@ async def quest_catch(interaction: discord.Interaction, cat_name: str, prey: str
                 + f"🎁 **Reward:** {reward_text}"
             )
 
-        save_data(data)
+        await save_data_async(data)
 
     if completion_announcement:
         channel = bot.get_channel(QUEST_CHANNEL_ID)
@@ -16193,7 +16357,7 @@ async def quest_contribute(interaction: discord.Interaction, cat_name: str):
         )
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
     recorded = []
     skipped = []
 
@@ -16259,7 +16423,7 @@ async def quest_contribute(interaction: discord.Interaction, cat_name: str):
             recorded.append((resolved_name, group_name, balance))
 
         if recorded:
-            save_data(data)
+            await save_data_async(data)
 
     lines = []
     if recorded:
@@ -16288,7 +16452,7 @@ async def quest_contribute(interaction: discord.Interaction, cat_name: str):
 @quest_group.command(name="perks", description="View every Connection Token perk and its cost")
 async def quest_perks(interaction: discord.Interaction):
     chunks = split_allegiance_text(connection_perk_catalog_text(), max_length=1850)
-    await interaction.response.send_message(chunks[0])
+    await safe_respond(interaction,chunks[0])
     for chunk in chunks[1:]:
         await interaction.followup.send(chunk)
 
@@ -16303,22 +16467,22 @@ async def quest_add_tokens(interaction: discord.Interaction, cat_name: str, amou
     if not await moderator_command_check(interaction):
         return
     if amount <= 0:
-        await interaction.response.send_message("❌ `amount` must be at least 1.", ephemeral=True)
+        await safe_respond(interaction,"❌ `amount` must be at least 1.", ephemeral=True)
         return
     if amount > 100:
-        await interaction.response.send_message("❌ For safety, add no more than 100 tokens in one command.", ephemeral=True)
+        await safe_respond(interaction,"❌ For safety, add no more than 100 tokens in one command.", ephemeral=True)
         return
 
     clean_reason = str(reason or "").strip()
     async with data_lock:
         resolved_name = resolve_cat_name_casefold(cat_name)
         if not resolved_name:
-            await interaction.response.send_message(f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
+            await safe_respond(interaction,f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
             return
         cat = data["cats"][resolved_name]
         prepare_cat_record(resolved_name, cat)
         if bool(cat.get("is_npc", False)):
-            await interaction.response.send_message("❌ Connection Tokens are for player OCs, not NPCs.", ephemeral=True)
+            await safe_respond(interaction,"❌ Connection Tokens are for player OCs, not NPCs.", ephemeral=True)
             return
 
         old_balance = max(0, int(cat.get("role_quest_connection_tokens", 0) or 0))
@@ -16326,10 +16490,10 @@ async def quest_add_tokens(interaction: discord.Interaction, cat_name: str, amou
         cat["role_quest_connection_tokens"] = new_balance
         if clean_reason:
             add_history(cat, f"Connection Tokens — +{amount} ({clean_reason})")
-        save_data(data)
+        await save_data_async(data)
 
     reason_line = f"\n**Reason:** {clean_reason}" if clean_reason else ""
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🤝 **TOKENS ADDED!**\n**{resolved_name}** received **+{amount} Connection Token{'s' if amount != 1 else ''}**."
         f"{reason_line}\n**Balance:** {old_balance} → **{new_balance}**"
     )
@@ -16345,27 +16509,27 @@ async def quest_remove_tokens(interaction: discord.Interaction, cat_name: str, a
     if not await moderator_command_check(interaction):
         return
     if amount <= 0:
-        await interaction.response.send_message("❌ `amount` must be at least 1.", ephemeral=True)
+        await safe_respond(interaction,"❌ `amount` must be at least 1.", ephemeral=True)
         return
     if amount > 100:
-        await interaction.response.send_message("❌ For safety, remove no more than 100 tokens in one command.", ephemeral=True)
+        await safe_respond(interaction,"❌ For safety, remove no more than 100 tokens in one command.", ephemeral=True)
         return
 
     clean_reason = str(reason or "").strip()
     async with data_lock:
         resolved_name = resolve_cat_name_casefold(cat_name)
         if not resolved_name:
-            await interaction.response.send_message(f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
+            await safe_respond(interaction,f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
             return
         cat = data["cats"][resolved_name]
         prepare_cat_record(resolved_name, cat)
         if bool(cat.get("is_npc", False)):
-            await interaction.response.send_message("❌ Connection Tokens are for player OCs, not NPCs.", ephemeral=True)
+            await safe_respond(interaction,"❌ Connection Tokens are for player OCs, not NPCs.", ephemeral=True)
             return
 
         old_balance = max(0, int(cat.get("role_quest_connection_tokens", 0) or 0))
         if amount > old_balance:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ **{resolved_name}** only has **{old_balance} Connection Token{'s' if old_balance != 1 else ''}**. "
                 "I won't reduce the balance below zero.",
                 ephemeral=True
@@ -16375,10 +16539,10 @@ async def quest_remove_tokens(interaction: discord.Interaction, cat_name: str, a
         cat["role_quest_connection_tokens"] = new_balance
         if clean_reason:
             add_history(cat, f"Connection Tokens — -{amount} ({clean_reason})")
-        save_data(data)
+        await save_data_async(data)
 
     reason_line = f"\n**Reason:** {clean_reason}" if clean_reason else ""
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🤝 **TOKENS REMOVED!**\n**{resolved_name}** lost **{amount} Connection Token{'s' if amount != 1 else ''}**."
         f"{reason_line}\n**Balance:** {old_balance} → **{new_balance}**"
     )
@@ -16398,23 +16562,23 @@ async def quest_remove_perk(interaction: discord.Interaction, cat_name: str, per
     async with data_lock:
         resolved_name = resolve_cat_name_casefold(cat_name)
         if not resolved_name:
-            await interaction.response.send_message(f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
+            await safe_respond(interaction,f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
             return
         cat = data["cats"][resolved_name]
         prepare_cat_record(resolved_name, cat)
         if bool(cat.get("is_npc", False)):
-            await interaction.response.send_message("❌ Connection Perks are for player OCs, not NPCs.", ephemeral=True)
+            await safe_respond(interaction,"❌ Connection Perks are for player OCs, not NPCs.", ephemeral=True)
             return
 
         perk_key = normalize_connection_perk_key(perk)
         perk_info = CONNECTION_PERKS.get(perk_key) if perk_key else None
         if not perk_info:
-            await interaction.response.send_message("❌ I couldn't find that perk. Use `/quest perks` to see the full list.", ephemeral=True)
+            await safe_respond(interaction,"❌ I couldn't find that perk. Use `/quest perks` to see the full list.", ephemeral=True)
             return
 
         owned = cat_connection_perks(cat)
         if not any(entry.get("key") == perk_key for entry in owned):
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ **{resolved_name}** has not redeemed **{perk_info['name']}**.",
                 ephemeral=True
             )
@@ -16423,11 +16587,11 @@ async def quest_remove_perk(interaction: discord.Interaction, cat_name: str, per
         cat["connection_perks"] = [entry for entry in owned if entry.get("key") != perk_key]
         if clean_reason:
             add_history(cat, f"Connection Perk Removed — {perk_info['name']} ({clean_reason})")
-        save_data(data)
+        await save_data_async(data)
         balance = max(0, int(cat.get("role_quest_connection_tokens", 0) or 0))
 
     reason_line = f"\n**Reason:** {clean_reason}" if clean_reason else ""
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🗑️ **PERK REMOVED!**\n{perk_info['emoji']} **{resolved_name} — {perk_info['name']}** has been removed from `/catinfo`."
         f"{reason_line}\n\n**No tokens were automatically refunded.** Current balance: **{balance}**. "
         "Use `/quest addtokens` separately if a refund is appropriate."
@@ -16466,19 +16630,19 @@ async def quest_redeem_perk(interaction: discord.Interaction, cat_name: str, per
     async with data_lock:
         resolved_name = resolve_cat_name_casefold(cat_name)
         if not resolved_name:
-            await interaction.response.send_message(f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
+            await safe_respond(interaction,f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
             return
         cat = data["cats"][resolved_name]
         prepare_cat_record(resolved_name, cat)
         if bool(cat.get("is_npc", False)):
-            await interaction.response.send_message("❌ Connection Perks are for player OCs, not NPCs.", ephemeral=True)
+            await safe_respond(interaction,"❌ Connection Perks are for player OCs, not NPCs.", ephemeral=True)
             return
         if cat_is_dead(cat):
-            await interaction.response.send_message(f"❌ **{resolved_name}** is not currently a living OC.", ephemeral=True)
+            await safe_respond(interaction,f"❌ **{resolved_name}** is not currently a living OC.", ephemeral=True)
             return
         owner_id = oc_owner_id(cat)
         if not is_staff(interaction) and owner_id != str(interaction.user.id):
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ You can only redeem perks for your own OCs. **{resolved_name}** is not registered to you.",
                 ephemeral=True
             )
@@ -16486,15 +16650,15 @@ async def quest_redeem_perk(interaction: discord.Interaction, cat_name: str, per
         perk_key = normalize_connection_perk_key(perk)
         perk_info = CONNECTION_PERKS.get(perk_key) if perk_key else None
         if not perk_info:
-            await interaction.response.send_message("❌ I couldn't find that perk. Use `/quest perks` to see the full list.", ephemeral=True)
+            await safe_respond(interaction,"❌ I couldn't find that perk. Use `/quest perks` to see the full list.", ephemeral=True)
             return
         if cat_has_connection_perk(cat, perk_key):
-            await interaction.response.send_message(f"❌ **{resolved_name}** already has **{perk_info['name']}**.", ephemeral=True)
+            await safe_respond(interaction,f"❌ **{resolved_name}** already has **{perk_info['name']}**.", ephemeral=True)
             return
         required_detail = perk_info.get("requires_detail")
         clean_detail = str(detail or "").strip()
         if required_detail and not clean_detail:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ **{perk_info['name']}** needs one extra choice: **{required_detail}**. Run the command again and fill in `detail`.",
                 ephemeral=True
             )
@@ -16502,7 +16666,7 @@ async def quest_redeem_perk(interaction: discord.Interaction, cat_name: str, per
         balance = int(cat.get("role_quest_connection_tokens", 0) or 0)
         cost = int(perk_info["cost"])
         if balance < cost:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ **{resolved_name}** has **{balance} Connection Token{'s' if balance != 1 else ''}**, but **{perk_info['name']}** costs **{cost}**.",
                 ephemeral=True
             )
@@ -16515,11 +16679,11 @@ async def quest_redeem_perk(interaction: discord.Interaction, cat_name: str, per
             "redeemed_at": datetime.now(TZ).isoformat(),
         })
         add_history(cat, f"Connection Perk — redeemed {perk_info['name']}" + (f" ({clean_detail})" if clean_detail else ""))
-        save_data(data)
+        await save_data_async(data)
         remaining = cat["role_quest_connection_tokens"]
 
     detail_line = f"\n**Choice:** {clean_detail}" if clean_detail else ""
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🏅 **PERK REDEEMED!**\n\n{perk_info['emoji']} **{resolved_name} — {perk_info['name']}**{detail_line}\n"
         f"{perk_info['effect']}\n\n💰 **Cost:** {cost} Connection Tokens • **Remaining:** {remaining}\n"
         "This badge is now permanently shown on the OC's `/catinfo` profile."
@@ -16544,26 +16708,26 @@ async def quest_redeem_perk_autocomplete(interaction: discord.Interaction, curre
 async def quest_track(interaction: discord.Interaction, cat_name: str, prey: str):
     channel_info = HUNT_CHANNELS.get(interaction.channel_id)
     if not channel_info:
-        await interaction.response.send_message("❌ `/quest track` only works inside a configured hunting/territory channel.", ephemeral=True)
+        await safe_respond(interaction,"❌ `/quest track` only works inside a configured hunting/territory channel.", ephemeral=True)
         return
     location = channel_info["location"]
     if location in NO_PREY_HUNT_PROMPTS:
-        await interaction.response.send_message(f"❌ **{location}** is not a prey hunting ground, so Great Tracker cannot select prey here.", ephemeral=True)
+        await safe_respond(interaction,f"❌ **{location}** is not a prey hunting ground, so Great Tracker cannot select prey here.", ephemeral=True)
         return
 
     async with data_lock:
         resolved_name = resolve_cat_name_casefold(cat_name)
         if not resolved_name:
-            await interaction.response.send_message(f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
+            await safe_respond(interaction,f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
             return
         cat = data["cats"][resolved_name]
         prepare_cat_record(resolved_name, cat)
         owner_id = oc_owner_id(cat)
         if not is_staff(interaction) and owner_id != str(interaction.user.id):
-            await interaction.response.send_message(f"❌ You can only use Great Tracker for your own OCs.", ephemeral=True)
+            await safe_respond(interaction,f"❌ You can only use Great Tracker for your own OCs.", ephemeral=True)
             return
         if not cat_has_connection_perk(cat, "great-tracker"):
-            await interaction.response.send_message(f"❌ **{resolved_name}** has not redeemed the **Great Tracker** perk.", ephemeral=True)
+            await safe_respond(interaction,f"❌ **{resolved_name}** has not redeemed the **Great Tracker** perk.", ephemeral=True)
             return
         moon = int(data.get("moon", 0))
         uses = cat.setdefault("connection_perk_moon_uses", {})
@@ -16572,7 +16736,7 @@ async def quest_track(interaction: discord.Interaction, cat_name: str, prey: str
         except (TypeError, ValueError):
             last_used_moon = -999
         if last_used_moon == moon:
-            await interaction.response.send_message(f"❌ **{resolved_name}** already used **Great Tracker** during Moon {moon}.", ephemeral=True)
+            await safe_respond(interaction,f"❌ **{resolved_name}** already used **Great Tracker** during Moon {moon}.", ephemeral=True)
             return
 
         available_species = sorted({species for (prompt_location, species) in HUNT_PROMPTS if prompt_location == location})
@@ -16580,7 +16744,7 @@ async def quest_track(interaction: discord.Interaction, cat_name: str, prey: str
         species = next((name for name in available_species if name.casefold() == requested), None)
         if not species:
             shown = ", ".join(available_species)
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ **{prey}** is not available to track at **{location}**. Available prey: {shown}",
                 ephemeral=True
             )
@@ -16591,9 +16755,9 @@ async def quest_track(interaction: discord.Interaction, cat_name: str, prey: str
             prompt += f"\n\n**If the beaver hunt fails:** {REED_MARSH_BEAVER_FAIL_THREAT}"
         uses["great-tracker"] = moon
         cat["connection_perk_moon_uses"] = uses
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🐾 **Great Tracker — {location}**\n**{resolved_name}** deliberately tracks down **{species}**. "
         f"This uses their Great Tracker attempt for **Moon {moon}**.\n\n{prompt}",
         allowed_mentions=discord.AllowedMentions.none()
@@ -16634,7 +16798,7 @@ async def quest_force(interaction: discord.Interaction):
             forced=True,
             skipped_schedule=skipped_cycle
         )
-        save_data(data)
+        await save_data_async(data)
 
     channel = bot.get_channel(QUEST_CHANNEL_ID)
 
@@ -16645,9 +16809,9 @@ async def quest_force(interaction: discord.Interaction):
         if skipped_cycle:
             response += f" The **{skipped_cycle.strftime('%B %d, %Y')}** automatic reset will be skipped."
 
-        await interaction.response.send_message(response, ephemeral=True)
+        await safe_respond(interaction,response, ephemeral=True)
     else:
-        await interaction.response.send_message("Quest channel not found. Check QUEST_CHANNEL_ID.", ephemeral=True)
+        await safe_respond(interaction,"Quest channel not found. Check QUEST_CHANNEL_ID.", ephemeral=True)
 
 
 @quest_group.command(name="complete", description="Mark a Clan or Outsider quest/event as complete")
@@ -16664,7 +16828,7 @@ async def quest_complete(
     if not await staff_command_check(interaction):
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
     selected_group = group.value
 
     async with data_lock:
@@ -16705,7 +16869,7 @@ async def quest_complete(
         data["quest_history_v2"].append(copy.deepcopy(quest))
         data["active_quests_v2"][selected_group] = quest
 
-        save_data(data)
+        await save_data_async(data)
 
     announcement = (
         f"✅ **Quest/Event Complete!**\n"
@@ -16738,7 +16902,7 @@ async def quest_role_view(interaction: discord.Interaction):
         reset_legacy_quest_data_if_needed()
         quests = copy.deepcopy(get_active_role_quests())
     if not quests:
-        await interaction.response.send_message("🌟 There are no active role-specific quests right now.")
+        await safe_respond(interaction,"🌟 There are no active role-specific quests right now.")
         return
     lines = ["🌟 **Current Optional Role-Specific Quests**"]
     for index, quest in enumerate(quests, start=1):
@@ -16748,7 +16912,7 @@ async def quest_role_view(interaction: discord.Interaction):
         if quest.get("reward_result"):
             lines.append(f"**Reward:** {quest['reward_result']}")
     chunks = split_allegiance_text("\n".join(lines), max_length=1850)
-    await interaction.response.send_message(chunks[0])
+    await safe_respond(interaction,chunks[0])
     for chunk in chunks[1:]:
         await interaction.followup.send(chunk)
 
@@ -16784,7 +16948,7 @@ async def quest_use_bonus(
     async with data_lock:
         resolved_name = resolve_cat_name_casefold(cat_name)
         if not resolved_name:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ Cat **{cat_name}** was not found.",
                 ephemeral=True
             )
@@ -16794,7 +16958,7 @@ async def quest_use_bonus(
         prepare_cat_record(resolved_name, cat)
         charges = int(cat.get(field, 0) or 0)
         if charges <= 0:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ **{resolved_name}** does not have a saved **{label}** charge.",
                 ephemeral=True
             )
@@ -16802,10 +16966,10 @@ async def quest_use_bonus(
 
         cat[field] = charges - 1
         add_history(cat, f"Used role-quest bonus: {label}")
-        save_data(data)
+        await save_data_async(data)
         remaining = cat[field]
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"✅ **{resolved_name}** used **{label}**. "
         f"**{remaining}** charge{'s' if remaining != 1 else ''} remaining.",
         ephemeral=True
@@ -16824,27 +16988,27 @@ async def quest_role_complete(interaction: discord.Interaction, cat_name: str, q
         reset_legacy_quest_data_if_needed()
         quests = get_active_role_quests()
         if not quests:
-            await interaction.response.send_message("❌ There are no active role-specific quests.", ephemeral=True)
+            await safe_respond(interaction,"❌ There are no active role-specific quests.", ephemeral=True)
             return
         if quest_number < 1 or quest_number > len(quests):
-            await interaction.response.send_message(f"❌ Choose a quest number from **1 to {len(quests)}**.", ephemeral=True)
+            await safe_respond(interaction,f"❌ Choose a quest number from **1 to {len(quests)}**.", ephemeral=True)
             return
         quest = quests[quest_number - 1]
         if quest.get("status") == "Completed":
-            await interaction.response.send_message(f"❌ Role quest #{quest_number} was already completed by **{quest.get('completed_by', 'another OC')}**.", ephemeral=True)
+            await safe_respond(interaction,f"❌ Role quest #{quest_number} was already completed by **{quest.get('completed_by', 'another OC')}**.", ephemeral=True)
             return
         resolved_name = resolve_cat_name_casefold(cat_name)
         if not resolved_name:
-            await interaction.response.send_message(f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
+            await safe_respond(interaction,f"❌ Cat **{cat_name}** was not found.", ephemeral=True)
             return
         cat = data["cats"][resolved_name]
         prepare_cat_record(resolved_name, cat)
         if bool(cat.get("is_npc", False)):
-            await interaction.response.send_message("❌ Role-specific quest rewards are for player OCs, not NPCs.", ephemeral=True)
+            await safe_respond(interaction,"❌ Role-specific quest rewards are for player OCs, not NPCs.", ephemeral=True)
             return
         if not role_quest_cat_is_eligible(cat, quest):
             eligible = ", ".join(quest.get("eligible_ranks", []))
-            await interaction.response.send_message(f"❌ **{resolved_name}** is not eligible for this quest. Eligible ranks: **{eligible}** from any Clan.", ephemeral=True)
+            await safe_respond(interaction,f"❌ **{resolved_name}** is not eligible for this quest. Eligible ranks: **{eligible}** from any Clan.", ephemeral=True)
             return
         reward_text = apply_role_quest_reward(resolved_name, cat, quest)
         quest["status"] = "Completed"
@@ -16856,12 +17020,12 @@ async def quest_role_complete(interaction: discord.Interaction, cat_name: str, q
         set_active_role_quests(quests)
         data.setdefault("role_quest_history", []).append(copy.deepcopy(quest))
         data["role_quest_history"] = data["role_quest_history"][-120:]
-        save_data(data)
+        await save_data_async(data)
 
     channel = bot.get_channel(QUEST_CHANNEL_ID)
     if channel:
         await send_long_message(channel, "🌟 **Role-Specific Quest Complete!**\n\n" + f"**{resolved_name}** completed **{quest.get('title', 'the role quest')}**.\n🎁 {reward_text}")
-    await interaction.response.send_message(f"✅ Marked role quest #{quest_number} complete for **{resolved_name}** and applied their random reward.", ephemeral=True)
+    await safe_respond(interaction,f"✅ Marked role quest #{quest_number} complete for **{resolved_name}** and applied their random reward.", ephemeral=True)
 
 
 @quest_group.command(name="rolereroll", description="Staff only. Replace one optional role-specific quest")
@@ -16873,10 +17037,10 @@ async def quest_role_reroll(interaction: discord.Interaction, quest_number: int 
         reset_legacy_quest_data_if_needed()
         quests = get_active_role_quests()
         if not quests:
-            await interaction.response.send_message("❌ There are no active role-specific quests.", ephemeral=True)
+            await safe_respond(interaction,"❌ There are no active role-specific quests.", ephemeral=True)
             return
         if quest_number < 1 or quest_number > len(quests):
-            await interaction.response.send_message(f"❌ Choose a quest number from **1 to {len(quests)}**.", ephemeral=True)
+            await safe_respond(interaction,f"❌ Choose a quest number from **1 to {len(quests)}**.", ephemeral=True)
             return
         due_at = get_current_quest_cycle_due_at()
         archive_role_quest(quests[quest_number - 1], "Replaced")
@@ -16884,11 +17048,11 @@ async def quest_role_reroll(interaction: discord.Interaction, quest_number: int 
         replacement = select_new_role_quest(due_at=due_at, exclude_roles=other_roles)
         quests[quest_number - 1] = replacement
         set_active_role_quests(quests)
-        save_data(data)
+        await save_data_async(data)
     channel = bot.get_channel(QUEST_CHANNEL_ID)
     if channel:
         await send_long_message(channel, f"🔄 **Role Quest #{quest_number} Rerolled**\n\n" + format_role_quest_block(replacement, index=quest_number, total=len(quests)))
-    await interaction.response.send_message(f"✅ Posted a new optional role-specific quest in slot #{quest_number}.", ephemeral=True)
+    await safe_respond(interaction,f"✅ Posted a new optional role-specific quest in slot #{quest_number}.", ephemeral=True)
 
 
 RESET_QUEST_CHOICES = [
@@ -16954,7 +17118,7 @@ async def resetquest(interaction: discord.Interaction, group: app_commands.Choic
             old_quest, new_quest = replace_active_quest(quest_group_name, due_at)
             reset_results.append((quest_group_name, old_quest, new_quest))
 
-        save_data(data)
+        await save_data_async(data)
 
     lines = [
         "🔄 **Quest Reset**",
@@ -16980,12 +17144,12 @@ async def resetquest(interaction: discord.Interaction, group: app_commands.Choic
 
     if channel:
         await send_long_message(channel, announcement)
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             f"🔄 Reset quest{'s' if len(reset_results) != 1 else ''} for **{selected_group}** and posted the replacement.",
             ephemeral=True
         )
     else:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "Quest channel not found. The replacement quest was saved, but no announcement was posted.",
             ephemeral=True
         )
@@ -17014,7 +17178,7 @@ async def check_hiatuses():
             del data["hiatuses"][user_id]
 
         if ended_hiatuses:
-            save_data(data)
+            await save_data_async(data)
 
     channel = bot.get_channel(HIATUS_CHANNEL_ID)
 
@@ -17045,7 +17209,7 @@ async def check_membership_milestones():
 
     async with data_lock:
         data["last_membership_milestone_check"] = today_key
-        save_data(data)
+        await save_data_async(data)
 
     if notices:
         print(f"Membership milestone check posted {len(notices)} notice(s).")
@@ -17192,27 +17356,61 @@ def _record_tupper_oc_activity(message, *, now_cutoff=None):
     return True
 
 
-async def _scan_high_rank_messageable(channel, cutoff, wanted_keys, results, lookup=None):
-    """Inspect only webhook identity/timestamps; an HTTP error fails the audit."""
+async def _scan_high_rank_messageable(channel, cutoff, wanted_keys, results, lookup=None, *, foreground=False):
+    """Scan complete recent history in bounded REST pages; never infer from errors."""
+    before = None
     try:
-        async for message in channel.history(limit=None, after=cutoff, oldest_first=False):
-            key = _resolve_tupper_oc_key(_tupper_message_oc_name(message), lookup)
-            if key not in wanted_keys:
-                continue
-            when = _activity_parse_datetime(getattr(message, "created_at", None))
-            if when is None:
-                continue
-            previous = results.get(key)
-            if previous is None or when > previous[0]:
-                results[key] = (when, str(getattr(message, "jump_url", "") or ""))
+        while wanted_keys and not wanted_keys.issubset(results):
+            await wait_for_background_turn(foreground=foreground)
+            page = []
+            async for message in channel.history(
+                limit=100, after=cutoff, before=before, oldest_first=False
+            ):
+                page.append(message)
+            if not page:
+                break
+            for message in page:
+                key = _resolve_tupper_oc_key(_tupper_message_oc_name(message), lookup)
+                if key not in wanted_keys:
+                    continue
+                when = _activity_parse_datetime(getattr(message, "created_at", None))
+                if when is None:
+                    continue
+                previous = results.get(key)
+                if previous is None or when > previous[0]:
+                    results[key] = (when, str(getattr(message, "jump_url", "") or ""))
+            if len(page) < 100:
+                break
+            before = discord.Object(id=page[-1].id)
+            await asyncio.sleep(0.18)
     except discord.NotFound:
         return
 
 
-async def _scan_high_rank_history(guild, cutoff, wanted_keys):
-    """Reconcile the 14-day window after downtime, including archived RP threads."""
+def _recent_activity_possible(channel, cutoff):
+    """Skip known-old channels without hitting Discord's history endpoint."""
+    raw = getattr(channel, "last_message_id", None)
+    if not raw:
+        return True  # Unknown is not proof of inactivity.
+    try:
+        last_message = discord.utils.snowflake_time(int(raw))
+        # Small safety margin for caches that have not updated recently.
+        return last_message >= cutoff - timedelta(days=2)
+    except (ValueError, TypeError, OverflowError):
+        return True
+
+
+async def _scan_high_rank_history(guild, cutoff, wanted_keys, *, foreground=False):
+    """Reconcile only missing OCs; stop early if everyone has a matching post.
+
+    Live Tupperbox sightings are continuously recorded by on_message. Normally
+    most high/mid ranks require no history scan at all. Archived threads are only
+    searched when at least one missing character still needs verification.
+    """
     latest = {}
-    lookup = _build_tupper_oc_lookup()  # One index per full audit, not per message
+    if not wanted_keys:
+        return latest
+    lookup = _build_tupper_oc_lookup()
     scanned = set()
     channels = (
         list(getattr(guild, "text_channels", []))
@@ -17220,42 +17418,64 @@ async def _scan_high_rank_history(guild, cutoff, wanted_keys):
         + list(getattr(guild, "stage_channels", []))
     )
     for channel in channels:
+        if wanted_keys.issubset(latest):
+            return latest
         if channel.id in scanned or not callable(getattr(channel, "history", None)):
             continue
         scanned.add(channel.id)
-        await _scan_high_rank_messageable(channel, cutoff, wanted_keys, latest, lookup)
-        await asyncio.sleep(0.12)
+        if not _recent_activity_possible(channel, cutoff):
+            continue
+        await _scan_high_rank_messageable(
+            channel, cutoff, wanted_keys, latest, lookup, foreground=foreground
+        )
+        await asyncio.sleep(0.22)
 
     threads = list(getattr(guild, "threads", []))
+    # One active-thread directory request per weekly audit catches threads that
+    # have not reached the Gateway cache (and protects against false warnings).
     fetch_active = getattr(guild, "active_threads", None)
     if callable(fetch_active):
+        await wait_for_background_turn(foreground=foreground)
         threads.extend(await fetch_active())
     for thread in threads:
+        if wanted_keys.issubset(latest):
+            return latest
         if thread.id in scanned:
             continue
         scanned.add(thread.id)
-        await _scan_high_rank_messageable(thread, cutoff, wanted_keys, latest, lookup)
-        await asyncio.sleep(0.08)
+        if not _recent_activity_possible(thread, cutoff):
+            continue
+        await _scan_high_rank_messageable(
+            thread, cutoff, wanted_keys, latest, lookup, foreground=foreground
+        )
+        await asyncio.sleep(0.18)
 
     parents = list(getattr(guild, "text_channels", [])) + list(getattr(guild, "forum_channels", []))
     for parent in parents:
+        if wanted_keys.issubset(latest):
+            return latest
         archived = getattr(parent, "archived_threads", None)
         if not callable(archived):
             continue
         modes = [False, True] if isinstance(parent, discord.TextChannel) else [False]
         for private in modes:
+            await wait_for_background_turn(foreground=foreground)
             kwargs = {"limit": None}
             if isinstance(parent, discord.TextChannel):
                 kwargs["private"] = private
             async for thread in archived(**kwargs):
+                if wanted_keys.issubset(latest):
+                    return latest
                 archive_at = _activity_parse_datetime(getattr(thread, "archive_timestamp", None))
                 if archive_at is not None and archive_at < cutoff:
                     break
                 if thread.id in scanned:
                     continue
                 scanned.add(thread.id)
-                await _scan_high_rank_messageable(thread, cutoff, wanted_keys, latest, lookup)
-                await asyncio.sleep(0.08)
+                await _scan_high_rank_messageable(
+                    thread, cutoff, wanted_keys, latest, lookup, foreground=foreground
+                )
+                await asyncio.sleep(0.2)
     return latest
 
 
@@ -17336,7 +17556,7 @@ async def _deliver_high_rank_pending_report(report):
         async with data_lock:
             data["last_high_rank_activity_audit_date"] = report["date"]
             data["high_rank_activity_pending_report"] = None
-            save_data(data)
+            await save_data_async(data)
         return True
     thread = await _high_rank_activity_thread()
     mentions = discord.AllowedMentions(everyone=False, users=False, roles=[discord.Object(id=MODERATOR_ROLE_ID)])
@@ -17346,11 +17566,11 @@ async def _deliver_high_rank_pending_report(report):
         async with data_lock:
             report["next_chunk"] = index + 1
             report.setdefault("message_ids", []).append(str(message.id))
-            save_data(data)
+            await save_data_async(data)
     async with data_lock:
         data["last_high_rank_activity_audit_date"] = report["date"]
         data["high_rank_activity_pending_report"] = None
-        save_data(data)
+        await save_data_async(data)
     return True
 
 
@@ -17367,13 +17587,36 @@ async def run_high_rank_activity_check(*, manual=False):
             return "Resumed the pending high-rank report." if sent else "Discord is temporarily unavailable."
         if discord_requests_paused():
             return "Discord is temporarily unavailable; the audit was not completed."
+        if not manual and not discord_background_allowed():
+            return "User commands are being handled; the scheduled audit will retry."
         guild = await get_rules_guild()
         if guild is None or guild.id != GUILD_ID:
             raise RuntimeError("The Echostone Mountain server was not found.")
         rows = _high_rank_player_cats()
         cutoff = now - timedelta(days=HIGH_RANK_ACTIVITY_LOOKBACK_DAYS)
-        wanted = {name.casefold() for name, _ in rows}
-        found = await _scan_high_rank_history(guild, cutoff, wanted) if wanted else {}
+        # Only search Discord for missing sightings; live Tupperbox messages
+        # already provide durable timestamps for all other OCs.
+        tracked = data.get("tupper_oc_activity", {})
+        wanted = {
+            name.casefold() for name, _ in rows
+            if (_activity_parse_datetime((tracked.get(name.casefold()) or {}).get("last_active")) or
+                datetime.min.replace(tzinfo=TZ)) < cutoff
+        }
+        # Previous *completed* audits of still-inactive OCs are reusable.
+        # Their older history was already searched, so only newer messages
+        # need to be scanned. New/renamed/alias-corrected OCs use 14 full days.
+        verified = data.get("tupper_oc_verified_inactive_through") or {}
+        per_cat_start = []
+        for key in wanted:
+            previous = _activity_parse_datetime(verified.get(key))
+            if previous is not None and previous > cutoff:
+                per_cat_start.append(max(cutoff, previous - timedelta(minutes=5)))
+            else:
+                per_cat_start.append(cutoff)
+        search_after = min(per_cat_start) if per_cat_start else cutoff
+        found = await _scan_high_rank_history(
+            guild, search_after, wanted, foreground=manual
+        ) if wanted else {}
         # Only write history sightings if the entire 14-day scan completed.
         async with data_lock:
             storage = data.setdefault("tupper_oc_activity", {})
@@ -17383,6 +17626,14 @@ async def run_high_rank_activity_check(*, manual=False):
                 if old_time is None or seen > old_time:
                     storage[key] = {"last_active": seen.isoformat(), "message_url": jump_url}
             missing = _high_rank_inactive_rows(rows, cutoff)
+            # Checkpoint only cats that remained missing after the completed
+            # scan; never checkpoint a found OC whose other channels may not
+            # have been visited because the scan ended early.
+            verified_storage = data.setdefault("tupper_oc_verified_inactive_through", {})
+            for item in missing:
+                key = item["name"].casefold()
+                if key in wanted:
+                    verified_storage[key] = now.isoformat()
             report = {
                 "date": date_key,
                 "chunks": _high_rank_report_chunks(missing, now),
@@ -17390,7 +17641,7 @@ async def run_high_rank_activity_check(*, manual=False):
                 "message_ids": [],
             }
             data["high_rank_activity_pending_report"] = report
-            save_data(data)
+            await save_data_async(data)
         delivered = await _deliver_high_rank_pending_report(report)
         if not delivered:
             return "Discord is temporarily unavailable. The report is saved and will be retried."
@@ -17409,7 +17660,7 @@ highrankactivity_group = app_commands.Group(
 async def high_rank_activity_command(interaction: discord.Interaction):
     if not await moderator_command_check(interaction):
         return
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
     try:
         result = await run_high_rank_activity_check(manual=True)
     except (discord.HTTPException, OSError, asyncio.TimeoutError) as error:
@@ -17432,19 +17683,19 @@ async def high_rank_activity_alias(interaction: discord.Interaction, oc_name: st
         return
     resolved = resolve_cat_name_casefold(oc_name)
     if resolved is None:
-        await interaction.response.send_message("❌ That OC is not registered in CODY's tracker.", ephemeral=True)
+        await safe_respond(interaction,"❌ That OC is not registered in CODY's tracker.", ephemeral=True)
         return
     cat = data["cats"][resolved]
     if bool(cat.get("is_npc", False)):
-        await interaction.response.send_message("❌ Tupper aliases are for player-owned OCs, not NPCs.", ephemeral=True)
+        await safe_respond(interaction,"❌ Tupper aliases are for player-owned OCs, not NPCs.", ephemeral=True)
         return
     alias = str(tupper_name or "").strip()
     if not alias or len(alias) > 100 or any(ch in alias for ch in ("\n", "\r", "\t")):
-        await interaction.response.send_message("❌ Paste a single Tupper display name (1–100 characters).", ephemeral=True)
+        await safe_respond(interaction,"❌ Paste a single Tupper display name (1–100 characters).", ephemeral=True)
         return
     conflict = _tupper_alias_conflict(resolved, alias)
     if conflict:
-        await interaction.response.send_message(f"❌ {conflict}", ephemeral=True)
+        await safe_respond(interaction,f"❌ {conflict}", ephemeral=True)
         return
     async with data_lock:
         aliases = cat.setdefault("tupper_aliases", [])
@@ -17452,15 +17703,17 @@ async def high_rank_activity_alias(interaction: discord.Interaction, oc_name: st
             aliases = []
             cat["tupper_aliases"] = aliases
         if any(_tupper_oc_key(value) == _tupper_oc_key(alias) for value in aliases):
-            await interaction.response.send_message("ℹ️ That Tupper alias is already saved for this OC.", ephemeral=True)
+            await safe_respond(interaction,"ℹ️ That Tupper alias is already saved for this OC.", ephemeral=True)
             return
         if len(aliases) >= 20:
-            await interaction.response.send_message("❌ This OC already has 20 aliases. Remove an old one first.", ephemeral=True)
+            await safe_respond(interaction,"❌ This OC already has 20 aliases. Remove an old one first.", ephemeral=True)
             return
         aliases.append(alias)
-        save_data(data)
+        # A corrected alias may recognize old posts that earlier audits missed.
+        data.setdefault("tupper_oc_verified_inactive_through", {}).pop(resolved.casefold(), None)
+        await save_data_async(data)
     safe_alias = discord.utils.escape_markdown(discord.utils.escape_mentions(alias))
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"✅ Saved **{safe_alias}** as a Tupperbox name for **{resolved}**. "
         "CODY will recognize this in future messages and when scanning the previous 14 days. "
         "Run `/highrankactivity check` to recheck a mistaken inactivity flag.",
@@ -17476,18 +17729,19 @@ async def high_rank_activity_remove_alias(interaction: discord.Interaction, oc_n
         return
     resolved = resolve_cat_name_casefold(oc_name)
     if resolved is None:
-        await interaction.response.send_message("❌ That OC is not registered in CODY's tracker.", ephemeral=True)
+        await safe_respond(interaction,"❌ That OC is not registered in CODY's tracker.", ephemeral=True)
         return
     async with data_lock:
         cat = data["cats"][resolved]
         aliases = _tupper_registered_aliases(cat)
         matching = [alias for alias in aliases if _tupper_oc_key(alias) == _tupper_oc_key(tupper_name)]
         if not matching:
-            await interaction.response.send_message("❌ That Tupper alias isn't saved for this OC.", ephemeral=True)
+            await safe_respond(interaction,"❌ That Tupper alias isn't saved for this OC.", ephemeral=True)
             return
         cat["tupper_aliases"] = [alias for alias in aliases if _tupper_oc_key(alias) != _tupper_oc_key(tupper_name)]
-        save_data(data)
-    await interaction.response.send_message(f"✅ Removed the saved Tupper alias from **{resolved}**.", ephemeral=True)
+        data.setdefault("tupper_oc_verified_inactive_through", {}).pop(resolved.casefold(), None)
+        await save_data_async(data)
+    await safe_respond(interaction,f"✅ Removed the saved Tupper alias from **{resolved}**.", ephemeral=True)
 
 
 @highrankactivity_group.command(name="aliases", description="Moderator+: list saved Tupperbox aliases for an OC")
@@ -17498,24 +17752,26 @@ async def high_rank_activity_list_aliases(interaction: discord.Interaction, oc_n
         return
     resolved = resolve_cat_name_casefold(oc_name)
     if resolved is None:
-        await interaction.response.send_message("❌ That OC is not registered in CODY's tracker.", ephemeral=True)
+        await safe_respond(interaction,"❌ That OC is not registered in CODY's tracker.", ephemeral=True)
         return
     aliases = _tupper_registered_aliases(data["cats"][resolved])
     if not aliases:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             f"🐾 **{resolved}** has no manual Tupper aliases. Decorative versions of the registered name are recognized automatically.",
             ephemeral=True,
         )
         return
     lines = [f"🐾 **Saved Tupperbox aliases for {discord.utils.escape_markdown(resolved)}:**"]
     lines.extend(f"• {discord.utils.escape_markdown(discord.utils.escape_mentions(alias))}" for alias in aliases)
-    await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
+    await safe_respond(interaction,"\n".join(lines)[:1900], ephemeral=True)
 
 
 @tasks.loop(minutes=30)
 async def high_rank_activity_audit():
     now = datetime.now(TZ)
-    if now.weekday() != HIGH_RANK_ACTIVITY_WEEKDAY or now.hour < HIGH_RANK_ACTIVITY_HOUR:
+    if (now.weekday() != HIGH_RANK_ACTIVITY_WEEKDAY
+            or now.hour < HIGH_RANK_ACTIVITY_HOUR
+            or not discord_background_allowed()):
         return
     try:
         await run_high_rank_activity_check()
@@ -17591,45 +17847,56 @@ def _activity_record_stage(record, key="notice_stage", default=0):
 
 
 async def _scan_activity_messageable(messageable, cutoff, latest_by_user, monitored_ids=None):
-    # HTTP errors deliberately propagate: an incomplete scan must not become
-    # evidence that a member has been inactive. The caller saves its checkpoint.
+    """Safe, resumable member backfill; yield after every 100 Discord messages."""
     tupper_lookup = _build_tupper_oc_lookup()
+    before = None
     try:
-        async for message in messageable.history(limit=None, after=cutoff, oldest_first=False):
-            author = getattr(message, "author", None)
-            if author is None:
-                continue
-            if getattr(message, "webhook_id", None):
-                # A Tupperbox post is also activity for the OC's saved player.
-                oc_key = _resolve_tupper_oc_key(_tupper_message_oc_name(message), tupper_lookup)
-                resolved = resolve_cat_name_casefold(oc_key) if oc_key else None
-                owner_cat = data.get("cats", {}).get(resolved) if resolved else None
-                if not owner_cat or bool(owner_cat.get("is_npc", False)):
+        while True:
+            await wait_for_background_turn()
+            page = []
+            async for message in messageable.history(
+                limit=100, after=cutoff, before=before, oldest_first=False
+            ):
+                page.append(message)
+            if not page:
+                break
+            for message in page:
+                author = getattr(message, "author", None)
+                if author is None:
                     continue
-                user_id = oc_owner_id(owner_cat)
-                if not user_id:
+                if getattr(message, "webhook_id", None):
+                    oc_key = _resolve_tupper_oc_key(_tupper_message_oc_name(message), tupper_lookup)
+                    resolved = resolve_cat_name_casefold(oc_key) if oc_key else None
+                    owner_cat = data.get("cats", {}).get(resolved) if resolved else None
+                    if not owner_cat or bool(owner_cat.get("is_npc", False)):
+                        continue
+                    user_id = oc_owner_id(owner_cat)
+                    if not user_id:
+                        continue
+                else:
+                    if getattr(author, "bot", False):
+                        continue
+                    user_id = str(author.id)
+                if monitored_ids is not None and user_id not in monitored_ids:
                     continue
-            else:
-                if getattr(author, "bot", False):
+                created_at = _activity_parse_datetime(getattr(message, "created_at", None))
+                if created_at is None:
                     continue
-                user_id = str(author.id)
-            if monitored_ids is not None and user_id not in monitored_ids:
-                continue
-            created_at = _activity_parse_datetime(getattr(message, "created_at", None))
-            if created_at is None:
-                continue
-            previous = latest_by_user.get(user_id)
-            if previous is None or created_at > previous:
-                latest_by_user[user_id] = created_at
+                previous = latest_by_user.get(user_id)
+                if previous is None or created_at > previous:
+                    latest_by_user[user_id] = created_at
+            if len(page) < 100:
+                break
+            before = discord.Object(id=page[-1].id)
+            await asyncio.sleep(0.22)
     except discord.NotFound:
-        # A deleted channel/thread no longer needs to be scanned.
         return
 
 
 async def backfill_activity_history(guild):
     """One resumable recent-history scan; subsequent audits use live timestamps."""
     global _activity_backfill_in_progress, _activity_tracking_dirty
-    if _activity_backfill_in_progress or discord_requests_paused():
+    if _activity_backfill_in_progress or not discord_background_allowed():
         return False
     async with data_lock:
         if data.get("activity_tracking_backfill_complete"):
@@ -17702,7 +17969,7 @@ async def backfill_activity_history(guild):
                     except discord.NotFound:
                         pass
                     archived_parents.add(parent_key)
-        except (discord.HTTPException, OSError, asyncio.TimeoutError) as error:
+        except (discord.HTTPException, OSError, asyncio.TimeoutError, BackgroundDiscordPaused) as error:
             complete = False
             log_error("Activity backfill paused; completed channels will not be rescanned", error)
 
@@ -17725,7 +17992,7 @@ async def backfill_activity_history(guild):
             if complete:
                 data["activity_tracking_backfill_completed_at"] = datetime.now(TZ).isoformat()
             _activity_tracking_dirty = True
-            save_data(data)
+            await save_data_async(data)
             _activity_tracking_dirty = False
         if complete:
             print(f"Activity backfill complete: {len(scanned_ids)} channels/threads scanned.")
@@ -17799,7 +18066,7 @@ async def flush_activity_tracking():
     try:
         async with data_lock:
             if _activity_tracking_dirty:
-                save_data(data)
+                await save_data_async(data)
                 _activity_tracking_dirty = False
     except Exception as error:
         log_error("Activity timestamp save failed; will retry next batch", error)
@@ -17858,7 +18125,7 @@ async def _activity_checkpoint_mod_report(report, sent_message=None):
             data["last_weekly_activity_audit_date"] = datetime.now(TZ).date().isoformat()
         _activity_tracking_dirty = True
         try:
-            save_data(data)
+            await save_data_async(data)
         except Exception:
             # Retain delivered-message progress in memory, but do not mark the
             # week finished until its completion state has actually been saved.
@@ -17904,6 +18171,8 @@ async def _activity_deliver_mod_report(report):
 async def run_weekly_activity_audit():
     """One full staff-only snapshot per week, irrespective of legacy notice stages."""
     global _activity_tracking_dirty
+    if not discord_background_allowed():
+        return False
     async with _activity_audit_lock:
         now = datetime.now(TZ)
         week = _activity_report_week_key(now)
@@ -17953,7 +18222,7 @@ async def run_weekly_activity_audit():
             # Save the snapshot before posting so a restart can resume the same
             # report rather than regenerate and re-ping its first section.
             _activity_tracking_dirty = True
-            save_data(data)
+            await save_data_async(data)
             _activity_tracking_dirty = False
         return await _activity_deliver_mod_report(report)
 
@@ -17961,6 +18230,8 @@ async def run_weekly_activity_audit():
 @tasks.loop(minutes=30)
 async def weekly_activity_audit():
     """Wednesday at/after 8 AM Toronto; retry failed staff delivery that day."""
+    if not discord_background_allowed():
+        return
     now = datetime.now(TZ)
     if now.weekday() != AUTO_ACTIVITY_CHECK_WEEKDAY or now.hour < AUTO_ACTIVITY_CHECK_HOUR:
         return
@@ -18053,7 +18324,7 @@ async def check_activity_reminders():
                 due_reminders.append((reminder_id, copy.deepcopy(reminder)))
 
         if due_reminders:
-            save_data(data)
+            await save_data_async(data)
 
     if not due_reminders:
         return
@@ -18094,7 +18365,7 @@ async def activity_reminder(interaction: discord.Interaction, xdays: int, user_i
         return
 
     if xdays < 1:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ The reminder must be at least 1 day long.",
             ephemeral=True
         )
@@ -18103,7 +18374,7 @@ async def activity_reminder(interaction: discord.Interaction, xdays: int, user_i
     cleaned_user_id = clean_discord_user_id(user_id)
 
     if not cleaned_user_id.isdigit():
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Please use a raw Discord user ID, or a valid user mention.",
             ephemeral=True
         )
@@ -18131,12 +18402,12 @@ async def activity_reminder(interaction: discord.Interaction, xdays: int, user_i
             "previous_warning_count": previous_warning_count
         }
 
-        save_data(data)
+        await save_data_async(data)
 
     day_word = "day" if xdays == 1 else "days"
     warning_history_text = format_warning_history({"sent_count": previous_warning_count})
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"⏳ Activity reminder set for <@{cleaned_user_id}>.\n"
         f"I will ping <@{ACTIVITY_WARNING_USER_ID}> in <#{ACTIVITY_WARNING_CHANNEL_ID}> when **{xdays} {day_word}** is up.\n"
         f"Due: **{due_at.strftime('%B %d, %Y at %I:%M %p')}** Toronto time.\n"
@@ -18161,7 +18432,7 @@ async def activity_list(interaction: discord.Interaction):
     ]
 
     if not pending:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "✅ There are no pending activity warning reminders.",
             ephemeral=True
         )
@@ -18191,7 +18462,7 @@ async def activity_list(interaction: discord.Interaction):
     if len(pending) > 30:
         lines.append(f"\n…and {len(pending) - 30} more pending reminder(s).")
 
-    await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
+    await safe_respond(interaction,"\n".join(lines)[:1900], ephemeral=True)
 
 
 @activity_group.command(name="cancel", description="Cancel a pending activity warning reminder.")
@@ -18205,14 +18476,14 @@ async def activity_cancel(interaction: discord.Interaction, reminder_id: str):
         reminder = data["activity_reminders"].get(reminder_id)
 
         if not reminder:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ Reminder `{reminder_id}` was not found.",
                 ephemeral=True
             )
             return
 
         if reminder.get("status", "Pending") != "Pending":
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"❌ Reminder `{reminder_id}` is already marked as **{reminder.get('status', 'Unknown')}**.",
                 ephemeral=True
             )
@@ -18221,9 +18492,9 @@ async def activity_cancel(interaction: discord.Interaction, reminder_id: str):
         reminder["status"] = "Cancelled"
         reminder["cancelled_at"] = datetime.now(TZ).isoformat()
         reminder["cancelled_by"] = str(interaction.user.id)
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🧹 Cancelled activity warning reminder `{reminder_id}`.",
         ephemeral=True
     )
@@ -18241,7 +18512,7 @@ async def activity_end(interaction: discord.Interaction, user_id: str, reason: s
     cleaned_user_id = clean_discord_user_id(user_id)
 
     if not cleaned_user_id.isdigit():
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Please use a raw Discord user ID, or a valid user mention.",
             ephemeral=True
         )
@@ -18268,19 +18539,19 @@ async def activity_end(interaction: discord.Interaction, user_id: str, reason: s
             ended_ids.append(reminder_id)
 
         if ended_ids:
-            save_data(data)
+            await save_data_async(data)
 
     warning_history_text = format_warning_history(summary_before)
 
     if not ended_ids:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             f"✅ No pending activity countdowns were found for <@{cleaned_user_id}>.\n"
             f"**Warning History:** {warning_history_text}",
             ephemeral=True
         )
         return
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"✅ Ended **{len(ended_ids)}** pending activity countdown(s) for <@{cleaned_user_id}> because they began participating again.\n"
         f"**Ended Reminder(s):** {', '.join(f'`{reminder_id}`' for reminder_id in ended_ids)}\n"
         f"**Warning History:** {warning_history_text}",
@@ -18297,7 +18568,7 @@ async def activity_status(interaction: discord.Interaction, user_id: str):
     cleaned_user_id = clean_discord_user_id(user_id)
 
     if not cleaned_user_id.isdigit():
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❌ Please use a raw Discord user ID, or a valid user mention.",
             ephemeral=True
         )
@@ -18330,7 +18601,7 @@ async def activity_status(interaction: discord.Interaction, user_id: str):
 
             lines.append(f"• `{reminder_id}` — **{days} day(s)** — due **{due_text}**")
 
-    await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
+    await safe_respond(interaction,"\n".join(lines)[:1900], ephemeral=True)
 
 
 membership_group = app_commands.Group(
@@ -18344,12 +18615,12 @@ async def membership_check(interaction: discord.Interaction):
     if not await staff_command_check(interaction):
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await safe_defer(interaction,ephemeral=True)
     notices = await run_membership_milestone_check(post_to_channel=True)
 
     async with data_lock:
         data["last_membership_milestone_check"] = datetime.now(TZ).date().isoformat()
-        save_data(data)
+        await save_data_async(data)
 
     if notices:
         await interaction.followup.send(
@@ -18391,7 +18662,7 @@ async def membership_status(interaction: discord.Interaction, user_id: str):
     if member and member_has_any_role(member, NON_RP_MILESTONE_ROLE_IDS):
         excluded_text = "Yes — ignored for automatic RP slot milestones"
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🌙 **Membership Status for <@{user_id}>**\n"
         f"{joined_text}\n"
         f"Current OC Slot Role: **{oc_text}**\n"
@@ -18415,7 +18686,7 @@ async def monthly_moon():
             return
 
         data["last_moon_month"] = this_month
-        save_data(data)
+        await save_data_async(data)
 
     report = await run_moon_update()
     story_message = await build_clan_report_text(report)
@@ -18444,7 +18715,7 @@ async def monthly_moon():
 
 @bot.tree.command(name="moon", description="Check the current moon")
 async def moon(interaction: discord.Interaction):
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🌙 The current moon is **Moon {data.get('moon', 0)}**.\n"
         f"🍃 Current season: **{data.get('season', get_current_season())} ({get_season_moon()}/3)**."
     )
@@ -18470,7 +18741,7 @@ async def clan(interaction: discord.Interaction, clan: app_commands.Choice[str])
     ]
 
     if not clan_cats:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             f"No cats found for **{selected_clan}**."
         )
         return
@@ -18492,11 +18763,11 @@ async def clan(interaction: discord.Interaction, clan: app_commands.Choice[str])
             shown_name = display_cat_name(name, cat)
             lines.append(f"• {shown_name} — {cat.get('age', 0)} moons{faction}")
 
-    await interaction.response.send_message("\n".join(lines)[:1900])
+    await safe_respond(interaction,"\n".join(lines)[:1900])
 
 @bot.tree.command(name="catinfo", description="View details about a cat")
 async def catinfo(interaction: discord.Interaction, name: str):
-    await interaction.response.defer()
+    await safe_defer(interaction,)
 
     if name not in data.get("cats", {}):
         await interaction.edit_original_response(content="Cat not found.")
@@ -18507,7 +18778,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
         prepare_cat_record(name, cat)
 
         if process_injury_recovery(cat):
-            save_data(data)
+            await save_data_async(data)
 
         status = cat.get("status", "Alive")
         afterlife = cat.get("afterlife") or "None"
@@ -18622,7 +18893,7 @@ async def needsmentor(interaction: discord.Interaction):
                 needs_mentor.append((clan, rank, name, age))
 
     if not needs_mentor:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "🐾 **Apprentices Needing Mentors**\n\nEvery apprentice currently has a mentor assigned."
         )
         return
@@ -18647,7 +18918,7 @@ async def needsmentor(interaction: discord.Interaction):
             f"{icon} **{name}** — {rank}, {age} moons"
         )
 
-    await interaction.response.send_message("\n".join(lines)[:1900])
+    await safe_respond(interaction,"\n".join(lines)[:1900])
     
 # ─────────────────────────────
 # FEED COMMANDS
@@ -18676,14 +18947,14 @@ async def feed_cat_command(
         cats = data.get("cats", {})
 
         if name not in cats:
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         cat = cats[name]
         prepare_cat_record(name, cat)
 
         if str(cat.get("status", "Alive")).lower() == "dead":
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 "Dead cats cannot be fed.",
                 ephemeral=True
             )
@@ -18694,9 +18965,9 @@ async def feed_cat_command(
         prey_text = "large prey" if selected_prey_size == "large" else "prey"
         new_status_text = format_hunger_status(cat)
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🍽️ **{name}** ate some {prey_text}!\n"
         f"**Hunger:** {old_hunger} → **{new_hunger}**\n"
         f"**Current Status:** {new_status_text}"
@@ -18718,14 +18989,14 @@ async def feed_reset_command(
         cats = data.get("cats", {})
 
         if name not in cats:
-            await interaction.response.send_message("Cat not found.", ephemeral=True)
+            await safe_respond(interaction,"Cat not found.", ephemeral=True)
             return
 
         cat = cats[name]
         prepare_cat_record(name, cat)
 
         if str(cat.get("status", "Alive")).lower() == "dead":
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 "Dead cats cannot have their hunger reset.",
                 ephemeral=True
             )
@@ -18734,9 +19005,9 @@ async def feed_reset_command(
         old_hunger, new_hunger = reset_cat_hunger(cat)
         new_status_text = format_hunger_status(cat)
 
-        save_data(data)
+        await save_data_async(data)
 
-    await interaction.response.send_message(
+    await safe_respond(interaction,
         f"🔄 **{name}**'s hunger has been reset.\n"
         f"**Hunger:** {old_hunger} → **{new_hunger}**\n"
         f"**Current Status:** {new_status_text}"
@@ -18774,14 +19045,14 @@ async def feed_resetclan_command(
             reset_cats.append((name, old_hunger, new_hunger))
 
         if not reset_cats:
-            await interaction.response.send_message(
+            await safe_respond(interaction,
                 f"No living cats found in **{selected_clan}**.",
                 ephemeral=True
             )
             return
 
         reset_cats.sort(key=lambda item: item[0].lower())
-        save_data(data)
+        await save_data_async(data)
 
     lines = [
         f"🔄 **{selected_clan} hunger has been reset.**",
@@ -18807,7 +19078,7 @@ async def feed_resetclan_command(
 
     chunks.append(message)
 
-    await interaction.response.send_message(chunks[0])
+    await safe_respond(interaction,chunks[0])
 
     for chunk in chunks[1:]:
         await interaction.followup.send(chunk)
@@ -18842,10 +19113,10 @@ async def feed_hunger_command(
             if hunger in ["Starving", "Hungry", "Satisfied"]:
                 hungry_cats.append((name, hunger, cat))
 
-        save_data(data)
+        await save_data_async(data)
 
     if not hungry_cats:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             f"🍽️ **{selected_clan} Hunger Check**\n\n"
             f"Everyone in **{selected_clan}** is currently Fed or better."
         )
@@ -18877,7 +19148,7 @@ async def feed_hunger_command(
 
     chunks.append(message)
 
-    await interaction.response.send_message(chunks[0])
+    await safe_respond(interaction,chunks[0])
 
     for chunk in chunks[1:]:
         await interaction.followup.send(chunk)
@@ -18994,7 +19265,7 @@ async def upcomingceremonies(
         message = message[split_at:].lstrip()
     chunks.append(message)
 
-    await interaction.response.send_message(chunks[0])
+    await safe_respond(interaction,chunks[0])
     for chunk in chunks[1:]:
         await interaction.followup.send(chunk)
 
@@ -19045,10 +19316,10 @@ async def frozenlist(interaction: discord.Interaction):
                     )
                 )
 
-        save_data(data)
+        await save_data_async(data)
 
     if not frozen_cats:
-        await interaction.response.send_message(
+        await safe_respond(interaction,
             "❄️ **Frozen Cats**\n\nNo cats are currently frozen.",
             ephemeral=True
         )
@@ -19077,7 +19348,7 @@ async def frozenlist(interaction: discord.Interaction):
             f"  Hunger: {hunger_status}"
         )
 
-    await interaction.response.send_message("\n".join(lines)[:1900])
+    await safe_respond(interaction,"\n".join(lines)[:1900])
 
 
 
@@ -19127,7 +19398,7 @@ async def mentorlist(interaction: discord.Interaction, clan: app_commands.Choice
     lines.append("\n**Eligible Mentors**")
     lines.extend(eligible_mentors if eligible_mentors else ["No eligible mentors found."])
 
-    await interaction.response.send_message("\n".join(lines)[:1900])
+    await safe_respond(interaction,"\n".join(lines)[:1900])
 
 @bot.tree.command(name="gatheringreport", description="Generate a Clan-specific Gathering report")
 @app_commands.describe(clan="Select clan")
@@ -19202,7 +19473,7 @@ async def gatheringreport(interaction: discord.Interaction, clan: app_commands.C
     else:
         lines.append("No recent quests recorded for this Clan yet.")
 
-    await interaction.response.send_message("\n".join(lines)[:1900])
+    await safe_respond(interaction,"\n".join(lines)[:1900])
 
 @bot.tree.command(name="dead", description="View dead cats by clan and afterlife")
 @app_commands.describe(clan="Filter by clan", afterlife="Filter by afterlife")
@@ -19223,7 +19494,7 @@ async def dead(interaction: discord.Interaction, clan: app_commands.Choice[str],
         dead_cats.append((name, cat))
 
     if not dead_cats:
-        await interaction.response.send_message("No dead cats found.")
+        await safe_respond(interaction,"No dead cats found.")
         return
 
     dead_cats.sort(key=lambda item: (item[1].get("clan", ""), item[0].lower()))
@@ -19237,7 +19508,7 @@ async def dead(interaction: discord.Interaction, clan: app_commands.Choice[str],
             f"at {cat.get('age', 0)} moons → {cat.get('afterlife')}"
         )
 
-    await interaction.response.send_message("\n".join(lines)[:1900])
+    await safe_respond(interaction,"\n".join(lines)[:1900])
 
 @bot.tree.command(name="bothelp", description="View a list of member bot commands")
 async def bothelp(interaction: discord.Interaction):
@@ -19296,7 +19567,7 @@ async def bothelp(interaction: discord.Interaction):
     if interaction.response.is_done():
         await send_long_message(interaction.channel, message)
     else:
-        await interaction.response.defer(ephemeral=True)
+        await safe_defer(interaction,ephemeral=True)
         await interaction.followup.send(message[:1900], ephemeral=True)
 
         remaining = message[1900:]
