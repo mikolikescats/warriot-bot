@@ -819,6 +819,56 @@ async def save_data_async(data_to_save):
         await asyncio.to_thread(save_data, snapshot)
 
 
+
+# Shared OC autocomplete: preserve canonical names and prefer the invoking player's OCs.
+def _oc_choices(interaction, current, predicate=None):
+    needle = str(current or "").strip().casefold()
+    owner = str(interaction.user.id)
+    matches = []
+    for name, cat in data.get("cats", {}).items():
+        if not isinstance(name, str) or not name or len(name) > 100:
+            continue
+        if predicate and not predicate(cat):
+            continue
+        if needle not in name.casefold():
+            continue
+        matches.append((oc_owner_id(cat) != owner, not name.casefold().startswith(needle), name.casefold(), name))
+    matches.sort()
+    return [app_commands.Choice(name=n, value=n) for _,_,_,n in matches[:25]]
+
+
+async def oc_all_autocomplete(interaction: discord.Interaction, current: str):
+    return _oc_choices(interaction, current)
+
+
+async def oc_living_autocomplete(interaction: discord.Interaction, current: str):
+    return _oc_choices(interaction, current, lambda c: not cat_is_dead(c))
+
+
+async def oc_apprentice_autocomplete(interaction: discord.Interaction, current: str):
+    return _oc_choices(interaction, current, lambda c: not cat_is_dead(c) and c.get("rank") in ("Apprentice", "Medicine Cat Apprentice"))
+
+
+async def oc_mentor_autocomplete(interaction: discord.Interaction, current: str):
+    return _oc_choices(interaction, current, lambda c: not cat_is_dead(c) and c.get("rank") not in ("Kit", "Apprentice", "Medicine Cat Apprentice"))
+
+
+async def oc_injured_autocomplete(interaction: discord.Interaction, current: str):
+    return _oc_choices(interaction, current, lambda c: not cat_is_dead(c) and bool(c.get("injury")))
+
+
+async def oc_owned_autocomplete(interaction: discord.Interaction, current: str):
+    return _oc_choices(interaction, current, lambda c: not cat_is_dead(c) and not c.get("is_npc", False) and oc_owner_id(c)==str(interaction.user.id))
+
+
+async def oc_contribution_autocomplete(interaction: discord.Interaction, current: str):
+    # Preserve any already-entered comma-separated contributor names.
+    prefix, sep, tail = str(current or "").rpartition(",")
+    prefix = prefix + sep + " " if sep else ""
+    choices = _oc_choices(interaction, tail, lambda c: not cat_is_dead(c) and not c.get("is_npc", False))
+    return [app_commands.Choice(name=(prefix+c.name)[:100], value=prefix+c.value) for c in choices if len(prefix+c.value)<=100]
+
+
 def get_outsider_groups():
     """Return active built-in and staff-created Outsider groups in a stable order."""
     saved_groups = data.get("outsider_groups", [])
@@ -1626,7 +1676,7 @@ def apprentice_promotion_problem(cat):
         return (
             f"❌ This Apprentice has **{count}/{APPRENTICE_TRAINING_MINIMUM}** training sessions. "
             f"They need at least **{APPRENTICE_TRAINING_MINIMUM}** before becoming a Warrior. "
-            "Use `/train` to record their training."
+            "Use `/train add` to record their training."
         )
     if int(cat.get("age", 0) or 0) < APPRENTICE_ASSESSMENT_AGE:
         return (
@@ -2938,19 +2988,23 @@ async def oc_list_command(interaction: discord.Interaction, user: str = None):
 
 
 def resolve_cat_name_casefold(raw_name):
-    lookup = str(raw_name or "").strip().casefold()
-    if not lookup:
+    raw = str(raw_name or "").strip()
+    if not raw:
         return None
-
-    for cat_name in data.get("cats", {}):
-        if cat_name.casefold() == lookup:
-            return cat_name
-    return None
+    cats = data.get("cats", {})
+    if raw in cats:
+        return raw
+    matches = [name for name in cats if name.casefold() == raw.casefold()]
+    # An exact match still works if legacy records contain case-only duplicates.
+    # Never silently choose one of two ambiguous OCs.
+    return matches[0] if len(matches) == 1 else None
 
 
 @bot.tree.command(name="ocowner", description="Find which Discord user owns an OC")
 @app_commands.describe(cat_name="Name of the OC")
+@app_commands.autocomplete(cat_name=oc_all_autocomplete)
 async def ocowner_command(interaction: discord.Interaction, cat_name: str):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     resolved_name = resolve_cat_name_casefold(cat_name)
     if not resolved_name:
         await safe_respond(interaction,f"❌ I could not find an OC named **{cat_name}**.")
@@ -3379,20 +3433,7 @@ def timeline_full_text(clan_name=None):
 
 
 async def timeline_cat_autocomplete(interaction: discord.Interaction, current: str):
-    # Include every registered cat, including NPCs and deceased cats. NPCs are
-    # labelled in the menu, but their raw registered name remains the command value.
-    needle = str(current or "").casefold().strip()
-    matches = []
-    for cat_name, cat in data.get("cats", {}).items():
-        shown_name = display_cat_name(cat_name, cat)
-        if needle and needle not in cat_name.casefold() and needle not in shown_name.casefold():
-            continue
-        matches.append((cat_name, shown_name))
-    matches.sort(key=lambda item: item[0].casefold())
-    return [
-        app_commands.Choice(name=shown_name[:100], value=cat_name[:100])
-        for cat_name, shown_name in matches[:25]
-    ]
+    return _oc_choices(interaction, current)
 
 
 async def timeline_entry_autocomplete(interaction: discord.Interaction, current: str):
@@ -3453,6 +3494,7 @@ async def timeline_month(
 @app_commands.describe(cat_name="Registered cat to look up")
 @app_commands.autocomplete(cat_name=timeline_cat_autocomplete)
 async def timeline_cat(interaction: discord.Interaction, cat_name: str):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     resolved_name = resolve_cat_name_casefold(cat_name)
     display_name = resolved_name or str(cat_name).strip()
     entries = timeline_entries_for_cat(display_name)
@@ -3524,6 +3566,7 @@ async def timeline_add(
     end_month: app_commands.Choice[str] = None,
     end_year: int = None,
 ):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await moderator_command_check(interaction):
         return
 
@@ -3621,6 +3664,7 @@ async def timeline_edit(
     end_year: int = None,
     make_ongoing: bool = False,
 ):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await moderator_command_check(interaction):
         return
 
@@ -5402,6 +5446,7 @@ def update_cat_freeze_settings(cat, freeze_type, frozen, days=None, now=None):
 @app_commands.choices(
     freeze_type=FREEZE_TYPE_CHOICES
 )
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def freezecat(
     interaction: discord.Interaction,
     cat_name: str,
@@ -5409,6 +5454,7 @@ async def freezecat(
     frozen: bool,
     days: int = None
 ):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await staff_command_check(interaction):
         return
 
@@ -9604,6 +9650,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     kit5="Fifth kit name optional",
     kit6="Sixth kit name optional"
 )
+@app_commands.autocomplete(mother=oc_living_autocomplete, kit1=oc_living_autocomplete, kit2=oc_living_autocomplete, kit3=oc_living_autocomplete, kit4=oc_living_autocomplete, kit5=oc_living_autocomplete, kit6=oc_living_autocomplete)
 async def add_litter(
     interaction: discord.Interaction,
     mother: str,
@@ -9614,6 +9661,13 @@ async def add_litter(
     kit5: str = None,
     kit6: str = None
 ):
+    mother = resolve_cat_name_casefold(mother) or mother
+    kit1 = resolve_cat_name_casefold(kit1) or kit1
+    kit2 = resolve_cat_name_casefold(kit2) or kit2
+    kit3 = resolve_cat_name_casefold(kit3) or kit3
+    kit4 = resolve_cat_name_casefold(kit4) or kit4
+    kit5 = resolve_cat_name_casefold(kit5) or kit5
+    kit6 = resolve_cat_name_casefold(kit6) or kit6
     if not await staff_command_check(interaction):
         return
 
@@ -9885,7 +9939,9 @@ async def botinfo(interaction: discord.Interaction):
 
         "🐾 **General Member Commands**\n"
         "`/catinfo [Name]` — View full details about a cat; Apprentices show their recorded training sessions\n"
-        "`/train [Cat] [Scene Link]` — Record a completed training scene for your Apprentice OC (3 sessions required for Warrior assessment; no maximum)\n"
+        "`/train add [Cat] [Scene Link] [Training Type]` — Record a completed training scene for your Apprentice OC (3 sessions required for Warrior assessment; no maximum)\n"
+        "`/myocs`, `/clanstatus`, `/whattodo` — Personal and Clan dashboards and RP ideas. `/bothelp` opens the interactive command directory.\n"
+        "`/train progress`, `/train history`, `/train ready` — Training details and assessment readiness; staff use `/train remove` and `/train assessment` for corrections and assessments.\n"
         "`/oclist [User]` — Public OC list grouped by player, including each living OC's hunger\n"
         "`/ocowner [Cat]` — Find which Discord user owns a specific OC\n"
         "`/cats [Clan]` — View all cats by clan or all clans\n"
@@ -10051,12 +10107,14 @@ allegiance_group = app_commands.Group(name="allegiance", description="Manage aut
     character_sheet="Link to the cat's character form/sheet"
 )
 @app_commands.autocomplete(user=allegiance_user_autocomplete)
+@app_commands.autocomplete(cat_name=oc_all_autocomplete)
 async def allegiance_add_command(
     interaction: discord.Interaction,
     cat_name: str,
     user: str,
     character_sheet: str
 ):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await staff_command_check(interaction):
         return
 
@@ -10129,7 +10187,9 @@ async def allegiance_add_command(
 
 @allegiance_group.command(name="addnpc", description="Add an NPC to the automated allegiance boards")
 @app_commands.describe(cat_name="Existing NPC cat in the tracker")
+@app_commands.autocomplete(cat_name=oc_all_autocomplete)
 async def allegiance_addnpc_command(interaction: discord.Interaction, cat_name: str):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await staff_command_check(interaction):
         return
 
@@ -10192,7 +10252,9 @@ async def allegiance_addnpc_command(interaction: discord.Interaction, cat_name: 
 
 @allegiance_group.command(name="remove", description="Remove a cat from the automated allegiance boards")
 @app_commands.describe(cat_name="Cat to unlink from allegiances")
+@app_commands.autocomplete(cat_name=oc_all_autocomplete)
 async def allegiance_remove_command(interaction: discord.Interaction, cat_name: str):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await staff_command_check(interaction):
         return
 
@@ -10353,11 +10415,13 @@ async def change_outsider_cat_group(interaction, cat_name, group, command_label)
 @outsider_group.command(name="assign", description="Assign or move an Outsider cat to a saved group")
 @app_commands.describe(cat_name="Existing Outsider cat", group="Outsider group")
 @app_commands.autocomplete(group=outsider_group_autocomplete)
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def outsider_group_assign_command(
     interaction: discord.Interaction,
     cat_name: str,
     group: str
 ):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await staff_command_check(interaction):
         return
     await change_outsider_cat_group(interaction, cat_name, group, "/outsidergroup assign")
@@ -10366,11 +10430,13 @@ async def outsider_group_assign_command(
 @outsider_group.command(name="change", description="Move an Outsider cat from one group to another")
 @app_commands.describe(cat_name="Existing Outsider cat", group="New Outsider group")
 @app_commands.autocomplete(group=outsider_group_autocomplete)
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def outsider_group_change_command(
     interaction: discord.Interaction,
     cat_name: str,
     group: str
 ):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await staff_command_check(interaction):
         return
     await change_outsider_cat_group(interaction, cat_name, group, "/outsidergroup change")
@@ -10641,7 +10707,9 @@ async def npc_adddead_command(
 
 @npc_group.command(name="convert", description="Change an existing cat into an NPC")
 @app_commands.describe(cat_name="Existing cat to mark as an NPC")
+@app_commands.autocomplete(cat_name=oc_all_autocomplete)
 async def npc_convert_command(interaction: discord.Interaction, cat_name: str):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await staff_command_check(interaction):
         return
 
@@ -10678,12 +10746,14 @@ async def npc_convert_command(interaction: discord.Interaction, cat_name: str):
     cause="Optional cause of death"
 )
 @app_commands.choices(afterlife=AFTERLIFE_CHOICES)
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def npc_markdead_command(
     interaction: discord.Interaction,
     cat_name: str,
     afterlife: app_commands.Choice[str],
     cause: str = None
 ):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await staff_command_check(interaction):
         return
 
@@ -10756,12 +10826,14 @@ async def npc_markdead_command(
     member_type=PLOT_MEMBER_TYPE_CHOICES,
     outsider_group=PLOT_OUTSIDER_GROUP_CHOICES
 )
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def plot_member_command(
     interaction: discord.Interaction,
     cat_name: str,
     member_type: app_commands.Choice[str],
     outsider_group: app_commands.Choice[str] = None
 ):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await plot_command_check(interaction):
         return
 
@@ -10849,7 +10921,9 @@ async def plot_member_command(
 
 @plot_group.command(name="remove", description="Remove a cat from the plot-member roster")
 @app_commands.describe(cat_name="The cat to remove from the plot roster")
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def plot_remove_command(interaction: discord.Interaction, cat_name: str):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await plot_command_check(interaction):
         return
 
@@ -10968,11 +11042,13 @@ async def plot_roster_command(interaction: discord.Interaction):
     cat_name="The cat receiving the permanent status",
     condition="The exact status to display, such as Blind, Wobbly, or Has ADHD"
 )
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def condition_add_command(
     interaction: discord.Interaction,
     cat_name: str,
     condition: str
 ):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await staff_command_check(interaction):
         return
 
@@ -11027,11 +11103,13 @@ async def condition_add_command(
     cat_name="The cat whose permanent status should be removed",
     condition="The status to remove"
 )
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def condition_remove_command(
     interaction: discord.Interaction,
     cat_name: str,
     condition: str
 ):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await staff_command_check(interaction):
         return
 
@@ -11084,7 +11162,9 @@ async def condition_remove_command(
 
 @condition_group.command(name="clear", description="Remove every permanent status condition from a cat")
 @app_commands.describe(cat_name="The cat whose permanent statuses should all be cleared")
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def condition_clear_command(interaction: discord.Interaction, cat_name: str):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await staff_command_check(interaction):
         return
 
@@ -11125,11 +11205,13 @@ async def condition_clear_command(interaction: discord.Interaction, cat_name: st
     role="Choose Sentinel, Scout, or Mediator"
 )
 @app_commands.choices(role=HONOUR_ROLE_CHOICES)
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def honour_role_command(
     interaction: discord.Interaction,
     cat_name: str,
     role: app_commands.Choice[str]
 ):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await staff_command_check(interaction):
         return
 
@@ -11258,7 +11340,9 @@ async def honour_role_command(
 
 @honour_group.command(name="remove", description="Remove a cat's current Honour Role")
 @app_commands.describe(cat_name="The cat whose Honour Role should be removed")
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def honour_remove_command(interaction: discord.Interaction, cat_name: str):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await staff_command_check(interaction):
         return
 
@@ -11539,23 +11623,28 @@ def remove_relationship_history_between(cat, other_name):
 # ─────────────────────────────
 
 async def train_apprentice_autocomplete(interaction: discord.Interaction, current: str):
-    needle = str(current or "").casefold().strip()
-    candidates = sorted(
-        (name for name, cat in data.get("cats", {}).items()
-         if cat.get("rank") == "Apprentice" and not cat_is_dead(cat)
-         and not bool(cat.get("is_npc", False)) and needle in name.casefold()),
-        key=str.casefold,
-    )
-    return [app_commands.Choice(name=name[:100], value=name[:100]) for name in candidates[:25]]
+    return _oc_choices(interaction, current, lambda c: c.get("rank") == "Apprentice" and not cat_is_dead(c) and not c.get("is_npc", False))
 
 
-@bot.tree.command(name="train", description="Record one completed training scene for your Apprentice OC")
+def _valid_training_scene_link(value):
+    return bool(re.fullmatch(r"https://(?:www\.)?(?:discord\.com|discordapp\.com)/channels/\d+/\d+(?:/\d+)?(?:[/?#][^\s<>]*)?", str(value or "").strip(), flags=re.I))
+
+
+train_group = app_commands.Group(name="train", description="Record and manage Apprentice training and assessments")
+TRAINING_TYPE_CHOICES = [app_commands.Choice(name=label, value=label) for label in (
+    "Hunting / Fishing", "Battle / Defense", "Territory Knowledge", "Clan Duties", "Specialty Skills", "Other")]
+
+
+@train_group.command(name="add", description="Record one completed training scene for your Apprentice OC")
 @app_commands.describe(
     cat_name="Your registered Apprentice OC",
     scene_link="Optional Discord link to the completed training scene or thread",
+    training_type="Optional skill or lesson practiced",
 )
+@app_commands.choices(training_type=TRAINING_TYPE_CHOICES)
 @app_commands.autocomplete(cat_name=train_apprentice_autocomplete)
-async def train_command(interaction: discord.Interaction, cat_name: str, scene_link: str = None):
+async def train_command(interaction: discord.Interaction, cat_name: str, scene_link: str = None, training_type: app_commands.Choice[str] = None):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     resolved = resolve_cat_name_casefold(cat_name)
     if not resolved:
         await safe_respond(interaction,"❌ I couldn't find that registered OC.", ephemeral=True)
@@ -11563,7 +11652,7 @@ async def train_command(interaction: discord.Interaction, cat_name: str, scene_l
 
     if scene_link:
         scene_link = str(scene_link).strip()
-        if not re.match(r"^https://(?:www\.)?(?:discord\.com|discordapp\.com)/channels/\d+/\d+(?:/\d+)?(?:[/?#].*)?$", scene_link, flags=re.I):
+        if not _valid_training_scene_link(scene_link):
             await safe_respond(interaction,
                 "❌ Please link the completed Discord training scene/thread (or a message in it), or leave `scene_link` blank.",
                 ephemeral=True,
@@ -11574,7 +11663,7 @@ async def train_command(interaction: discord.Interaction, cat_name: str, scene_l
         cat = data["cats"].get(resolved)
         if cat is None or cat_is_dead(cat) or cat.get("rank") != "Apprentice" or bool(cat.get("is_npc", False)):
             await safe_respond(interaction,
-                "❌ `/train` is for living, player-owned **Apprentice** OCs (not Medicine Cat Apprentices).",
+                "❌ `/train add` is for living, player-owned **Apprentice** OCs (not Medicine Cat Apprentices).",
                 ephemeral=True,
             )
             return
@@ -11596,6 +11685,7 @@ async def train_command(interaction: discord.Interaction, cat_name: str, scene_l
             "date": datetime.now(TZ).isoformat(),
             "recorded_by": str(interaction.user.id),
             "scene_link": scene_link,
+            "training_type": training_type.value if training_type else None,
         })
         count = len(sessions)
         age = int(cat.get("age", 0) or 0)
@@ -11693,7 +11783,9 @@ async def cat_add(
 
 
 @cat_group.command(name="age", description="Set a cat's age")
+@app_commands.autocomplete(name=oc_living_autocomplete)
 async def cat_age(interaction: discord.Interaction, name: str, age: int):
+    name = resolve_cat_name_casefold(name) or name
     if not await staff_command_check(interaction):
         return
 
@@ -11715,7 +11807,9 @@ async def cat_age(interaction: discord.Interaction, name: str, age: int):
 @cat_group.command(name="rank", description="Change a cat's rank")
 @app_commands.describe(name="Cat name", rank="New rank")
 @app_commands.choices(rank=RANK_CHOICES)
+@app_commands.autocomplete(name=oc_living_autocomplete)
 async def cat_rank(interaction: discord.Interaction, name: str, rank: app_commands.Choice[str]):
+    name = resolve_cat_name_casefold(name) or name
     if not await staff_command_check(interaction):
         return
 
@@ -11816,12 +11910,14 @@ async def cat_rank(interaction: discord.Interaction, name: str, rank: app_comman
     new_clan=CLAN_CHOICES,
     new_rank=RANK_CHOICES
 )
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def changeclan(
     interaction: discord.Interaction,
     cat_name: str,
     new_clan: app_commands.Choice[str],
     new_rank: app_commands.Choice[str] = None
 ):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await staff_command_check(interaction):
         return
 
@@ -11939,7 +12035,9 @@ async def changeclan(
 
 @cat_group.command(name="rename", description="Rename a cat")
 @app_commands.describe(old_name="Current name", new_name="New name")
+@app_commands.autocomplete(old_name=oc_all_autocomplete)
 async def cat_rename(interaction: discord.Interaction, old_name: str, new_name: str):
+    old_name = resolve_cat_name_casefold(old_name) or old_name
     if not await staff_command_check(interaction):
         return
 
@@ -12005,12 +12103,14 @@ async def cat_rename(interaction: discord.Interaction, old_name: str, new_name: 
     cause="Optional cause of death"
 )
 @app_commands.choices(afterlife=AFTERLIFE_CHOICES)
+@app_commands.autocomplete(name=oc_living_autocomplete)
 async def cat_markdead(
     interaction: discord.Interaction,
     name: str,
     afterlife: app_commands.Choice[str],
     cause: str = None
 ):
+    name = resolve_cat_name_casefold(name) or name
     if not await staff_command_check(interaction):
         return
 
@@ -12135,6 +12235,7 @@ async def cat_cause_of_death(
     cause: str = None,
     clear: bool = False
 ):
+    name = resolve_cat_name_casefold(name) or name
     if not await staff_command_check(interaction):
         return
 
@@ -12188,7 +12289,9 @@ async def cat_cause_of_death(
 
 
 @cat_group.command(name="delete", description="Delete a cat permanently")
+@app_commands.autocomplete(name=oc_all_autocomplete)
 async def cat_delete(interaction: discord.Interaction, name: str):
+    name = resolve_cat_name_casefold(name) or name
     if not await staff_command_check(interaction):
         return
 
@@ -12238,7 +12341,9 @@ async def cat_delete(interaction: discord.Interaction, name: str):
 
 @cat_group.command(name="delayceremony", description="Delay a cat's automatic promotion")
 @app_commands.describe(name="Cat name", moons="How many moons to delay their ceremony")
+@app_commands.autocomplete(name=oc_living_autocomplete)
 async def cat_delayceremony(interaction: discord.Interaction, name: str, moons: int):
+    name = resolve_cat_name_casefold(name) or name
     if not await staff_command_check(interaction):
         return
 
@@ -12271,7 +12376,9 @@ async def cat_delayceremony(interaction: discord.Interaction, name: str, moons: 
     name="Cat name",
     hidden="True hides them. False lets them appear again."
 )
+@app_commands.autocomplete(name=oc_living_autocomplete)
 async def cat_tinderhide(interaction: discord.Interaction, name: str, hidden: bool):
+    name = resolve_cat_name_casefold(name) or name
     if not await staff_command_check(interaction):
         return
 
@@ -12300,11 +12407,13 @@ async def cat_tinderhide(interaction: discord.Interaction, name: str, hidden: bo
     moon="The moon number to delete history entries from",
     cat_name="Optional. Leave blank to clear this moon from all cats."
 )
+@app_commands.autocomplete(cat_name=oc_all_autocomplete)
 async def cat_clear_history_moon(
     interaction: discord.Interaction,
     moon: int,
     cat_name: str = None
 ):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await staff_command_check(interaction):
         return
 
@@ -12381,6 +12490,7 @@ async def cat_clear_history_moon(
     severity="Severity from 1 to 10",
     moon="Moon the injury happened. Leave blank for current moon."
 )
+@app_commands.autocomplete(name=oc_living_autocomplete)
 async def injury_add(
     interaction: discord.Interaction,
     name: str,
@@ -12388,6 +12498,7 @@ async def injury_add(
     severity: int,
     moon: int = None
 ):
+    name = resolve_cat_name_casefold(name) or name
     if not await staff_command_check(interaction):
         return
 
@@ -12451,11 +12562,13 @@ async def injury_add(
     app_commands.Choice(name="Recovered", value="Recovered"),
     app_commands.Choice(name="Delete", value="Delete")
 ])
+@app_commands.autocomplete(name=oc_injured_autocomplete)
 async def injury_remove(
     interaction: discord.Interaction,
     name: str,
     mode: app_commands.Choice[str]
 ):
+    name = resolve_cat_name_casefold(name) or name
     if not await staff_command_check(interaction):
         return
 
@@ -12489,7 +12602,9 @@ async def injury_remove(
 
 
 @injury_group.command(name="severity", description="Override a cat's injury severity")
+@app_commands.autocomplete(name=oc_injured_autocomplete)
 async def injury_severity(interaction: discord.Interaction, name: str, severity: int):
+    name = resolve_cat_name_casefold(name) or name
     if not await staff_command_check(interaction):
         return
 
@@ -12520,7 +12635,9 @@ async def injury_severity(interaction: discord.Interaction, name: str, severity:
 
 
 @injury_group.command(name="moon", description="Change the moon when a cat's injury happened")
+@app_commands.autocomplete(name=oc_injured_autocomplete)
 async def injury_moon(interaction: discord.Interaction, name: str, moon: int):
+    name = resolve_cat_name_casefold(name) or name
     if not await staff_command_check(interaction):
         return
 
@@ -12646,12 +12763,14 @@ async def medical_report(
     app_commands.Choice(name="Recovering", value="Recovering"),
     app_commands.Choice(name="Recovered", value="Recovered")
 ])
+@app_commands.autocomplete(name=oc_injured_autocomplete)
 async def medical_treat(
     interaction: discord.Interaction,
     name: str,
     status: app_commands.Choice[str],
     notes: str = None
 ):
+    name = resolve_cat_name_casefold(name) or name
     if not await medical_command_check(interaction):
         return
 
@@ -12725,7 +12844,10 @@ def remove_mentor_history_between(cat, other_name):
 
 
 @mentor_group.command(name="assign", description="Assign a mentor to an apprentice")
+@app_commands.autocomplete(apprentice=oc_apprentice_autocomplete, mentor=oc_mentor_autocomplete)
 async def mentor_assign(interaction: discord.Interaction, apprentice: str, mentor: str):
+    apprentice = resolve_cat_name_casefold(apprentice) or apprentice
+    mentor = resolve_cat_name_casefold(mentor) or mentor
     if not await staff_command_check(interaction):
         return
 
@@ -12805,7 +12927,10 @@ async def mentor_assign(interaction: discord.Interaction, apprentice: str, mento
 
 
 @mentor_group.command(name="previous", description="Add a previous mentor to a cat")
+@app_commands.autocomplete(name=oc_all_autocomplete, mentor=oc_all_autocomplete)
 async def mentor_previous(interaction: discord.Interaction, name: str, mentor: str):
+    name = resolve_cat_name_casefold(name) or name
+    mentor = resolve_cat_name_casefold(mentor) or mentor
     if not await staff_command_check(interaction):
         return
 
@@ -12858,7 +12983,10 @@ async def mentor_previous(interaction: discord.Interaction, name: str, mentor: s
 
 
 @mentor_group.command(name="remove", description="Remove mentor records between two cats without showing in history")
+@app_commands.autocomplete(apprentice=oc_all_autocomplete, mentor=oc_all_autocomplete)
 async def mentor_remove(interaction: discord.Interaction, apprentice: str, mentor: str):
+    apprentice = resolve_cat_name_casefold(apprentice) or apprentice
+    mentor = resolve_cat_name_casefold(mentor) or mentor
     if not await staff_command_check(interaction):
         return
 
@@ -12913,7 +13041,10 @@ async def mentor_remove(interaction: discord.Interaction, apprentice: str, mento
 # ─────────────────────────────
 
 @relationship_group.command(name="mate", description="Set two cats as mates")
+@app_commands.autocomplete(cat1=oc_living_autocomplete, cat2=oc_living_autocomplete)
 async def relationship_mate(interaction: discord.Interaction, cat1: str, cat2: str):
+    cat1 = resolve_cat_name_casefold(cat1) or cat1
+    cat2 = resolve_cat_name_casefold(cat2) or cat2
     if not await staff_command_check(interaction):
         return
 
@@ -12953,7 +13084,10 @@ async def relationship_mate(interaction: discord.Interaction, cat1: str, cat2: s
 
 
 @relationship_group.command(name="breakup", description="Break up two mates and mark them as ex-mates")
+@app_commands.autocomplete(cat1=oc_living_autocomplete, cat2=oc_living_autocomplete)
 async def relationship_breakup(interaction: discord.Interaction, cat1: str, cat2: str):
+    cat1 = resolve_cat_name_casefold(cat1) or cat1
+    cat2 = resolve_cat_name_casefold(cat2) or cat2
     if not await staff_command_check(interaction):
         return
 
@@ -12997,6 +13131,7 @@ async def relationship_breakup(interaction: discord.Interaction, cat1: str, cat2
     custom_reverse_relation="Only use this if relation is Other. Example: Nephew"
 )
 @app_commands.choices(relation=FAMILY_RELATION_CHOICES)
+@app_commands.autocomplete(name=oc_all_autocomplete, relative=oc_all_autocomplete)
 async def relationship_family(
     interaction: discord.Interaction,
     name: str,
@@ -13005,6 +13140,8 @@ async def relationship_family(
     custom_relation: str = None,
     custom_reverse_relation: str = None
 ):
+    name = resolve_cat_name_casefold(name) or name
+    relative = resolve_cat_name_casefold(relative) or relative
     if not await staff_command_check(interaction):
         return
 
@@ -13056,12 +13193,15 @@ async def relationship_family(
     relation="Relationship type to remove, example: Mother, Nephew, Grandparent, Other",
     cat2="Second cat"
 )
+@app_commands.autocomplete(cat1=oc_all_autocomplete, cat2=oc_all_autocomplete)
 async def relationship_remove(
     interaction: discord.Interaction,
     cat1: str,
     relation: str,
     cat2: str
 ):
+    cat1 = resolve_cat_name_casefold(cat1) or cat1
+    cat2 = resolve_cat_name_casefold(cat2) or cat2
     if not await staff_command_check(interaction):
         return
 
@@ -13119,7 +13259,10 @@ async def relationship_remove(
 
 
 @relationship_group.command(name="clearhistory", description="Clear relationship history between two cats")
+@app_commands.autocomplete(cat1=oc_all_autocomplete, cat2=oc_all_autocomplete)
 async def relationship_clearhistory(interaction: discord.Interaction, cat1: str, cat2: str):
+    cat1 = resolve_cat_name_casefold(cat1) or cat1
+    cat2 = resolve_cat_name_casefold(cat2) or cat2
     if not await staff_command_check(interaction):
         return
 
@@ -13145,7 +13288,9 @@ async def relationship_clearhistory(interaction: discord.Interaction, cat1: str,
 
 
 @relationship_group.command(name="removeall", description="Remove all relationship records from one cat")
+@app_commands.autocomplete(name=oc_all_autocomplete)
 async def relationship_removeall(interaction: discord.Interaction, name: str):
+    name = resolve_cat_name_casefold(name) or name
     if not await staff_command_check(interaction):
         return
 
@@ -13206,7 +13351,9 @@ async def relationship_removeall(interaction: discord.Interaction, name: str):
     clan="Choose a Clan to search, or All"
 )
 @app_commands.choices(clan=CLAN_FILTER_CHOICES)
+@app_commands.autocomplete(name=oc_living_autocomplete)
 async def cattinder(interaction: discord.Interaction, name: str, clan: app_commands.Choice[str]):
+    name = resolve_cat_name_casefold(name) or name
     cats = data.get("cats", {})
 
     if name not in cats:
@@ -16159,7 +16306,9 @@ async def quest_progress(interaction: discord.Interaction):
     cat_name="OC who caught the prey",
     prey="What they caught, for example mouse, trout, frog, sparrow, or vole"
 )
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def quest_catch(interaction: discord.Interaction, cat_name: str, prey: str):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     await safe_defer(interaction,ephemeral=True)
     completion_announcement = None
 
@@ -16330,6 +16479,7 @@ async def quest_catch(interaction: discord.Interaction, cat_name: str, prey: str
 
 @quest_group.command(name="contribute", description="Record one or more OCs as contributors to their current non-hunting monthly quest")
 @app_commands.describe(cat_name="One or more of your OCs; separate multiple cat names with commas")
+@app_commands.autocomplete(cat_name=oc_contribution_autocomplete)
 async def quest_contribute(interaction: discord.Interaction, cat_name: str):
     requested_names = []
     seen_requested = set()
@@ -16463,7 +16613,9 @@ async def quest_perks(interaction: discord.Interaction):
     amount="Number of Connection Tokens to add",
     reason="Optional reason, such as Cat of the Moon"
 )
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def quest_add_tokens(interaction: discord.Interaction, cat_name: str, amount: int, reason: str = ""):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await moderator_command_check(interaction):
         return
     if amount <= 0:
@@ -16505,7 +16657,9 @@ async def quest_add_tokens(interaction: discord.Interaction, cat_name: str, amou
     amount="Number of Connection Tokens to remove",
     reason="Optional reason for the adjustment"
 )
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def quest_remove_tokens(interaction: discord.Interaction, cat_name: str, amount: int, reason: str = ""):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await moderator_command_check(interaction):
         return
     if amount <= 0:
@@ -16554,7 +16708,9 @@ async def quest_remove_tokens(interaction: discord.Interaction, cat_name: str, a
     perk="Redeemed perk to remove",
     reason="Optional reason for the removal"
 )
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def quest_remove_perk(interaction: discord.Interaction, cat_name: str, perk: str, reason: str = ""):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await moderator_command_check(interaction):
         return
 
@@ -16626,7 +16782,9 @@ async def quest_remove_perk_autocomplete(interaction: discord.Interaction, curre
     perk="Perk name; start typing to search",
     detail="Only needed when a perk asks you to choose something, such as Excellent Hunter's second specialty"
 )
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def quest_redeem_perk(interaction: discord.Interaction, cat_name: str, perk: str, detail: str = ""):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     async with data_lock:
         resolved_name = resolve_cat_name_casefold(cat_name)
         if not resolved_name:
@@ -16705,7 +16863,9 @@ async def quest_redeem_perk_autocomplete(interaction: discord.Interaction, curre
 
 @quest_group.command(name="track", description="Great Tracker perk: once per moon, choose a specific prey encounter in this hunting channel")
 @app_commands.describe(cat_name="Your OC with the Great Tracker perk", prey="Specific prey species to track in this location")
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def quest_track(interaction: discord.Interaction, cat_name: str, prey: str):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     channel_info = HUNT_CHANNELS.get(interaction.channel_id)
     if not channel_info:
         await safe_respond(interaction,"❌ `/quest track` only works inside a configured hunting/territory channel.", ephemeral=True)
@@ -16930,11 +17090,13 @@ ROLE_QUEST_SPENDABLE_CHOICES = [
     bonus="Which one-use role-quest bonus was used"
 )
 @app_commands.choices(bonus=ROLE_QUEST_SPENDABLE_CHOICES)
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def quest_use_bonus(
     interaction: discord.Interaction,
     cat_name: str,
     bonus: app_commands.Choice[str]
 ):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await staff_command_check(interaction):
         return
 
@@ -16981,7 +17143,9 @@ async def quest_use_bonus(
     cat_name="Eligible OC who completed the role-specific quest",
     quest_number="Which active role quest: 1 or 2 (defaults to 1)"
 )
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
 async def quest_role_complete(interaction: discord.Interaction, cat_name: str, quest_number: int = 1):
+    cat_name = resolve_cat_name_casefold(cat_name) or cat_name
     if not await staff_command_check(interaction):
         return
     async with data_lock:
@@ -17679,6 +17843,7 @@ async def high_rank_activity_command(interaction: discord.Interaction):
 )
 @app_commands.autocomplete(oc_name=timeline_cat_autocomplete)
 async def high_rank_activity_alias(interaction: discord.Interaction, oc_name: str, tupper_name: str):
+    oc_name = resolve_cat_name_casefold(oc_name) or oc_name
     if not await moderator_command_check(interaction):
         return
     resolved = resolve_cat_name_casefold(oc_name)
@@ -17725,6 +17890,7 @@ async def high_rank_activity_alias(interaction: discord.Interaction, oc_name: st
 @app_commands.describe(oc_name="Registered OC name", tupper_name="Previously saved Tupper alias to remove")
 @app_commands.autocomplete(oc_name=timeline_cat_autocomplete)
 async def high_rank_activity_remove_alias(interaction: discord.Interaction, oc_name: str, tupper_name: str):
+    oc_name = resolve_cat_name_casefold(oc_name) or oc_name
     if not await moderator_command_check(interaction):
         return
     resolved = resolve_cat_name_casefold(oc_name)
@@ -17748,6 +17914,7 @@ async def high_rank_activity_remove_alias(interaction: discord.Interaction, oc_n
 @app_commands.describe(oc_name="Registered OC name")
 @app_commands.autocomplete(oc_name=timeline_cat_autocomplete)
 async def high_rank_activity_list_aliases(interaction: discord.Interaction, oc_name: str):
+    oc_name = resolve_cat_name_casefold(oc_name) or oc_name
     if not await moderator_command_check(interaction):
         return
     resolved = resolve_cat_name_casefold(oc_name)
@@ -18766,7 +18933,9 @@ async def clan(interaction: discord.Interaction, clan: app_commands.Choice[str])
     await safe_respond(interaction,"\n".join(lines)[:1900])
 
 @bot.tree.command(name="catinfo", description="View details about a cat")
+@app_commands.autocomplete(name=oc_all_autocomplete)
 async def catinfo(interaction: discord.Interaction, name: str):
+    name = resolve_cat_name_casefold(name) or name
     await safe_defer(interaction,)
 
     if name not in data.get("cats", {}):
@@ -18835,6 +19004,7 @@ async def catinfo(interaction: discord.Interaction, name: str):
             f"**Honour Role**: {honour_role}\n"
             + (f"**Training sessions**: {training_session_count(cat)}/{APPRENTICE_TRAINING_MINIMUM}\n"
                if cat.get("rank") == "Apprentice" else "")
+            + ("**Warrior Assessment**: Recorded — ceremony pending\n" if cat.get("rank") == "Apprentice" and _assessment_record(cat) else "")
         )
 
         if permanent_conditions:
@@ -18936,11 +19106,13 @@ feed_group = app_commands.Group(
     prey_size="Normal prey raises hunger by 1 level. Large prey raises hunger by 2 levels."
 )
 @app_commands.choices(prey_size=PREY_SIZE_CHOICES)
+@app_commands.autocomplete(name=oc_living_autocomplete)
 async def feed_cat_command(
     interaction: discord.Interaction,
     name: str,
     prey_size: app_commands.Choice[str] = None
 ):
+    name = resolve_cat_name_casefold(name) or name
     selected_prey_size = prey_size.value if prey_size else "normal"
 
     async with data_lock:
@@ -18978,10 +19150,12 @@ async def feed_cat_command(
 @app_commands.describe(
     name="The cat whose hunger should be reset"
 )
+@app_commands.autocomplete(name=oc_living_autocomplete)
 async def feed_reset_command(
     interaction: discord.Interaction,
     name: str
 ):
+    name = resolve_cat_name_casefold(name) or name
     if not await staff_command_check(interaction):
         return
 
@@ -19512,69 +19686,8 @@ async def dead(interaction: discord.Interaction, clan: app_commands.Choice[str],
 
 @bot.tree.command(name="bothelp", description="View a list of member bot commands")
 async def bothelp(interaction: discord.Interaction):
-    message = (
-        "📘 **ECHOSTONE MOUNTAIN BOT HELP** 📘\n\n"
-
-                "🐾 **General Member Commands**\n"
-        "`/catinfo [Name]` — View full details about a cat, including hunger and active role-quest bonuses\n"
-        "`/train [Cat] [Scene Link]` — Register one completed training scene for your Apprentice OC; 3 required for Warrior assessments\n"
-        "`/oclist [User]` — Publicly view a player's OCs and each living OC's hunger\n"
-        "`/ocowner [Cat]` — Find which player owns a specific OC\n"
-        "`/cats [Clan]` — View all cats by clan or all clans\n"
-        "`/clan [ClanName]` — View one clan roster\n"
-        "`/cattinder [Name] [Clan]` — Find age-appropriate romance options\n"
-        "`/question` — Random OC question prompt system\n"
-        "`/hunt` — In a designated territory channel, randomly find prey or a local threat using that location’s prey table; no location argument needed\n"
-        "`/needsmentor` — View apprentices and medicine cat apprentices who do not currently have mentors\n"
-        "`/upcomingceremonies [Clan]` — View kits, apprentices, and older warriors eligible for ceremonies or assessments, optionally filtered by Clan\n\n"
-
-        "🍽️ **Feeding / Hunger Commands**\n"
-        "`/feed cat [Name]` — Feed an OC normal prey and raise their hunger level by 1\n"
-        "`/feed cat [Name] [Large Prey]` — Feed an OC large prey and raise their hunger level by 2\n"
-        "`/feed hunger [Clan]` — Check which cats in a Clan are Starving, Hungry, or Satisfied\n"
-        "Hunger affects hunting rolls: Starving -2, Hungry -1, Satisfied no change, Full +1, Well Fed +2.\n\n"
-
-        "🌦️ **Weather / World Commands**\n"
-        "`/weather` or `/weatherreport` — View the current weekly weather report, if available.\n"
-        "`/severeweather active` — View active severe-weather events, locations, and penalties\n"
-        "`/severeweather modifier` — Check the severe-weather modifier for a specific territory/location and hunting or fishing roll\n"
-        "Severe weather rolls on Mondays at 4 PM Toronto time. Primary disaster effects last 7 days unless staff sets a different duration.\n\n"
-        "Rare ambient hazards can also occur at Frozen Falls and Toadstool Glade after recent RP activity; these only post a roll prompt and never apply injuries automatically.\n\n"
-
-        "📜 **Leadership Timeline**\n"
-        "`/timeline view [Clan]` — Browse the documented high-rank history for one Clan or all four.\n"
-        "`/timeline month [Month] [Year] [Clan]` — Look up who was Leader, Deputy, Medicine Cat, and Medicine Cat Apprentice in a specific month. Undocumented positions show as **Unknown**.\n"
-        "`/timeline cat [Cat]` — View one cat's documented leadership history.\n\n"
-
-        "📜 **Quest / Story Commands**\n"
-        "Current quests/events post on the 1st of every month at 9 AM and stay active until the next month. Hunting objectives use broad prey categories such as birds, fish, or small prey. Use `/quest progress` to see quest progress and contributors. Hunting quests use `/quest catch [Cat] [Prey]`; non-hunting quests use `/quest contribute [Cat(s)]`; multiple names can be separated with commas. An OC earns 1 Connection Token for their first contribution to a monthly quest and another if that quest succeeds. Use `/quest perks` to view the permanent badges those tokens can buy. Reminders post with 14 days, 7 days, and 3 days remaining. The pool rolls 35% hunting, 20% social, 20% herb patrol, 10% sickness/crisis, and 15% wild animal events.\n"
-        "Starting September 1, two optional role-specific quests run alongside the monthly quests, using two different role groups whenever possible. Each role cycles through all of its prompts before repeating. There is no penalty if nobody completes them. Use `/quest role` to view both. One-use Lucky Paw, Well Rested, and StarClan blessing charges are saved on `/catinfo`; staff can mark them spent with `/quest usebonus`.\n"
-        "`/gatheringreport [ClanName]` — View recent story updates, quest results, injuries, rank changes, and major events for a specific Clan.\n"
-        "`/rollhelp` — Helps calculate whether an OC caught their prey by adding the roll, prey modifier, specialty prey bonus, weather modifier, quest modifier, hunger modifier, and any other modifier against the OC’s required hunting number.\n\n"
-
-        "💭 **About /question**\n"
-        "The `/question` command randomly pulls from the OC question list. Questions can be silly personality questions, modern AU-style questions, or “most likely to” prompts.\n"
-        "It resets by calendar day using Toronto time.\n"
-        "Once all questions have been used, the list resets so questions can appear again.\n\n"
-
-        "📌 **Notes**\n"
-        "• Member commands can be used by anyone unless stated otherwise.\n"
-        "• Some commands may only work in certain channels depending on how staff set them up.\n"
-        "• If something looks wrong with a cat’s records, use `/catinfo` first to check their details.\n"
-        "• Staff commands are not listed here to keep this guide simple.\n"
-    )
-
-    if interaction.response.is_done():
-        await send_long_message(interaction.channel, message)
-    else:
-        await safe_defer(interaction,ephemeral=True)
-        await interaction.followup.send(message[:1900], ephemeral=True)
-
-        remaining = message[1900:]
-        while remaining:
-            chunk = remaining[:1900]
-            await interaction.followup.send(chunk, ephemeral=True)
-            remaining = remaining[1900:]
+    view = CodyHelpView(interaction)
+    await safe_respond(interaction, view.content, ephemeral=True, view=view, allowed_mentions=discord.AllowedMentions.none())
 
 # ─────────────────────────────
 # RUN BOT
@@ -19606,6 +19719,708 @@ for _loop_name in (
     register_loop_error_handler(_loop_name, globals()[_loop_name])
 
 
+# ─────────────────────────────
+# MEMBER DASHBOARDS, TRAINING TOOLS, AND SIMPLIFIED STAFF WORKFLOWS
+# ─────────────────────────────
+
+async def _dashboard_reply(interaction, text):
+    for chunk in split_allegiance_text(text, max_length=1850):
+        await safe_respond(interaction, chunk, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+def _dashboard_living(clan_name=None, owner=None):
+    return sorted(((name, cat) for name, cat in data.get('cats', {}).items()
+                   if not cat_is_dead(cat)
+                   and (clan_name is None or cat.get('clan') == clan_name)
+                   and (owner is None or (not cat.get('is_npc', False) and oc_owner_id(cat) == str(owner)))),
+                  key=lambda item: item[0].casefold())
+
+
+def _dashboard_health(cat):
+    # Read-only projections: existing hunger and recovery rules, without changing saved state.
+    record = copy.deepcopy(cat)
+    process_injury_recovery(record)
+    return get_hunger_status(record), format_injury(record)
+
+
+def _dashboard_needs_mentor(cat):
+    return cat.get('rank') in ('Apprentice', 'Medicine Cat Apprentice') and not cat.get('mentor')
+
+
+def _dashboard_kit_ready(cat):
+    return cat.get('clan') in CLAN_NAMES_ONLY and cat.get('rank') == 'Kit' and int(cat.get('age', 0) or 0) >= 6
+
+
+def _dashboard_elder_ready(cat):
+    return cat.get('clan') in CLAN_NAMES_ONLY and cat.get('rank') in AGING_TO_ELDER_RANKS and int(cat.get('age', 0) or 0) >= 95
+
+
+def _assessment_record(cat):
+    value = cat.get('warrior_assessment')
+    return value if isinstance(value, dict) and value.get('completed_at') else None
+
+
+def _training_summary(name, cat):
+    count = training_session_count(cat)
+    age = int(cat.get('age', 0) or 0)
+    text = f'🐾 **{name} — Training**\n**Rank:** {cat.get("rank", "Unknown")} • {age} moons\n**Sessions:** {count}/{APPRENTICE_TRAINING_MINIMUM}\n'
+    if cat_is_dead(cat) or cat.get('rank') != 'Apprentice':
+        text += 'Historical record; new sessions are only for living regular Apprentices.'
+    elif apprentice_assessment_ready(cat):
+        text += ('✅ Warrior Assessment recorded; arrange the ceremony with staff.' if _assessment_record(cat)
+                 else '⚔ Ready for a Warrior Assessment! Arrange RP or an off-screen assessment with staff.')
+    else:
+        text += f'Still needed: {max(0, APPRENTICE_TRAINING_MINIMUM-count)} training session(s), {max(0, APPRENTICE_ASSESSMENT_AGE-age)} moon(s).'
+    return text
+
+
+ASSESSMENT_TYPE_CHOICES = [app_commands.Choice(name=label, value=label) for label in ('Roleplayed', 'Off-screen')]
+
+
+async def training_history_autocomplete(interaction: discord.Interaction, current: str):
+    return _oc_choices(interaction, current, lambda c: not c.get('is_npc', False) and (
+        c.get('rank') == 'Apprentice' or training_session_count(c) or _assessment_record(c)))
+
+
+@train_group.command(name='progress', description='View an OC’s training and Warrior Assessment readiness')
+@app_commands.autocomplete(cat_name=training_history_autocomplete)
+async def training_progress(interaction: discord.Interaction, cat_name: str):
+    name = resolve_cat_name_casefold(cat_name)
+    if not name:
+        return await _dashboard_reply(interaction, '❌ OC not found.')
+    await _dashboard_reply(interaction, _training_summary(name, data['cats'][name]))
+
+
+@train_group.command(name='history', description='View numbered training sessions and saved scene links')
+@app_commands.autocomplete(cat_name=training_history_autocomplete)
+async def training_history(interaction: discord.Interaction, cat_name: str):
+    name = resolve_cat_name_casefold(cat_name)
+    if not name:
+        return await _dashboard_reply(interaction, '❌ OC not found.')
+    cat = data['cats'][name]
+    lines = [_training_summary(name, cat), '', '**Recorded sessions**']
+    sessions = cat.get('training_sessions', [])
+    for i, session in enumerate(sessions if isinstance(sessions, list) else [], 1):
+        if not isinstance(session, dict):
+            lines.append(f'{i}. Legacy training session')
+            continue
+        day = _activity_parse_datetime(session.get('date'))
+        link = session.get('scene_link')
+        lines.append(f'{i}. {session.get("training_type") or "Unspecified"} — {day.date().isoformat() if day else "Date unknown"}' + (f' • [Scene]({link})' if link else ''))
+    if not training_session_count(cat):
+        lines.append('No sessions recorded yet.')
+    assessment = _assessment_record(cat)
+    if assessment:
+        lines.append(f'\n**Assessment:** {assessment.get("method", "Recorded")} • {str(assessment.get("completed_at"))[:10]}')
+        if assessment.get('scene_link'):
+            lines.append(f'[Assessment scene]({assessment["scene_link"]})')
+    await _dashboard_reply(interaction, '\n'.join(lines))
+
+
+@train_group.command(name='remove', description='Staff: correct an accidentally recorded training session')
+@app_commands.autocomplete(cat_name=training_history_autocomplete)
+@app_commands.describe(session_number='Number shown in /train history', reason='Reason for correction')
+async def training_remove(interaction: discord.Interaction, cat_name: str, session_number: int, reason: str):
+    if not await staff_command_check(interaction):
+        return
+    await safe_defer(interaction, ephemeral=True)
+    async with data_lock:
+        name = resolve_cat_name_casefold(cat_name)
+        cat = data['cats'].get(name, {})
+        sessions = cat.get('training_sessions', [])
+        if not isinstance(sessions, list) or not 1 <= session_number <= len(sessions):
+            return await _dashboard_reply(interaction, '❌ Session not found. Use /train history for the current numbers.')
+        removed = sessions.pop(session_number-1)
+        cat.setdefault('training_corrections', []).append({'removed': removed, 'reason': reason[:500], 'by': str(interaction.user.id), 'at': datetime.now(TZ).isoformat()})
+        if len(sessions) < APPRENTICE_TRAINING_MINIMUM and cat.get('rank') == 'Apprentice' and _assessment_record(cat):
+            cat['training_corrections'][-1]['invalidated_assessment'] = cat.pop('warrior_assessment')
+        add_history(cat, f'Training session corrected by staff: {reason[:200]}')
+        await save_data_async(data)
+    await _dashboard_reply(interaction, f'✅ Removed session {session_number} from **{name}**.\n' + _training_summary(name, cat))
+
+
+@train_group.command(name='assessment', description='Staff: record a completed Warrior Assessment')
+@app_commands.autocomplete(cat_name=train_apprentice_autocomplete)
+@app_commands.choices(method=ASSESSMENT_TYPE_CHOICES)
+async def training_assessment(interaction: discord.Interaction, cat_name: str, method: app_commands.Choice[str], scene_link: str = None):
+    if not await staff_command_check(interaction):
+        return
+    if scene_link and not _valid_training_scene_link(scene_link):
+        return await _dashboard_reply(interaction, '❌ Please use a valid Discord scene link or leave it blank.')
+    await safe_defer(interaction, ephemeral=True)
+    async with data_lock:
+        name = resolve_cat_name_casefold(cat_name)
+        cat = data['cats'].get(name, {})
+        if cat.get('is_npc', False) or not apprentice_assessment_ready(cat):
+            return await _dashboard_reply(interaction, '❌ A living player Apprentice needs at least 3 training sessions and must be 11+ moons old.')
+        if _assessment_record(cat):
+            return await _dashboard_reply(interaction, 'That assessment is already recorded.')
+        cat['warrior_assessment'] = {'completed_at': datetime.now(TZ).isoformat(), 'recorded_by': str(interaction.user.id), 'method': method.value, 'scene_link': scene_link}
+        add_history(cat, f'Completed Warrior Assessment ({method.value})')
+        await save_data_async(data)
+    await _dashboard_reply(interaction, f'✅ **{name}** has completed their Warrior Assessment! Arrange their ceremony and use `/cat promote` or `/cat rank` when appropriate.')
+
+
+@train_group.command(name='ready', description='List Apprentices eligible for assessment or awaiting their ceremony')
+@app_commands.choices(clan=CLAN_ONLY_CHOICES)
+async def training_ready(interaction: discord.Interaction, clan: app_commands.Choice[str] = None):
+    rows = [(n,c) for n,c in _dashboard_living(clan.value if clan else None) if not c.get('is_npc', False) and apprentice_assessment_ready(c)]
+    lines = ['⚔ **Warrior Assessments & Ceremonies**']
+    for title, done in [('Ready for assessment', False), ('Assessment recorded — ceremony pending', True)]:
+        lines.append(f'\n**{title}**')
+        lines.extend(f'• {n} — {c.get("clan")} • {training_session_count(c)}/3' for n,c in rows if bool(_assessment_record(c)) == done)
+        if not any(bool(_assessment_record(c)) == done for _,c in rows):
+            lines.append('None currently.')
+    await _dashboard_reply(interaction, '\n'.join(lines))
+
+
+# Staff convenience commands reuse existing permission checks and rank logic.
+@cat_group.command(name='promote', description='Staff: promote a living cat after their ceremony')
+@app_commands.choices(rank=RANK_CHOICES)
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
+async def cat_promote_command(interaction: discord.Interaction, cat_name: str, rank: app_commands.Choice[str]):
+    if not await staff_command_check(interaction):
+        return
+    name = resolve_cat_name_casefold(cat_name)
+    cat = data['cats'].get(name)
+    if not cat or cat_is_dead(cat):
+        return await _dashboard_reply(interaction, '❌ Select a living OC.')
+    if rank.value == cat.get('rank'):
+        return await _dashboard_reply(interaction, 'That OC already holds this rank.')
+    if cat.get('rank') == 'Kit' and rank.value == 'Apprentice' and int(cat.get('age', 0) or 0) < 6:
+        return await _dashboard_reply(interaction, '❌ Kits must be at least 6 moons old.')
+    if cat.get('rank') == 'Apprentice' and rank.value == 'Warrior' and not cat.get('is_npc', False):
+        problem = apprentice_promotion_problem(cat)
+        if problem:
+            return await _dashboard_reply(interaction, problem)
+        if not _assessment_record(cat):
+            return await _dashboard_reply(interaction, 'Record the completed assessment with `/train assessment` before using `/cat promote` for their Warrior ceremony.')
+    await cat_rank.callback(interaction, name, rank)
+
+
+@cat_group.command(name='retire', description='Staff: step a Clan cat down to Warrior or Elder')
+@app_commands.choices(rank=[app_commands.Choice(name='Warrior (step down)', value='Warrior'), app_commands.Choice(name='Elder (retire)', value='Elder')])
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
+async def cat_retire_command(interaction: discord.Interaction, cat_name: str, rank: app_commands.Choice[str]):
+    if not await staff_command_check(interaction):
+        return
+    name = resolve_cat_name_casefold(cat_name)
+    cat = data['cats'].get(name)
+    if not cat or cat_is_dead(cat) or cat.get('clan') not in CLAN_NAMES_ONLY or cat.get('rank') in ('Kit','Apprentice','Medicine Cat Apprentice'):
+        return await _dashboard_reply(interaction, '❌ Select a living adult Clan cat.')
+    if cat.get('rank') == rank.value:
+        return await _dashboard_reply(interaction, 'That OC already holds this rank.')
+    await cat_rank.callback(interaction, name, rank)
+
+
+@cat_group.command(name='transfer', description='Staff: move a living OC to another Clan or the Outsiders')
+@app_commands.choices(new_clan=CLAN_CHOICES, new_rank=RANK_CHOICES)
+@app_commands.autocomplete(cat_name=oc_living_autocomplete)
+async def cat_transfer_command(interaction: discord.Interaction, cat_name: str, new_clan: app_commands.Choice[str], new_rank: app_commands.Choice[str] = None):
+    if not await staff_command_check(interaction):
+        return
+    name = resolve_cat_name_casefold(cat_name)
+    if not name or cat_is_dead(data['cats'][name]):
+        return await _dashboard_reply(interaction, '❌ Select a living OC.')
+    await changeclan.callback(interaction, name, new_clan, new_rank)
+
+
+def _valid_sheet_url(url):
+    return bool(re.fullmatch(r'https?://[^\s<>]+', str(url or '').strip(), flags=re.I))
+
+
+@cat_group.command(name='register', description='Staff: register an OC, player and character sheet in one step')
+@app_commands.choices(clan=CLAN_CHOICES, rank=RANK_CHOICES)
+@app_commands.autocomplete(faction=outsider_group_autocomplete)
+async def cat_register_command(interaction: discord.Interaction, name: str, age: int, clan: app_commands.Choice[str], rank: app_commands.Choice[str], user: discord.Member, character_sheet: str, faction: str = None):
+    if not await staff_command_check(interaction):
+        return
+    name = name.strip()
+    faction_value = resolve_outsider_group(faction) if faction else None
+    problem = validate_cat_rank(clan.value, rank.value, faction_value)
+    if not name or len(name) > 100 or age < 0 or user.bot or not _valid_sheet_url(character_sheet) or (faction and faction_value is None) or problem:
+        return await _dashboard_reply(interaction, problem or '❌ Provide a valid name (1–100 characters), nonnegative age, player, sheet URL, and valid faction if applicable.')
+    await safe_defer(interaction, ephemeral=True)
+    async with data_lock:
+        if resolve_cat_name_casefold(name):
+            return await _dashboard_reply(interaction, '❌ That OC already exists. Use /allegiance edit to change their link or owner.')
+        cat = {'clan':clan.value, 'rank':rank.value, 'age':age, 'faction':faction_value, 'status':'Alive', 'born_moon':max(0, data['moon']-age), 'history':[f'Moon {data["moon"]}: Added to records as {rank.value}'], 'exclude_from_tinder':False,
+               'oc_owner_id':str(user.id), 'oc_owner_name':user.display_name, 'allegiance_owner_id':str(user.id), 'allegiance_owner_name':user.display_name, 'character_sheet_url':character_sheet.strip()}
+        prepare_cat_record(name, cat)
+        data['cats'][name] = cat
+        await save_data_async(data)
+    await _dashboard_reply(interaction, f'✅ **{name}** registered as {clan.value} {rank.value}, {age} moons, owned by {user.display_name}. The allegiance board will refresh now.')
+    await refresh_allegiances_safely('/cat register')
+
+
+@allegiance_group.command(name='edit', description='Staff: change an existing OC’s sheet URL or player without re-registering')
+@app_commands.autocomplete(cat_name=oc_all_autocomplete)
+async def allegiance_edit_command(interaction: discord.Interaction, cat_name: str, character_sheet: str = None, user: discord.Member = None):
+    if not await staff_command_check(interaction):
+        return
+    if (character_sheet is None and user is None) or (character_sheet is not None and not _valid_sheet_url(character_sheet)) or (user is not None and user.bot):
+        return await _dashboard_reply(interaction, '❌ Supply a valid new sheet URL, player, or both.')
+    await safe_defer(interaction, ephemeral=True)
+    async with data_lock:
+        name = resolve_cat_name_casefold(cat_name)
+        cat = data['cats'].get(name)
+        if not cat or cat.get('is_npc', False):
+            return await _dashboard_reply(interaction, '❌ Select an existing player OC.')
+        if not allegiance_is_linked(cat):
+            return await _dashboard_reply(interaction, '❌ This OC is not linked to the allegiance board yet. Use /allegiance add first.')
+        if character_sheet is not None:
+            cat['character_sheet_url'] = character_sheet.strip()
+        if user is not None:
+            cat.update(oc_owner_id=str(user.id), allegiance_owner_id=str(user.id), oc_owner_name=user.display_name, allegiance_owner_name=user.display_name)
+        await save_data_async(data)
+    await _dashboard_reply(interaction, f'✅ Updated **{name}**. All other OC information was preserved; the allegiance board will refresh now.')
+    await refresh_allegiances_safely('/allegiance edit')
+
+
+def _dashboard_quest(clan_name):
+    quest = data.get('active_quests_v2', {}).get(clan_name)
+    if not isinstance(quest, dict):
+        return 'No active monthly quest recorded.'
+    text = f'{quest.get("title", "Monthly quest")} — {quest.get("status", "Pending")}'
+    if quest.get('category') == 'hunting':
+        progress = ensure_hunting_quest_progress(copy.deepcopy(quest))
+        if progress:
+            required, target, catches = progress
+            text += f' • {min(len(catches), required)}/{required} {target}'
+    else:
+        text += f' • {len(quest_contributor_names(quest))} contributor(s)'
+    return text
+
+
+def _dashboard_tasks(name, cat, clan_rows=None):
+    tasks = []
+    hunger, health = _dashboard_health(cat)
+    if hunger in ('Hungry', 'Starving'):
+        tasks.append('Find some prey or share a meal with a Clanmate.')
+    if health != 'Healthy':
+        tasks.append('Arrange a healer/medicine cat visit or a recovery scene.')
+    if _dashboard_needs_mentor(cat):
+        tasks.append('Ask staff or the Clan leadership about assigning a mentor.')
+    if cat.get('rank') == 'Apprentice':
+        remaining = max(0, APPRENTICE_TRAINING_MINIMUM-training_session_count(cat))
+        if remaining:
+            tasks.append(f'Arrange {remaining} more training session(s) with your mentor; try territory, hunting or battle practice.')
+        elif apprentice_assessment_ready(cat):
+            tasks.append('Arrange your Warrior ceremony with staff.' if _assessment_record(cat) else 'Arrange your Warrior Assessment with your mentor or staff.')
+    if _dashboard_kit_ready(cat):
+        tasks.append('Ask the Clan leadership about your apprentice ceremony.')
+    if _dashboard_elder_ready(cat):
+        tasks.append('Consider a retirement discussion or an elder ceremony.')
+    rows = clan_rows if clan_rows is not None else _dashboard_living(cat.get('clan'))
+    apprentices = [n for n,c in rows if c.get('mentor') == name and c.get('rank') == 'Apprentice' and training_session_count(c) < APPRENTICE_TRAINING_MINIMUM]
+    if apprentices:
+        tasks.append('Take ' + ', '.join(apprentices[:3]) + ' on a training patrol.')
+    rank = cat.get('rank')
+    rank_ideas = {'Leader':'Hold a Clan meeting or check in with the deputy.', 'Deputy':'Organize a border or hunting patrol and invite apprentices.', 'Medicine Cat':'Check in on recovering cats or organize a herb patrol.', 'Medicine Cat Apprentice':'Ask your mentor to practice herb identification.', 'Healer':'Check in on injured Clanmates or gather supplies.', 'Pathfinder':'Guide a patrol through a familiar mountain route.', 'Digger':'Inspect dens or help clear a safe path.', 'River Guardian':'Check the riverbank and teach water safety.', 'Sporekeeper':'Organize a fungal knowledge or forest patrol.', 'Preymaster':'Coordinate a hunting patrol and check which cats need food.', 'Kit':'Invite another kit to play or ask an elder to tell a story.', 'Elder':'Share a story with an apprentice or visit a friend.', 'Queen':'Invite a Clanmate to help in the nursery.', 'Den Dad':'Invite a Clanmate to help in the nursery.'}
+    if rank in rank_ideas:
+        tasks.append(rank_ideas[rank])
+    quest = data.get('active_quests_v2', {}).get(cat.get('clan'))
+    if isinstance(quest, dict) and str(quest.get('status','Pending')).casefold() in ('pending','active','in progress','ongoing') and not cat.get('is_npc',False) and rank != 'Kit':
+        tasks.append(f'Get involved in the monthly quest: {quest.get("title", "current Clan quest")} (`/quest progress`).')
+    tasks.append('Invite another character to share stories, explore a familiar location, or spend time together.')
+    return tasks
+
+
+def _dashboard_own_page(owner, page):
+    rows = _dashboard_living(owner=owner)
+    page_count = max(1, (len(rows)+5)//6)
+    page = max(0, min(page, page_count-1))
+    subset = rows[page*6:(page+1)*6]
+    lines = [f'🐾 **Your OC Dashboard** — {len(rows)} living OC(s) • Page {page+1}/{page_count}']
+    for name, cat in subset:
+        hunger, health = _dashboard_health(cat)
+        lines.append(f'\n**{name}** — {cat.get("clan", "Unknown")} {cat.get("rank", "Unknown")} • {cat.get("age", 0)} moons\n🍽 {hunger} • {health[:80]}')
+        if cat.get('rank') == 'Apprentice':
+            lines.append(f'🐾 Training: {training_session_count(cat)}/3' + (' • assessment recorded' if _assessment_record(cat) else ' • assessment ready' if apprentice_assessment_ready(cat) else ''))
+        tasks = _dashboard_tasks(name, cat)
+        lines.append(f'-# Next idea: {tasks[0][:140]}')
+    if not rows:
+        lines.append('No living OCs are linked to your Discord account yet. Ask staff to link them with /allegiance add.')
+    return '\n'.join(lines)[:1950], subset, page, page_count
+
+
+class MyOCTrainingModal(discord.ui.Modal):
+    def __init__(self, owner, name):
+        super().__init__(title="Record completed training", timeout=300)
+        self.owner, self.cat_name = str(owner), name
+        self.scene = discord.ui.TextInput(label="Discord scene link (optional)", required=False, max_length=500)
+        self.lesson = discord.ui.TextInput(label="Lesson type (optional)", placeholder="Hunting, Battle, Territory, Clan Duties, Specialty, Other", required=False, max_length=50)
+        self.add_item(self.scene)
+        self.add_item(self.lesson)
+
+    async def on_submit(self, interaction):
+        cat = data.get("cats", {}).get(self.cat_name)
+        if str(interaction.user.id) != self.owner or not cat or oc_owner_id(cat) != self.owner or cat_is_dead(cat) or cat.get("rank") != "Apprentice" or cat.get("is_npc", False):
+            return await _dashboard_reply(interaction, "This Apprentice is no longer available to your account.")
+        lesson = str(self.lesson.value or "").strip().casefold()
+        short = {"hunting":"hunting / fishing", "fishing":"hunting / fishing", "battle":"battle / defense", "defense":"battle / defense", "territory":"territory knowledge", "specialty":"specialty skills"}
+        lesson = short.get(lesson, lesson)
+        choice = next((c for c in TRAINING_TYPE_CHOICES if c.value.casefold() == lesson), None)
+        if lesson and not choice:
+            return await _dashboard_reply(interaction, "Unrecognized lesson. Use Hunting, Battle, Territory, Clan Duties, Specialty, or Other; or use `/train add` to choose from the menu.")
+        await safe_defer(interaction, ephemeral=True, thinking=True)
+        await train_command.callback(interaction, self.cat_name, str(self.scene.value or "").strip() or None, choice)
+
+
+class MyOCsView(discord.ui.View):
+    def __init__(self, owner, page=0, selected=None):
+        super().__init__(timeout=300)
+        self.owner = str(owner)
+        self.content, rows, self.page, pages = _dashboard_own_page(self.owner, page)
+        self.selected = selected if selected in [n for n,_ in rows] else (rows[0][0] if rows else None)
+        if rows:
+            menu = discord.ui.Select(placeholder='Choose an OC', options=[discord.SelectOption(label=n[:100], value=str(i), default=n==self.selected) for i,(n,_) in enumerate(rows)], row=0)
+            async def choose(interaction):
+                name = rows[int(menu.values[0])][0]
+                view = MyOCsView(self.owner, self.page, name)
+                await interaction.response.edit_message(content=view.content, view=view)
+            menu.callback = choose
+            self.add_item(menu)
+        for label, delta in [('Previous',-1),('Refresh',0),('Next',1)]:
+            button = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary, disabled=not 0<=self.page+delta<pages, row=1)
+            async def move(interaction, delta=delta):
+                view = MyOCsView(self.owner, self.page+delta, self.selected if delta==0 else None)
+                await interaction.response.edit_message(content=view.content, view=view)
+            button.callback = move
+            self.add_item(button)
+        for label, action in [('View OC','profile'),('Feed normal prey','feed'),('Training','training'),('Record training','record')]:
+            button = discord.ui.Button(label=label, style=discord.ButtonStyle.primary if action=='profile' else discord.ButtonStyle.secondary, disabled=self.selected is None or (action=='record' and data.get('cats',{}).get(self.selected,{}).get('rank')!='Apprentice'), row=2)
+            async def do(interaction, action=action):
+                name = self.selected
+                cat = data.get('cats',{}).get(name)
+                if not cat or cat_is_dead(cat) or oc_owner_id(cat)!=self.owner or cat.get('is_npc',False):
+                    return await _dashboard_reply(interaction, 'OC no longer available. Reopen /myocs.')
+                if action=='profile':
+                    await safe_defer(interaction, ephemeral=True, thinking=True)
+                    await catinfo.callback(interaction, name)
+                elif action=='feed':
+                    # Explicit button action; same feeding rules as /feed cat.
+                    await safe_defer(interaction, ephemeral=True, thinking=True)
+                    await feed_cat_command.callback(interaction, name, None)
+                elif action=='record':
+                    if cat.get('rank') != 'Apprentice':
+                        return await _dashboard_reply(interaction, 'Only living regular Apprentices can register training.')
+                    await interaction.response.send_modal(MyOCTrainingModal(self.owner, name))
+                else:
+                    await _dashboard_reply(interaction, _training_summary(name, cat)+'\nUse `/train add` or Record training after completing a scene.')
+            button.callback = do
+            self.add_item(button)
+
+    async def interaction_check(self, interaction):
+        if str(interaction.user.id) != self.owner:
+            await _dashboard_reply(interaction, 'This dashboard belongs to another member. Use /myocs for your own.')
+            return False
+        return True
+
+
+@bot.tree.command(name='myocs', description='Your personal OC dashboard: health, hunger, training and next steps')
+async def myocs_command(interaction: discord.Interaction):
+    view = MyOCsView(interaction.user.id)
+    await safe_respond(interaction, view.content, ephemeral=True, view=view, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.tree.command(name='clanstatus', description='View Clan responsibilities, available ranks, hunger and quest progress')
+@app_commands.choices(clan=CLAN_ONLY_CHOICES)
+async def clanstatus_command(interaction: discord.Interaction, clan: app_commands.Choice[str]):
+    name = clan.value
+    rows = _dashboard_living(name)
+    states = [_dashboard_health(c) for _,c in rows]
+    hungry = sum(h in ('Starving','Hungry') for h,_ in states)
+    injured = sum(health!='Healthy' for _,health in states)
+    lines = [f'🌙 **{name} Status**', f'Living cats: **{len(rows)}** • Hungry/starving: **{hungry}** • Injured/ill: **{injured}**',
+             f'Fresh-kill pile: <#{FEAST_PREY_PILE_CHANNEL_IDS[name]}> (live prey counts are not stored)', '\n**Available positions**']
+    for rank in ['Leader','Deputy','Medicine Cat','Medicine Cat Apprentice',ALLEGIANCE_UNIQUE_MIDRANK[name],'Healer','Preymaster']:
+        count = sum(c.get('rank')==rank for _,c in rows)
+        limit = ALLEGIANCE_SLOT_LIMITS[rank]
+        lines.append(f'• {rank}: {max(0,limit-count)} open ({count}/{limit} filled)')
+    lines += ['\n**Upcoming responsibilities**', f'• {sum(_dashboard_needs_mentor(c) for _,c in rows)} apprentice(s) need a mentor',
+              f'• {sum(_dashboard_kit_ready(c) for _,c in rows)} kit(s) ready for apprenticeship',
+              f'• {sum(apprentice_assessment_ready(c) and not _assessment_record(c) for _,c in rows)} ready for assessment',
+              f'• {sum(apprentice_assessment_ready(c) and bool(_assessment_record(c)) for _,c in rows)} assessment(s) recorded, ceremony pending',
+              f'• {sum(_dashboard_elder_ready(c) for _,c in rows)} eligible for elder retirement', '\n**Monthly quest**', _dashboard_quest(name), '\nUse `/needsmentor`, `/upcomingceremonies`, `/train ready` or `/quest progress` for details.']
+    await _dashboard_reply(interaction,'\n'.join(lines))
+
+
+@bot.tree.command(name='whattodo', description='Get personalized RP ideas based on your characters and Clan needs')
+@app_commands.autocomplete(cat_name=oc_owned_autocomplete)
+async def whattodo_command(interaction: discord.Interaction, cat_name: str = None):
+    rows = _dashboard_living(owner=interaction.user.id)
+    if cat_name:
+        name = resolve_cat_name_casefold(cat_name)
+        rows = [(n,c) for n,c in rows if n==name]
+    if not rows:
+        return await _dashboard_reply(interaction,'No matching living OCs are linked to you. Ask staff to link your OCs using /allegiance add.')
+    lines = ['🌿 **Looking for something to roleplay?**']
+    by_clan = {clan: _dashboard_living(clan) for clan in {c.get('clan') for _,c in rows}}
+    for name,cat in rows:
+        lines.append(f'\n**{name} — {cat.get("clan", "Unknown")}**')
+        ideas = _dashboard_tasks(name, cat, by_clan[cat.get('clan')])
+        lines.extend('• '+idea for idea in ideas[:4 if cat_name else 2])
+    await _dashboard_reply(interaction,'\n'.join(lines))
+
+
+def _staff_rank_review(guild, now):
+    high = {'Leader','Deputy','Medicine Cat','Medicine Cat Apprentice'}
+    out=[]
+    for name,cat in _high_rank_player_cats():
+        owner=oc_owner_id(cat)
+        hiatus=data.get('hiatuses',{}).get(owner,{})
+        end=_activity_parse_datetime(hiatus.get('end_date')) if isinstance(hiatus,dict) else None
+        member=guild.get_member(int(owner)) if guild and owner and owner.isdigit() else None
+        if (end and end.date()>=now.date()) or (member and member_has_role_id(member,HIATUS_ROLE_ID)):
+            continue
+        limit=14 if cat.get('rank') in high else 30
+        seen=_activity_parse_datetime(data.get('tupper_oc_activity',{}).get(name.casefold(),{}).get('last_active'))
+        if seen and seen>=now-timedelta(days=limit):
+            continue
+        label=f'{(now-seen).days} days since recorded post' if seen else 'No saved post (unverified)'
+        out.append(f'• {name} — {cat.get("rank")}, {cat.get("clan")} • {label} (review at {limit}d)')
+    return out
+
+
+@bot.tree.command(name='staffdashboard', description='Moderator+: review saved rank activity, missing OC details, ceremonies and bot health')
+async def staffdashboard_command(interaction: discord.Interaction):
+    if not await moderator_command_check(interaction):
+        return
+    now=datetime.now(TZ)
+    rows=_dashboard_living()
+    players=[(n,c) for n,c in rows if not c.get('is_npc',False)]
+    review=_staff_rank_review(interaction.guild,now)
+    missing=[f'• {n} — '+', '.join(x for x,missing in [('owner',not oc_owner_id(c)),('sheet',not c.get('character_sheet_url'))] if missing) for n,c in players if not oc_owner_id(c) or not c.get('character_sheet_url')]
+    mentors=[f'• {n} — {c.get("clan")}' for n,c in rows if _dashboard_needs_mentor(c)]
+    ceremonies=[f'• {n} — {c.get("clan")} • '+('apprentice ceremony' if _dashboard_kit_ready(c) else ('warrior ceremony' if _assessment_record(c) else 'Warrior Assessment') if apprentice_assessment_ready(c) else 'elder retirement') for n,c in rows if _dashboard_kit_ready(c) or apprentice_assessment_ready(c) or _dashboard_elder_ready(c)]
+    hiatus=[]
+    for uid,info in data.get('hiatuses',{}).items():
+        end=_activity_parse_datetime(info.get('end_date')) if isinstance(info,dict) else None
+        if end and end.date()<=now.date()+timedelta(days=7):
+            hiatus.append(f'• <@{uid}> — ends {end.date().isoformat()}')
+    vacancies=[]
+    for clan_name in CLAN_NAMES_ONLY:
+        clan_rows=[c for _,c in rows if c.get('clan')==clan_name]
+        openings=[f'{r}: {max(0,ALLEGIANCE_SLOT_LIMITS[r]-sum(c.get("rank")==r for c in clan_rows))}' for r in ['Leader','Deputy','Medicine Cat','Medicine Cat Apprentice',ALLEGIANCE_UNIQUE_MIDRANK[clan_name],'Healer','Preymaster']]
+        vacancies.append(f'• {clan_name} — '+', '.join(openings))
+    cooldown=max(0,int(_discord_unavailable_until-monotonic()))
+    lines=['🔧 **Staff Dashboard — saved data only**', f'Discord: {"backoff active (approximately "+str(cooldown)+"s remaining)" if cooldown else "no active local backoff"}', f'Last rank audit: {data.get("last_high_rank_activity_audit_date") or "Not recorded"}', f'Last member audit: {data.get("last_weekly_activity_audit_date") or "Not recorded"}', f'Pending rank report: {"Yes" if data.get("high_rank_activity_pending_report") else "No"}', 'Rank activity below is a review queue, not proof of inactivity or a warning. No Discord histories were scanned.']
+    for title, items in [('Rank activity to review',review),('Missing OC links',missing),('Mentors needed',mentors),('Upcoming ceremonies',ceremonies),('Hiatuses ending in the next week',hiatus),('Rank vacancies (open slots)',vacancies)]:
+        lines += [f'\n**{title} ({len(items)})**',*(items or ['None currently.'])]
+    await _dashboard_reply(interaction,'\n'.join(lines))
+
+
+# Help pages come from the registered command tree rather than a stale manual list.
+class CodyHelpView(discord.ui.View):
+    def __init__(self, interaction, category=None, page=0):
+        super().__init__(timeout=300)
+        self.owner=str(interaction.user.id)
+        categories=_cody_help_categories(interaction)
+        category=category if category in categories else next(iter(categories))
+        lines=categories[category]
+        pages=max(1,(len(lines)+7)//8)
+        page=max(0,min(page,pages-1))
+        self.content=f'📘 **CODY Help Centre — {category}** ({page+1}/{pages})\n\n'+'\n'.join(lines[page*8:(page+1)*8])+'\n\n-# Select a category. Staff commands still require their normal permissions and channels.'
+        menu=discord.ui.Select(placeholder='Choose a help category', options=[discord.SelectOption(label=c, value=c, default=c==category) for c in categories])
+        async def select(inter):
+            view=CodyHelpView(inter,menu.values[0])
+            await inter.response.edit_message(content=view.content,view=view)
+        menu.callback=select
+        self.add_item(menu)
+        for label,delta in [('Previous',-1),('Next',1)]:
+            button=discord.ui.Button(label=label,style=discord.ButtonStyle.secondary,disabled=not 0<=page+delta<pages,row=1)
+            async def move(inter,delta=delta):
+                view=CodyHelpView(inter,category,page+delta)
+                await inter.response.edit_message(content=view.content,view=view)
+            button.callback=move
+            self.add_item(button)
+
+    async def interaction_check(self,interaction):
+        if str(interaction.user.id)!=self.owner:
+            await _dashboard_reply(interaction,'Please open your own /bothelp menu.')
+            return False
+        return True
+
+
+def _cody_help_categories(interaction):
+    result={}
+    for command in sorted(bot.tree.walk_commands(), key=lambda c:c.qualified_name):
+        if isinstance(command,app_commands.Group):
+            continue
+        name=command.qualified_name
+        access=CODY_HELP_ACCESS.get(name,'staff')
+        if access=='staff' and not is_staff(interaction):
+            continue
+        if access=='moderator' and not is_moderator_or_above(interaction):
+            continue
+        if access=='medical' and not is_medical_staff(interaction):
+            continue
+        if access=='plot' and not (member_has_role_id(interaction.user,MODERATOR_ROLE_ID) or member_has_role_id(interaction.user,PLOT_MANAGER_ROLE_ID)):
+            continue
+        if access=='questforce' and not has_role_id(interaction, QUEST_FORCE_ROLE_ID):
+            continue
+        root=name.split()[0]
+        if access!='public':
+            category='Staff & specialist tools'
+        elif root in ('train','mentorlist','needsmentor','upcomingceremonies'):
+            category='Training & ceremonies'
+        elif root in ('hunt','feed','rollhelp'):
+            category='Hunting & feeding'
+        elif root=='quest':
+            category='Quests & rewards'
+        elif root in ('moon','timeline','weather','weatherreport','severeweather','gatheringreport','outsidergroup'):
+            category='World & lore'
+        else:
+            category='Getting started & RP'
+        result.setdefault(category,[]).append(f'`/{name}` — {command.description}')
+    order=['Getting started & RP','Hunting & feeding','Training & ceremonies','Quests & rewards','World & lore','Staff & specialist tools']
+    return {key:result[key] for key in order if result.get(key)} or {'Getting started & RP':['No commands available.']}
+
+
+CODY_HELP_ACCESS = {'activity cancel': 'staff',
+ 'activity end': 'staff',
+ 'activity list': 'staff',
+ 'activity reminder': 'staff',
+ 'activity status': 'staff',
+ 'addlitter': 'staff',
+ 'advancemoon': 'staff',
+ 'allegiance add': 'staff',
+ 'allegiance addnpc': 'staff',
+ 'allegiance edit': 'staff',
+ 'allegiance refresh': 'staff',
+ 'allegiance remove': 'staff',
+ 'bothelp': 'public',
+ 'botinfo': 'public',
+ 'cat add': 'staff',
+ 'cat adddead': 'staff',
+ 'cat age': 'staff',
+ 'cat causeofdeath': 'staff',
+ 'cat clearhistorymoon': 'staff',
+ 'cat delayceremony': 'staff',
+ 'cat delete': 'staff',
+ 'cat markdead': 'staff',
+ 'cat promote': 'staff',
+ 'cat rank': 'staff',
+ 'cat register': 'staff',
+ 'cat rename': 'staff',
+ 'cat retire': 'staff',
+ 'cat tinderhide': 'staff',
+ 'cat transfer': 'staff',
+ 'catinfo': 'public',
+ 'cattinder': 'public',
+ 'changeclan': 'staff',
+ 'clan': 'public',
+ 'clanstatus': 'public',
+ 'condition add': 'staff',
+ 'condition clear': 'staff',
+ 'condition remove': 'staff',
+ 'dead': 'public',
+ 'feast': 'moderator',
+ 'feed cat': 'public',
+ 'feed hunger': 'public',
+ 'feed reset': 'staff',
+ 'feed resetclan': 'staff',
+ 'freezecat': 'staff',
+ 'freezeuser': 'staff',
+ 'frozenlist': 'staff',
+ 'gatheringreport': 'public',
+ 'hiatus add': 'staff',
+ 'hiatus all': 'staff',
+ 'hiatus edit': 'staff',
+ 'hiatus end': 'staff',
+ 'highrankactivity alias': 'moderator',
+ 'highrankactivity aliases': 'moderator',
+ 'highrankactivity check': 'moderator',
+ 'highrankactivity removealias': 'moderator',
+ 'honour remove': 'staff',
+ 'honour role': 'staff',
+ 'honour tracker': 'staff',
+ 'hunt': 'public',
+ 'injury add': 'staff',
+ 'injury moon': 'staff',
+ 'injury remove': 'staff',
+ 'injury severity': 'staff',
+ 'medical report': 'medical',
+ 'medical treat': 'medical',
+ 'membership check': 'staff',
+ 'membership status': 'staff',
+ 'mentor assign': 'staff',
+ 'mentor previous': 'staff',
+ 'mentor remove': 'staff',
+ 'mentorlist': 'public',
+ 'moon': 'public',
+ 'moontest': 'staff',
+ 'myocs': 'public',
+ 'needsmentor': 'public',
+ 'npc add': 'staff',
+ 'npc adddead': 'staff',
+ 'npc convert': 'staff',
+ 'npc markdead': 'staff',
+ 'oclist': 'public',
+ 'ocowner': 'public',
+ 'outsidergroup add': 'staff',
+ 'outsidergroup assign': 'staff',
+ 'outsidergroup change': 'staff',
+ 'outsidergroup delete': 'staff',
+ 'outsidergroup list': 'public',
+ 'outsidergroup rename': 'staff',
+ 'plot member': 'plot',
+ 'plot remove': 'plot',
+ 'plot roster': 'plot',
+ 'prophecy pause': 'staff',
+ 'prophecy post': 'staff',
+ 'prophecy status': 'staff',
+ 'prophecy unpause': 'staff',
+ 'quest addtokens': 'moderator',
+ 'quest catch': 'public',
+ 'quest complete': 'staff',
+ 'quest contribute': 'public',
+ 'quest force': 'questforce',
+ 'quest perks': 'public',
+ 'quest progress': 'public',
+ 'quest redeemperk': 'public',
+ 'quest removeperk': 'moderator',
+ 'quest removetokens': 'moderator',
+ 'quest role': 'public',
+ 'quest rolecomplete': 'staff',
+ 'quest rolereroll': 'staff',
+ 'quest track': 'public',
+ 'quest usebonus': 'staff',
+ 'question': 'public',
+ 'relationship breakup': 'staff',
+ 'relationship clearhistory': 'staff',
+ 'relationship family': 'staff',
+ 'relationship mate': 'staff',
+ 'relationship remove': 'staff',
+ 'relationship removeall': 'staff',
+ 'resetmoon': 'staff',
+ 'resetquest': 'staff',
+ 'revertmoon': 'staff',
+ 'severeweather active': 'public',
+ 'severeweather aurora': 'staff',
+ 'severeweather effect': 'staff',
+ 'severeweather end': 'staff',
+ 'severeweather modifier': 'public',
+ 'severeweather roll': 'staff',
+ 'severeweather trigger': 'staff',
+ 'staffdashboard': 'moderator',
+ 'timeline add': 'moderator',
+ 'timeline cat': 'public',
+ 'timeline edit': 'moderator',
+ 'timeline month': 'public',
+ 'timeline remove': 'moderator',
+ 'timeline view': 'public',
+ 'train add': 'public',
+ 'train assessment': 'staff',
+ 'train history': 'public',
+ 'train progress': 'public',
+ 'train ready': 'public',
+ 'train remove': 'staff',
+ 'upcomingceremonies': 'public',
+ 'whattodo': 'public'}
+
+bot.tree.add_command(train_group)
 bot.tree.add_command(cat_group)
 bot.tree.add_command(injury_group)
 bot.tree.add_command(mentor_group)
