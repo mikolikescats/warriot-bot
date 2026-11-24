@@ -12,6 +12,8 @@ from time import monotonic
 from datetime import datetime, date, time, timedelta
 from zoneinfo import ZoneInfo
 from threading import Thread
+from types import SimpleNamespace
+from functools import lru_cache
 
 import discord
 from discord.ext import commands, tasks
@@ -38,6 +40,13 @@ DISCORD_BACKOFF_MAX_SECONDS = 3600
 DISCORD_BACKGROUND_QUIET_SECONDS = 2.5
 
 
+class DiscordCooldownError(discord.HTTPException):
+    """Local REST circuit breaker; not a new Discord failure."""
+    def __init__(self):
+        super().__init__(SimpleNamespace(status=429, reason="Local cooldown"),
+                         {"code": 0, "message": "Discord REST temporarily paused"})
+
+
 class BackgroundDiscordPaused(RuntimeError):
     """Abort an automated scan without interpreting incomplete data as inactivity."""
 
@@ -56,6 +65,10 @@ def _register_discord_outage(error):
     global _discord_unavailable_until, _discord_429_streak, _discord_last_429_at
     if not discord_service_failure(error):
         return
+    unwrapped = unwrap_command_error(error)
+    if isinstance(unwrapped, DiscordCooldownError) or getattr(unwrapped, "_cody_outage_registered", False):
+        return
+    unwrapped._cody_outage_registered = True
     now = monotonic()
     unwrapped = unwrap_command_error(error)
     status = int(getattr(unwrapped, "status", 0) or 0)
@@ -63,7 +76,7 @@ def _register_discord_outage(error):
         if now - _discord_last_429_at > 21600:
             _discord_429_streak = 0
         # A simultaneous pile-up of 429s should count as one incident.
-        if now - _discord_last_429_at > 10:
+        if not _discord_last_429_at or now - _discord_last_429_at > 10:
             _discord_429_streak = min(_discord_429_streak + 1, 5)
         _discord_last_429_at = now
         duration = min(
@@ -72,8 +85,10 @@ def _register_discord_outage(error):
         )
     else:
         duration = 90
-    duration = max(duration, min(_http_retry_after(error), 3600))
+    # Honor Discord retry instructions even when longer than our own cap.
+    duration = max(duration, _http_retry_after(error))
     _discord_unavailable_until = max(_discord_unavailable_until, now + duration)
+    print(f"Discord REST cooldown: {duration:.0f}s (HTTP {status}).")
 
 
 def discord_background_allowed():
@@ -202,7 +217,48 @@ bot = commands.Bot(
     command_prefix="!",
     intents=intents,
     tree_cls=ResponsiveCommandTree,
+    max_messages=250,  # Raw reaction events and live tracking do not need a large message cache.
 )
+
+# All bot-token REST calls share a circuit breaker, even when a feature catches
+# HTTPException internally. Interaction webhooks have their own discord.py client.
+_original_discord_rest_request = bot.http.request
+_history_rest_lock = asyncio.Lock()
+_last_history_rest = 0.0
+
+
+async def _guarded_discord_rest_request(route, *args, **kwargs):
+    global _last_history_rest
+    if discord_requests_paused():
+        raise DiscordCooldownError()
+    path = str(getattr(route, "path", ""))
+    is_history = getattr(route, "method", None) == "GET" and (
+        path.endswith("/messages") or "/threads/archived/" in path
+        or path.endswith("/threads/active")
+    )
+    async def request():
+        if discord_requests_paused():
+            raise DiscordCooldownError()
+        try:
+            return await _original_discord_rest_request(route, *args, **kwargs)
+        except discord.HTTPException as error:
+            _register_discord_outage(error)
+            if getattr(error, "status", None) == 429:
+                raise DiscordCooldownError() from None
+            raise
+    if not is_history:
+        return await request()
+    async with _history_rest_lock:
+        delay = 0.35 - (monotonic() - _last_history_rest)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        try:
+            return await request()
+        finally:
+            _last_history_rest = monotonic()
+
+
+bot.http.request = _guarded_discord_rest_request
 
 # ─────────────────────────────
 # KEEP ALIVE WEB SERVER FOR RENDER
@@ -807,17 +863,38 @@ data_lock = asyncio.Lock()
 _db_save_lock = asyncio.Lock()
 
 
+_last_saved_digest = None
+
+
 async def save_data_async(data_to_save):
-    """Move Supabase HTTP I/O off the event loop without losing write ordering.
+    """Persist real changes in order; no redundant writes or full deep copies.
 
-    Most callers already hold data_lock while applying their changes. Deep-copy
-    before releasing it so a future mutation cannot alter an in-flight save.
-    The single save lock prevents overlapping Supabase UPSERTs racing each other.
+    The serialized string is immutable; the worker owns its decoded payload.
+    Callers retain their existing data_lock and important writes remain awaited.
+    A cancelled caller cannot release the write lock while its HTTP write runs.
     """
-    snapshot = copy.deepcopy(data_to_save)
+    global _last_saved_digest
     async with _db_save_lock:
-        await asyncio.to_thread(save_data, snapshot)
+        if data_to_save is data:
+            _refresh_tupper_lookup_identity()
+        payload = json.dumps(data_to_save, ensure_ascii=False, separators=(",", ":"))
+        digest = hashlib.sha256(payload.encode("utf-8")).digest()
+        if digest == _last_saved_digest:
+            return False
+        worker = asyncio.create_task(asyncio.to_thread(_save_serialized_data, payload))
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            # The thread cannot be cancelled. Wait so a newer write cannot race it.
+            await worker
+            _last_saved_digest = digest
+            raise
+        _last_saved_digest = digest
+        return True
 
+
+def _save_serialized_data(payload):
+    save_data(json.loads(payload))
 
 
 # Shared OC autocomplete: preserve canonical names and prefer the invoking player's OCs.
@@ -1395,6 +1472,10 @@ async def increase_oc_count_role(member, reason):
 
 
 async def iter_fetch_guild_members(guild):
+    if getattr(guild, "chunked", False):
+        for member in guild.members:
+            yield member
+        return
     try:
         async for member in guild.fetch_members(limit=None):
             yield member
@@ -2067,6 +2148,8 @@ def discord_expiry_timestamp(value):
 # ─────────────────────────────
 
 allegiance_refresh_lock = asyncio.Lock()
+_allegiance_retry_needed = False
+_allegiance_retry_force = False
 
 
 def allegiance_tracker_clan(cat):
@@ -2593,7 +2676,7 @@ async def update_allegiance_channel(channel_id, text, saved_message_ids):
 
 async def refresh_all_allegiances(force=False):
     """Rebuild every managed allegiance board and edit the bot's existing messages in place."""
-    global data
+    global data, _allegiance_retry_needed, _allegiance_retry_force
     existing_map = data.get("allegiance_message_ids", {})
     if not isinstance(existing_map, dict):
         existing_map = {}
@@ -2602,28 +2685,28 @@ async def refresh_all_allegiances(force=False):
         return {"updated": 0, "errors": [], "skipped": True}
 
     async with allegiance_refresh_lock:
-        if not force and not discord_background_allowed():
-            # This function is also called directly by user commands, so only
-            # suppress work when Discord itself is in a 429 cooldown.
-            if discord_requests_paused():
-                return {"updated": 0, "unchanged": 0, "errors": [], "skipped": True}
+        if discord_requests_paused():
+            _allegiance_retry_needed = True
+            _allegiance_retry_force = _allegiance_retry_force or force
+            return {"updated": 0, "unchanged": 0, "errors": [], "skipped": True}
+        force = force or _allegiance_retry_force
         # Render all six boards from one consistent copy of the tracker. /catinfo and
         # Allegiances therefore cannot disagree because a rank/Clan edit happened
         # halfway through rendering multiple channels.
         live_data = data
-        snapshot_data = copy.deepcopy(data)
-        data = snapshot_data
-        try:
-            board_text = {
+        existing_map = live_data.get("allegiance_message_ids") or {}
+        if not isinstance(existing_map, dict):
+            existing_map = {}
+        # These renderers are read-only and contain no awaits; the event loop
+        # cannot interleave a tracker mutation while rendering them.
+        board_text = {
                 ALLEGIANCE_CHANNEL_IDS["BlizzardClan"]: build_clan_allegiance_text("BlizzardClan"),
                 ALLEGIANCE_CHANNEL_IDS["TorrentClan"]: build_clan_allegiance_text("TorrentClan"),
                 ALLEGIANCE_CHANNEL_IDS["FossilClan"]: build_clan_allegiance_text("FossilClan"),
                 ALLEGIANCE_CHANNEL_IDS["SpruceClan"]: build_clan_allegiance_text("SpruceClan"),
                 ALLEGIANCE_CHANNEL_IDS["Outsider"]: build_outsider_allegiance_text(),
                 DECEASED_ALLEGIANCE_CHANNEL_ID: build_deceased_allegiance_text()
-            }
-        finally:
-            data = live_data
+        }
 
         # Defensive validation: log linked records that could not be placed safely.
         for cat_name, cat in live_data.get("cats", {}).items():
@@ -2672,6 +2755,12 @@ async def refresh_all_allegiances(force=False):
                 data["allegiance_render_hashes"] = new_hashes
                 await save_data_async(data)
 
+        if discord_requests_paused():
+            _allegiance_retry_needed = True
+            _allegiance_retry_force = _allegiance_retry_force or force
+        else:
+            _allegiance_retry_needed = False
+            _allegiance_retry_force = False
         return {"updated": updated, "unchanged": unchanged, "errors": errors, "skipped": False}
 
 
@@ -4762,7 +4851,8 @@ def generate_prophecy(report):
 
 async def run_moon_update():
     async with data_lock:
-        snapshot = copy.deepcopy(data)
+        snapshot = copy.deepcopy({key: value for key, value in data.items()
+                                  if key != "last_moon_snapshot"})
         snapshot["last_moon_snapshot"] = None
         data["last_moon_snapshot"] = snapshot
 
@@ -5276,7 +5366,8 @@ async def moontest(interaction: discord.Interaction, target_moon: int):
 
     moons_ahead = target_moon - current_moon
 
-    preview_data = copy.deepcopy(data)
+    preview_data = copy.deepcopy({key: value for key, value in data.items()
+                                  if key != "last_moon_snapshot"})
 
     old_data = globals()["data"]
     globals()["data"] = preview_data
@@ -8147,6 +8238,8 @@ async def process_one_gathering_system(now, medicine=False):
 
 @tasks.loop(minutes=30)
 async def gathering_scheduler():
+    if discord_requests_paused():
+        return
     now = datetime.now(TZ)
     async with gathering_cycle_lock:
         await process_one_gathering_system(now, medicine=False)
@@ -8233,6 +8326,8 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
 @tasks.loop(hours=12)
 async def check_rules_onboarding():
+    if discord_requests_paused():
+        return
     guild = await get_rules_guild()
     if guild is None:
         return
@@ -9401,12 +9496,27 @@ def _parse_hunt_timestamp(value):
         return None
 
 
-async def _hunt_channel_had_recent_human_activity(channel, since):
-    async for message in channel.history(limit=100, after=since):
-        if not getattr(message.author, "bot", False):
-            return True
-    return False
+_ambient_channel_last_activity = {}
 
+
+def _remember_ambient_activity(message, *, recognized_tupper=False):
+    channel_id = getattr(getattr(message, "channel", None), "id", None)
+    if channel_id not in AMBIENT_HUNT_HAZARDS:
+        return
+    if not recognized_tupper and (getattr(message, "webhook_id", None)
+                                  or getattr(message.author, "bot", False)):
+        return
+    when = _activity_parse_datetime(getattr(message, "created_at", None))
+    if when is not None:
+        previous = _ambient_channel_last_activity.get(channel_id)
+        if previous is None or when > previous:
+            _ambient_channel_last_activity[channel_id] = when
+
+
+async def _hunt_channel_had_recent_human_activity(channel, since):
+    """Use Gateway events only, never hourly history reads."""
+    last = _ambient_channel_last_activity.get(channel.id)
+    return last is not None and last >= since
 
 # Process-local guard for ambient hazard checks. This intentionally is not
 # persisted to Supabase: recording every routine hourly check would otherwise
@@ -9439,25 +9549,8 @@ async def ambient_hunt_hazards():
         if _ambient_hazard_last_checked_memory.get(key) == hour_key:
             continue
 
-        channel = bot.get_channel(channel_id)
-        if channel is None:
-            try:
-                channel = await bot.fetch_channel(channel_id)
-            except (discord.Forbidden, discord.NotFound, discord.HTTPException) as error:
-                log_error(f'Ambient hunt hazard could not access channel {channel_id}', error)
-                continue
-
-        try:
-            recent_activity = await _hunt_channel_had_recent_human_activity(channel, since)
-        except discord.Forbidden:
-            print(f"Ambient hunt hazard needs Read Message History in channel {channel_id}.")
-            continue
-        except discord.HTTPException as error:
-            log_error(f'Ambient hunt hazard history check failed in channel {channel_id}', error)
-            continue
-        except Exception as error:
-            log_error(f'Ambient hunt hazard unexpected history error in channel {channel_id}', error)
-            continue
+        last = _ambient_channel_last_activity.get(channel_id)
+        recent_activity = last is not None and last >= since
 
         # Mark this hour as checked only in memory. No database write is needed
         # unless a hazard actually triggers.
@@ -9474,6 +9567,7 @@ async def ambient_hunt_hazards():
             continue
 
         try:
+            channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
             await channel.send(
                 hazard["message"],
                 allowed_mentions=discord.AllowedMentions.none()
@@ -9505,9 +9599,32 @@ _startup_boards_refreshed = False
 
 
 @bot.event
+async def on_disconnect():
+    global _high_rank_scan_progress, _gateway_activity_generation, _gateway_activity_coverage_since
+    _gateway_activity_generation += 1
+    _gateway_activity_coverage_since = None
+    _high_rank_scan_progress = None
+    _ambient_channel_last_activity.clear()
+
+
+@bot.event
+async def on_resumed():
+    global _gateway_activity_coverage_since
+    _gateway_activity_coverage_since = datetime.now(TZ)
+
+
+@bot.event
 async def on_ready():
-    global _slash_commands_synced, _startup_boards_refreshed
+    global _slash_commands_synced, _startup_boards_refreshed, _gateway_activity_coverage_since
+    if _gateway_activity_coverage_since is None:
+        _gateway_activity_coverage_since = datetime.now(TZ)
     print(f"Logged in as {bot.user}")
+    _refresh_tupper_lookup_identity()
+    if data.get("tupper_scan_coverage_version") != 2:
+        async with data_lock:
+            data["tupper_oc_verified_inactive_through"] = {}
+            data["tupper_scan_coverage_version"] = 2
+            await save_data_async(data)
 
     if not _slash_commands_synced and not discord_requests_paused():
         try:
@@ -9586,6 +9703,9 @@ async def on_ready():
     if not ambient_hunt_hazards.is_running():
         ambient_hunt_hazards.start()
 
+    if not retry_deferred_discord_work.is_running():
+        retry_deferred_discord_work.start()
+
     if _startup_boards_refreshed or not discord_background_allowed():
         return
     boards_ok = True
@@ -9603,12 +9723,35 @@ async def on_ready():
     # reconcile them again on every restart without creating duplicate legacy boards.
     if data.get("allegiance_message_ids"):
         result = await refresh_allegiances_safely("bot startup")
-        if result.get("errors"):
+        if result.get("errors") or result.get("skipped"):
             boards_ok = False
-            print(f"Allegiance startup refresh had {len(result['errors'])} error(s).")
+            print(f"Allegiance startup refresh had {len(result['errors'])} error(s) or was deferred.")
         else:
             print("Allegiance boards are up to date.")
     _startup_boards_refreshed = boards_ok
+
+
+@tasks.loop(minutes=5)
+async def retry_deferred_discord_work():
+    """Retry only previously deferred work; healthy idle ticks make no REST calls."""
+    global _slash_commands_synced, _startup_boards_refreshed
+    if not discord_background_allowed():
+        return
+    if not _slash_commands_synced:
+        try:
+            synced = await bot.tree.sync()
+            _slash_commands_synced = True
+            print(f"Synced {len(synced)} slash command(s) after retry")
+        except Exception as error:
+            log_error("Slash command sync retry failed", error)
+            return
+    if _allegiance_retry_needed and discord_background_allowed():
+        await refresh_allegiances_safely("deferred Discord work", force=_allegiance_retry_force)
+
+
+@retry_deferred_discord_work.before_loop
+async def before_retry_deferred_discord_work():
+    await bot.wait_until_ready()
 
 
 @bot.event
@@ -17388,6 +17531,11 @@ _high_rank_audit_lock = asyncio.Lock()
 
 
 def _tupper_oc_key(name):
+    return _cached_tupper_oc_key(str(name or ""))
+
+
+@lru_cache(maxsize=2048)
+def _cached_tupper_oc_key(name):
     # Discord's "APP" badge is UI metadata, not part of the webhook username;
     # accept a literal suffix too, if someone copied it into their Tupper name.
     cleaned = str(name or "").strip().replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
@@ -17408,6 +17556,11 @@ def _tupper_message_oc_name(message):
 
 
 def _tupper_normalized_key(value):
+    return _cached_tupper_normalized_key(str(value or ""))
+
+
+@lru_cache(maxsize=2048)
+def _cached_tupper_normalized_key(value):
     """Fold decorative lettering, symbols and emoji to compare *whole* OC names.
 
     Unicode NFKC handles mathematical/fancy fonts and fullwidth characters.
@@ -17429,7 +17582,7 @@ def _tupper_registered_aliases(cat):
     return [str(alias).strip() for alias in values if isinstance(alias, str) and alias.strip()]
 
 
-def _build_tupper_oc_lookup():
+def _make_tupper_oc_lookup():
     """Create exact and decorated-name maps from the *current* OC database.
 
     Store sets so ambiguous normalized names are never attributed to an OC.
@@ -17449,6 +17602,57 @@ def _build_tupper_oc_lookup():
             if folded:
                 normalized.setdefault(folded, set()).add(canonical_key)
     return exact, normalized
+
+
+_tupper_lookup_cache = None
+_tupper_identity = None
+_tupper_lookup_cats_id = None
+_tupper_canonical_names = {}
+_high_rank_scan_progress = None
+_activity_scan_lock = asyncio.Lock()
+_gateway_activity_generation = 0
+_gateway_activity_coverage_since = None
+
+
+def _refresh_tupper_lookup_identity():
+    """O(number of OCs) only on persistence, not for every webhook post."""
+    global _tupper_identity, _tupper_lookup_cache, _tupper_lookup_cats_id
+    global _tupper_canonical_names, _high_rank_scan_progress
+    cats = data.get("cats", {})
+    signature = tuple((name, bool(cat.get("is_npc", False)), tuple(_tupper_registered_aliases(cat)))
+                      for name, cat in cats.items() if isinstance(cat, dict))
+    if _tupper_identity != signature or _tupper_lookup_cats_id != id(cats):
+        previous = _tupper_identity
+        previous_lookup = _tupper_lookup_cache
+        _tupper_identity = signature
+        _tupper_lookup_cats_id = id(cats)
+        _tupper_lookup_cache = _make_tupper_oc_lookup()
+        _tupper_canonical_names = {name.casefold(): name for name in cats}
+        _high_rank_scan_progress = None
+        if previous is not None and previous_lookup is not None and previous != signature:
+            affected = set()
+            for old_map, new_map in zip(previous_lookup, _tupper_lookup_cache):
+                for key in old_map.keys() | new_map.keys():
+                    before, after = old_map.get(key, set()), new_map.get(key, set())
+                    if before != after:
+                        affected.update(before | after)
+            verified = data.setdefault("tupper_oc_verified_inactive_through", {})
+            for key in affected:
+                verified.pop(key, None)
+    return _tupper_lookup_cache
+
+
+def _build_tupper_oc_lookup():
+    if _tupper_lookup_cache is None or _tupper_lookup_cats_id != id(data.get("cats", {})):
+        return _refresh_tupper_lookup_identity()
+    return _tupper_lookup_cache
+
+
+def _tupper_canonical_name(key):
+    if not key:
+        return None
+    _build_tupper_oc_lookup()
+    return _tupper_canonical_names.get(key)
 
 
 def _resolve_tupper_oc_key(raw_name, lookup=None):
@@ -17503,9 +17707,9 @@ def _high_rank_player_cats():
     return sorted(rows, key=lambda item: (str(item[1].get("clan")), str(item[1].get("rank")), item[0].casefold()))
 
 
-def _record_tupper_oc_activity(message, *, now_cutoff=None):
+def _record_tupper_oc_activity(message, *, now_cutoff=None, resolved_key=None):
     """Update an OC's saved last in-character proxy post, without parsing content."""
-    key = _resolve_tupper_oc_key(_tupper_message_oc_name(message))
+    key = resolved_key if resolved_key is not None else _resolve_tupper_oc_key(_tupper_message_oc_name(message))
     if not key:
         return False
     posted_at = _activity_parse_datetime(getattr(message, "created_at", None))
@@ -17520,25 +17724,26 @@ def _record_tupper_oc_activity(message, *, now_cutoff=None):
     return True
 
 
-async def _scan_high_rank_messageable(channel, cutoff, wanted_keys, results, lookup=None, *, foreground=False):
-    """Scan complete recent history in bounded REST pages; never infer from errors."""
-    before = None
+async def _scan_high_rank_messageable(channel, cutoff, wanted_keys, results, lookup=None, *, foreground=False, progress=None):
+    """Bounded pages, resumable cursor; never treat a failed read as inactivity."""
+    cursors = progress["cursors"] if progress is not None else {}
+    before = discord.Object(id=cursors[channel.id]) if channel.id in cursors else None
     try:
         while wanted_keys and not wanted_keys.issubset(results):
             await wait_for_background_turn(foreground=foreground)
-            page = []
-            async for message in channel.history(
+            if progress is not None:
+                if progress["pages_left"] <= 0:
+                    raise BackgroundDiscordPaused("Activity scan page budget reached; will resume.")
+                progress["pages_left"] -= 1
+            page = [message async for message in channel.history(
                 limit=100, after=cutoff, before=before, oldest_first=False
-            ):
-                page.append(message)
-            if not page:
-                break
+            )]
             for message in page:
                 key = _resolve_tupper_oc_key(_tupper_message_oc_name(message), lookup)
                 if key not in wanted_keys:
                     continue
                 when = _activity_parse_datetime(getattr(message, "created_at", None))
-                if when is None:
+                if when is None or when < cutoff:
                     continue
                 previous = results.get(key)
                 if previous is None or when > previous[0]:
@@ -17546,10 +17751,11 @@ async def _scan_high_rank_messageable(channel, cutoff, wanted_keys, results, loo
             if len(page) < 100:
                 break
             before = discord.Object(id=page[-1].id)
+            cursors[channel.id] = page[-1].id
             await asyncio.sleep(0.18)
     except discord.NotFound:
-        return
-
+        pass
+    cursors.pop(channel.id, None)
 
 def _recent_activity_possible(channel, cutoff):
     """Skip known-old channels without hitting Discord's history endpoint."""
@@ -17565,83 +17771,110 @@ def _recent_activity_possible(channel, cutoff):
 
 
 async def _scan_high_rank_history(guild, cutoff, wanted_keys, *, foreground=False):
-    """Reconcile only missing OCs; stop early if everyone has a matching post.
+    """Resume unfinished channels and archive parents across automatic retries.
 
-    Live Tupperbox sightings are continuously recorded by on_message. Normally
-    most high/mid ranks require no history scan at all. Archived threads are only
-    searched when at least one missing character still needs verification.
+    The live gateway covers messages arriving after already-scanned channels.
+    Any gateway disconnect or changed identity invalidates the checkpoint.
+    A report is only produced after a complete search or positive evidence
+    for every requested OC. Nothing incomplete is saved as inactivity.
     """
-    latest = {}
+    global _high_rank_scan_progress
     if not wanted_keys:
-        return latest
-    lookup = _build_tupper_oc_lookup()
-    scanned = set()
-    channels = (
-        list(getattr(guild, "text_channels", []))
-        + list(getattr(guild, "voice_channels", []))
-        + list(getattr(guild, "stage_channels", []))
-    )
-    for channel in channels:
-        if wanted_keys.issubset(latest):
-            return latest
-        if channel.id in scanned or not callable(getattr(channel, "history", None)):
-            continue
-        scanned.add(channel.id)
-        if not _recent_activity_possible(channel, cutoff):
-            continue
-        await _scan_high_rank_messageable(
-            channel, cutoff, wanted_keys, latest, lookup, foreground=foreground
-        )
-        await asyncio.sleep(0.22)
+        return {}
+    if _activity_scan_lock.locked():
+        raise BackgroundDiscordPaused("Another activity history scan is running.")
+    async with _activity_scan_lock:
+        lookup = _build_tupper_oc_lookup()
+        now = datetime.now(TZ)
+        progress = _high_rank_scan_progress
+        if (not progress or progress["generation"] != _gateway_activity_generation
+                or progress["identity"] != _tupper_identity
+                or progress["cutoff"] > cutoff
+                or not wanted_keys.issubset(progress["wanted"])
+                or any(when < cutoff for key, (when, _) in progress["latest"].items() if key in wanted_keys)
+                or now - progress["started"] > timedelta(hours=4)):
+            progress = {"generation": _gateway_activity_generation, "identity": _tupper_identity,
+                        "cutoff": cutoff, "started": now, "wanted": set(wanted_keys),
+                        "latest": {}, "scanned": set(), "archives": set(), "cursors": {},
+                        "active_threads": None}
+            _high_rank_scan_progress = progress
+        # A manual check gets a larger budget, but it also resumes on interruption.
+        progress["pages_left"] = 400 if foreground else 180
+        latest, scanned = progress["latest"], progress["scanned"]
 
-    threads = list(getattr(guild, "threads", []))
-    # One active-thread directory request per weekly audit catches threads that
-    # have not reached the Gateway cache (and protects against false warnings).
-    fetch_active = getattr(guild, "active_threads", None)
-    if callable(fetch_active):
-        await wait_for_background_turn(foreground=foreground)
-        threads.extend(await fetch_active())
-    for thread in threads:
-        if wanted_keys.issubset(latest):
-            return latest
-        if thread.id in scanned:
-            continue
-        scanned.add(thread.id)
-        if not _recent_activity_possible(thread, cutoff):
-            continue
-        await _scan_high_rank_messageable(
-            thread, cutoff, wanted_keys, latest, lookup, foreground=foreground
-        )
-        await asyncio.sleep(0.18)
+        def check_valid():
+            if (_high_rank_scan_progress is not progress
+                    or progress["generation"] != _gateway_activity_generation
+                    or progress["identity"] != _tupper_identity):
+                raise BackgroundDiscordPaused("Activity coverage changed; restart safely.")
 
-    parents = list(getattr(guild, "text_channels", [])) + list(getattr(guild, "forum_channels", []))
-    for parent in parents:
-        if wanted_keys.issubset(latest):
-            return latest
-        archived = getattr(parent, "archived_threads", None)
-        if not callable(archived):
-            continue
-        modes = [False, True] if isinstance(parent, discord.TextChannel) else [False]
-        for private in modes:
-            await wait_for_background_turn(foreground=foreground)
-            kwargs = {"limit": None}
-            if isinstance(parent, discord.TextChannel):
-                kwargs["private"] = private
-            async for thread in archived(**kwargs):
-                if wanted_keys.issubset(latest):
-                    return latest
-                archive_at = _activity_parse_datetime(getattr(thread, "archive_timestamp", None))
-                if archive_at is not None and archive_at < cutoff:
+        async def scan(channel):
+            check_valid()
+            if channel.id in scanned or not callable(getattr(channel, "history", None)):
+                return
+            await _scan_high_rank_messageable(channel, progress["cutoff"], wanted_keys,
+                                            latest, lookup, foreground=foreground, progress=progress)
+            check_valid()
+            scanned.add(channel.id)
+
+        def done():
+            check_valid()
+            return wanted_keys.issubset(latest)
+
+        channels = (list(getattr(guild, "text_channels", []))
+                    + list(getattr(guild, "voice_channels", []))
+                    + list(getattr(guild, "stage_channels", [])))
+        for channel in channels:
+            if done():
+                break
+            await scan(channel)
+        if not done():
+            threads = list(getattr(guild, "threads", []))
+            if progress["active_threads"] is None:
+                fetch_active = getattr(guild, "active_threads", None)
+                await wait_for_background_turn(foreground=foreground)
+                progress["active_threads"] = list(await fetch_active()) if callable(fetch_active) else []
+            threads.extend(progress["active_threads"])
+            for thread in threads:
+                if done():
                     break
-                if thread.id in scanned:
+                await scan(thread)
+        if not done():
+            parents = list(getattr(guild, "text_channels", [])) + list(getattr(guild, "forum_channels", []))
+            for parent in parents:
+                if done():
+                    break
+                archived = getattr(parent, "archived_threads", None)
+                if not callable(archived):
                     continue
-                scanned.add(thread.id)
-                await _scan_high_rank_messageable(
-                    thread, cutoff, wanted_keys, latest, lookup, foreground=foreground
-                )
-                await asyncio.sleep(0.2)
-    return latest
-
+                modes = [False, True] if isinstance(parent, discord.TextChannel) else [False]
+                for private in modes:
+                    if done():
+                        break
+                    parent_key = (parent.id, private)
+                    if parent_key in progress["archives"]:
+                        continue
+                    await wait_for_background_turn(foreground=foreground)
+                    kwargs = {"limit": None}
+                    if isinstance(parent, discord.TextChannel):
+                        kwargs["private"] = private
+                    try:
+                        async for thread in archived(**kwargs):
+                            if done():
+                                break
+                            archive_at = _activity_parse_datetime(getattr(thread, "archive_timestamp", None))
+                            if archive_at is not None and archive_at < progress["cutoff"]:
+                                break
+                            await scan(thread)
+                    except discord.NotFound:
+                        pass
+                    progress["archives"].add(parent_key)
+        check_valid()
+        # Keep only sightings in the current window. The checkpoint is consumed.
+        result = {key: (when, url) for key, (when, url) in latest.items()
+                  if key in wanted_keys and when >= cutoff}
+        _high_rank_scan_progress = None
+        return result
 
 def _high_rank_inactive_rows(rows, cutoff):
     """Build an audit snapshot from successful scans + saved live sightings."""
@@ -17725,6 +17958,8 @@ async def _deliver_high_rank_pending_report(report):
     thread = await _high_rank_activity_thread()
     mentions = discord.AllowedMentions(everyone=False, users=False, roles=[discord.Object(id=MODERATOR_ROLE_ID)])
     while int(report.get("next_chunk", 0)) < len(chunks):
+        if discord_requests_paused():
+            return False
         index = int(report["next_chunk"])
         message = await thread.send(chunks[index], allowed_mentions=mentions)
         async with data_lock:
@@ -17756,6 +17991,9 @@ async def run_high_rank_activity_check(*, manual=False):
         guild = await get_rules_guild()
         if guild is None or guild.id != GUILD_ID:
             raise RuntimeError("The Echostone Mountain server was not found.")
+        _build_tupper_oc_lookup()
+        audit_identity = _tupper_identity
+        audit_generation = _gateway_activity_generation
         rows = _high_rank_player_cats()
         cutoff = now - timedelta(days=HIGH_RANK_ACTIVITY_LOOKBACK_DAYS)
         # Only search Discord for missing sightings; live Tupperbox messages
@@ -17770,10 +18008,19 @@ async def run_high_rank_activity_check(*, manual=False):
         # Their older history was already searched, so only newer messages
         # need to be scanned. New/renamed/alias-corrected OCs use 14 full days.
         verified = data.get("tupper_oc_verified_inactive_through") or {}
+        # A complete earlier scan plus uninterrupted live Gateway tracking
+        # covers the window without any Discord history calls. Manual checks
+        # deliberately still search, and new names/aliases invalidate coverage.
+        if not manual and _gateway_activity_coverage_since is not None:
+            wanted = {key for key in wanted if not (
+                (previous := _activity_parse_datetime(verified.get(key))) is not None
+                and previous >= _gateway_activity_coverage_since
+                and previous > cutoff
+            )}
         per_cat_start = []
         for key in wanted:
             previous = _activity_parse_datetime(verified.get(key))
-            if previous is not None and previous > cutoff:
+            if not manual and previous is not None and previous > cutoff:
                 per_cat_start.append(max(cutoff, previous - timedelta(minutes=5)))
             else:
                 per_cat_start.append(cutoff)
@@ -17781,8 +18028,13 @@ async def run_high_rank_activity_check(*, manual=False):
         found = await _scan_high_rank_history(
             guild, search_after, wanted, foreground=manual
         ) if wanted else {}
-        # Only write history sightings if the entire 14-day scan completed.
+        # Only write history sightings if the entire required history scan
+        # completed and the identity/Gateway evidence is still valid.
         async with data_lock:
+            if audit_generation != _gateway_activity_generation or audit_identity != _tupper_identity:
+                raise BackgroundDiscordPaused("Activity evidence changed before report; retry safely.")
+            current_rows = dict(_high_rank_player_cats())
+            rows = [(name, current_rows[name]) for name, _ in rows if name in current_rows]
             storage = data.setdefault("tupper_oc_activity", {})
             for key, (seen, jump_url) in found.items():
                 old = storage.get(key, {})
@@ -17796,7 +18048,9 @@ async def run_high_rank_activity_check(*, manual=False):
             verified_storage = data.setdefault("tupper_oc_verified_inactive_through", {})
             for item in missing:
                 key = item["name"].casefold()
-                if key in wanted:
+                if key in wanted or (not manual and key in verified
+                                     and _gateway_activity_coverage_since is not None
+                                     and (_activity_parse_datetime(verified.get(key)) or datetime.min.replace(tzinfo=TZ)) >= _gateway_activity_coverage_since):
                     verified_storage[key] = now.isoformat()
             report = {
                 "date": date_key,
@@ -17825,9 +18079,12 @@ async def high_rank_activity_command(interaction: discord.Interaction):
     if not await moderator_command_check(interaction):
         return
     await safe_defer(interaction,ephemeral=True)
+    if _high_rank_audit_lock.locked() or _activity_scan_lock.locked():
+        await safe_respond(interaction, "An activity scan is already running; please try again after it finishes.", ephemeral=True)
+        return
     try:
         result = await run_high_rank_activity_check(manual=True)
-    except (discord.HTTPException, OSError, asyncio.TimeoutError) as error:
+    except (discord.HTTPException, OSError, asyncio.TimeoutError, BackgroundDiscordPaused) as error:
         log_error("Manual high-rank activity audit failed", error)
         result = "⚠️ Activity history couldn't be scanned completely; no unverified inactivity notice was posted."
     except Exception as error:
@@ -18033,7 +18290,7 @@ async def _scan_activity_messageable(messageable, cutoff, latest_by_user, monito
                     continue
                 if getattr(message, "webhook_id", None):
                     oc_key = _resolve_tupper_oc_key(_tupper_message_oc_name(message), tupper_lookup)
-                    resolved = resolve_cat_name_casefold(oc_key) if oc_key else None
+                    resolved = _tupper_canonical_name(oc_key)
                     owner_cat = data.get("cats", {}).get(resolved) if resolved else None
                     if not owner_cat or bool(owner_cat.get("is_npc", False)):
                         continue
@@ -18061,6 +18318,13 @@ async def _scan_activity_messageable(messageable, cutoff, latest_by_user, monito
 
 
 async def backfill_activity_history(guild):
+    if _activity_scan_lock.locked():
+        return False
+    async with _activity_scan_lock:
+        return await _backfill_activity_history(guild)
+
+
+async def _backfill_activity_history(guild):
     """One resumable recent-history scan; subsequent audits use live timestamps."""
     global _activity_backfill_in_progress, _activity_tracking_dirty
     if _activity_backfill_in_progress or not discord_background_allowed():
@@ -18090,16 +18354,17 @@ async def backfill_activity_history(guild):
                 + list(getattr(guild, "voice_channels", []))
                 + list(getattr(guild, "stage_channels", []))
             )
-            for channel in channels:
+            for channel in channels if monitored_ids else []:
                 if channel.id in scanned_ids or not callable(getattr(channel, "history", None)):
                     continue
                 await _scan_activity_messageable(channel, cutoff, latest_by_user, monitored_ids)
                 scanned_ids.add(channel.id)
                 await asyncio.sleep(0.15)
 
-            active_threads = list(getattr(guild, "threads", []))
-            fetch_active = getattr(guild, "active_threads", None)
+            active_threads = list(getattr(guild, "threads", [])) if monitored_ids else []
+            fetch_active = getattr(guild, "active_threads", None) if monitored_ids else None
             if callable(fetch_active):
+                await wait_for_background_turn()
                 active_threads.extend(await fetch_active())
             for thread in active_threads:
                 if thread.id in scanned_ids:
@@ -18109,7 +18374,7 @@ async def backfill_activity_history(guild):
                 await asyncio.sleep(0.10)
 
             parents = list(getattr(guild, "text_channels", [])) + list(getattr(guild, "forum_channels", []))
-            for parent in parents:
+            for parent in parents if monitored_ids else []:
                 archived_threads = getattr(parent, "archived_threads", None)
                 if not callable(archived_threads):
                     continue
@@ -18124,7 +18389,9 @@ async def backfill_activity_history(guild):
                     if isinstance(parent, discord.TextChannel):
                         kwargs["private"] = private
                     try:
+                        await wait_for_background_turn()
                         async for thread in archived_threads(**kwargs):
+                            await wait_for_background_turn()
                             archive_timestamp = _activity_parse_datetime(getattr(thread, "archive_timestamp", None))
                             if archive_timestamp is not None and archive_timestamp < cutoff:
                                 break
@@ -18178,17 +18445,18 @@ async def on_message(message: discord.Message):
         # Tupperbox's Discord author is a webhook rather than the real member.
         # Use the saved OC ownership to credit the member's Wednesday activity
         # tracker too, so active roleplayers are not warned as inactive.
-        oc_key = _resolve_tupper_oc_key(_tupper_message_oc_name(message))
-        resolved = resolve_cat_name_casefold(oc_key) if oc_key else None
-        owner_cat = data.get("cats", {}).get(resolved) if resolved else None
-        member = None
-        if owner_cat and not bool(owner_cat.get("is_npc", False)):
-            owner_id = oc_owner_id(owner_cat)
-            if owner_id and owner_id.isdigit():
-                member = message.guild.get_member(int(owner_id))
         created_at = _activity_parse_datetime(message.created_at)
         async with data_lock:
-            if _record_tupper_oc_activity(message):
+            oc_key = _resolve_tupper_oc_key(_tupper_message_oc_name(message))
+            _remember_ambient_activity(message, recognized_tupper=bool(oc_key))
+            resolved = _tupper_canonical_name(oc_key)
+            owner_cat = data.get("cats", {}).get(resolved) if resolved else None
+            member = None
+            if owner_cat and not bool(owner_cat.get("is_npc", False)):
+                owner_id = oc_owner_id(owner_cat)
+                if owner_id and owner_id.isdigit():
+                    member = message.guild.get_member(int(owner_id))
+            if oc_key and _record_tupper_oc_activity(message, resolved_key=oc_key):
                 _activity_tracking_dirty = True
             if created_at and _activity_member_is_monitored(member):
                 record = data.setdefault("activity_tracking", {}).setdefault(str(member.id), {})
@@ -18203,6 +18471,7 @@ async def on_message(message: discord.Message):
         return
     if getattr(message.author, "bot", False):
         return
+    _remember_ambient_activity(message)
     member = message.author
     if not _activity_member_is_monitored(member):
         member = message.guild.get_member(message.author.id)
@@ -18319,6 +18588,7 @@ async def _activity_deliver_mod_report(report):
         if channel is None:
             return False
         while report["next_chunk"] < len(report["chunks"]):
+            await wait_for_background_turn()
             index = report["next_chunk"]
             message = await channel.send(
                 report["chunks"][index],
@@ -18329,7 +18599,7 @@ async def _activity_deliver_mod_report(report):
             await _activity_checkpoint_mod_report(report, message)
         if not report.get("completed_at"):
             await _activity_checkpoint_mod_report(report)
-    except (discord.HTTPException, OSError, asyncio.TimeoutError) as error:
+    except (discord.HTTPException, OSError, asyncio.TimeoutError, BackgroundDiscordPaused) as error:
         log_error("Weekly moderator inactivity report failed; will retry", error)
         return False
     return True
@@ -18464,6 +18734,8 @@ def format_warning_history(summary):
 
 @tasks.loop(minutes=30)
 async def check_activity_reminders():
+    if discord_requests_paused():
+        return
     now = datetime.now(TZ)
     due_reminders = []
 
@@ -18845,6 +19117,8 @@ async def membership_status(interaction: discord.Interaction, user_id: str):
 
 @tasks.loop(time=time(hour=0, minute=0, tzinfo=TZ))
 async def monthly_moon():
+    while discord_requests_paused():
+        await asyncio.sleep(min(60, max(1, _discord_unavailable_until - monotonic())))
     now = datetime.now(TZ)
     this_month = f"{now.year}-{now.month:02d}"
 
@@ -19707,6 +19981,7 @@ def register_loop_error_handler(name, task_loop):
             # exception so asyncio does not later print the same full HTML body.
             task.add_done_callback(consume_background_task_result)
     task_loop.error(handle_error)
+    task_loop.add_exception_type(DiscordCooldownError)
 
 
 for _loop_name in (
@@ -19714,7 +19989,7 @@ for _loop_name in (
     "weekly_weather_report", "severe_weather_report", "quest_reminders",
     "monthly_quest_report", "check_hiatuses", "check_membership_milestones",
     "flush_activity_tracking", "weekly_activity_audit", "high_rank_activity_audit", "check_activity_reminders",
-    "monthly_moon",
+    "monthly_moon", "retry_deferred_discord_work",
 ):
     register_loop_error_handler(_loop_name, globals()[_loop_name])
 
